@@ -205,14 +205,23 @@ class BatchedTree:
 
         # Destination slot = num_nodes + position among admitted children.
         pos = (admitted.long().cumsum(1) - 1).clamp_min(0)
-        slot = (self.num_nodes.unsqueeze(1) + pos).clamp(max=self.capacity - 1)
+        slot = self.num_nodes.unsqueeze(1) + pos
+
+        # Non-admitted children share a slot with a real child (cumsum does not advance
+        # for them), so scattering them -- even "writing back the current value" -- races
+        # against the genuine write and can blank a real node. Route every rejected
+        # child to a single trash row instead, so admitted writes have unique indices.
+        rows = b * self.capacity
+        batch_idx = torch.arange(b, device=slot.device).view(b, 1).expand(b, flat)
+        linear = batch_idx * self.capacity + slot.clamp(max=self.capacity - 1)
+        linear = torch.where(admitted, linear, torch.full_like(linear, rows)).reshape(-1)
 
         def _scatter(dst: torch.Tensor, src: torch.Tensor) -> None:
-            src = src.reshape(b, flat, *dst.shape[2:])
-            idx = slot.view(b, flat, *([1] * (dst.dim() - 2))).expand_as(src)
-            mask = admitted.view(b, flat, *([1] * (dst.dim() - 2))).expand_as(src)
-            current = torch.gather(dst, 1, idx)
-            dst.scatter_(1, idx, torch.where(mask, src.to(dst.dtype), current))
+            tail = dst.shape[2:]
+            flat_dst = dst.reshape(rows, *tail)
+            extended = torch.cat([flat_dst, flat_dst.new_zeros(1, *tail)], dim=0)
+            extended[linear] = src.reshape(b * flat, *tail).to(dst.dtype)
+            dst.copy_(extended[:rows].view_as(dst))
 
         _scatter(self.latent, child["latent"])
         _scatter(self.q, child["q"])

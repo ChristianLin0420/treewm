@@ -118,6 +118,33 @@ def test_every_arm_generates_under_autocast(arm):
     assert tree.keep_score.dtype == torch.float32
 
 
+@pytest.mark.parametrize("arm", ["treewm", "fixedtreewm", "singlewm", "flatkwm"])
+def test_every_node_carries_an_executable_action_chunk(arm):
+    """Regression: no valid non-root node may have an empty action chunk.
+
+    Rejected children (padding from a partially-valid expansion batch) used to land on
+    the same destination slot as a genuine child, and the duplicate scatter blanked real
+    nodes. The planner then found a zero-length chunk, executed a single primitive
+    action, and replanned ~415 times per 500-step episode instead of ~31.
+    """
+    model = build_model(arm, SMALL, k_max=32).eval()
+    cfg = tree_config_for(arm, TreeConfig(node_budget=48, expansion_batch_size=4, branch_factor=4,
+                                          max_depth=48), model)
+    with torch.no_grad():
+        tree, _ = model.generate(torch.randn(3, SMALL.z_dim), cfg)
+
+    non_root = tree.valid.clone()
+    non_root[:, 0] = False
+    lengths = tree.action_mask.sum(-1)
+    assert (lengths[non_root] > 0).all(), (
+        f"{arm}: {int((lengths[non_root] == 0).sum())} valid nodes have an empty action chunk"
+    )
+    # The mask must agree with the node's own predicted horizon.
+    horizons = model.horizons.to(lengths.device)
+    expected = horizons[tree.horizon_idx.clamp(0, len(horizons) - 1)].float()
+    assert torch.equal(lengths[non_root], expected[non_root]), "mask length must match horizon_idx"
+
+
 def test_frontier_topk_marks_padding_invalid():
     scores = torch.tensor([[1.0, -1e9, -1e9, 5.0]])
     idx, valid = select_topk(scores, 3)
