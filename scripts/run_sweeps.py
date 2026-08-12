@@ -42,6 +42,8 @@ def main() -> None:
     p.add_argument("--gpus", nargs="+", type=int, default=[0, 0, 1, 1])
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--out", default="results")
+    p.add_argument("--plot-only", action="store_true",
+                   help="skip evaluation, just re-collect existing budget_sweep.json files")
     args = p.parse_args()
 
     runs_root = REPO / args.runs
@@ -51,7 +53,7 @@ def main() -> None:
     import os
     import time
 
-    pending = list(checkpoints)
+    pending = [] if args.plot_only else list(checkpoints)
     running: list[tuple] = []
     free = list(args.gpus)
     budgets = "[" + ",".join(str(b) for b in args.budgets) + "]"
@@ -82,7 +84,8 @@ def main() -> None:
         if not payload_path.exists():
             continue
         data = json.loads(payload_path.read_text())
-        key = (ck.parts[-4], data["arm"])
+        # parts: runs/<dataset>/<arm>/<stamp>/checkpoints/latest.pt
+        key = (ck.parts[-5], data["arm"])
         curves.setdefault(key, {})
         for budget, metrics in data["budgets"].items():
             curves[key].setdefault(int(budget), []).append(metrics["eval/success_rate"])

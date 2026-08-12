@@ -190,6 +190,94 @@ training, so a weak value there is expected and is not evidence against the hypo
 
 ---
 
+## Results (20k steps, 3 seeds, PointMaze)
+
+Full grid: 7 arms x 3 seeds x {navigate, stitch}, 42 runs, 0 failures, 471 min on 2xA100.
+Tables in `results/summary.md`; curves in `results/*.png`.
+
+### Success rate vs matched node budget (mean of 3 seeds x 50 episodes)
+
+`pointmaze-medium-stitch` (the hard split), AUC = mean over budgets 16-256:
+
+| arm | 16 | 32 | 64 | 128 | 256 | AUC |
+|---|---|---|---|---|---|---|
+| SingleWM | .000 | .000 | .000 | .000 | .000 | **.000** |
+| FlatKWM | .040 | .020 | .040 | .040 | .080 | .044 |
+| FixedTreeWM | .167 | .127 | .133 | .093 | .113 | .127 |
+| RandomTreeWM | .133 | .140 | .187 | .233 | .253 | .189 |
+| UncertaintyTreeWM | .153 | .153 | .160 | .120 | .073 | .132 |
+| **HeuristicTreeWM** | .200 | .320 | .280 | .333 | .300 | **.287** |
+| TreeWM | .147 | .200 | .193 | .193 | .140 | .175 |
+
+### Coverage vs node budget (distinct regions reached, budget 256)
+
+| arm | navigate | stitch |
+|---|---|---|
+| FlatKWM | 27.8 | 12.4 |
+| FixedTreeWM | 41.2 | 28.6 |
+| SingleWM | 39.5 | 37.7 |
+| TreeWM | 50.1 | 53.6 |
+| RandomTreeWM | 63.7 | 53.7 |
+| UncertaintyTreeWM | 67.3 | 37.3 |
+| **HeuristicTreeWM** | **90.8** | **75.4** |
+
+### What the causal chain actually shows
+
+```
+multimodal prediction   -> SUPPORTED   SingleWM scores 0.000 on all 6 runs; FlatKWM > SingleWM
+recursive prediction    -> SUPPORTED   tree arms >> FlatKWM (d = -1.97 on stitch)
+controllability-aware q -> NOT SUPPORTED
+adaptive compute        -> NOT SUPPORTED (learned allocation specifically)
+```
+
+**Links 1-2 hold decisively.** SingleWM never reaches a hard goal at any budget. FlatKWM
+is barely better and has the *worst* coverage of any arm -- spending the whole budget at
+depth 1 cannot reach beyond one chunk length. Recursion is what buys reach.
+
+**Link 4 fails, and the control arm is what shows it.** TreeWM is beaten by random
+frontier expansion on navigate and by the parameter-free q-novelty heuristic on stitch
+(.175 vs .287 AUC). Coverage says the same thing more sharply: **TreeWM is trained to
+predict marginal coverage gain and expand by it, yet an unlearned greedy novelty rule
+achieves 1.8x (navigate) and 1.4x (stitch) more coverage per node.** It loses at the exact
+objective it optimises.
+
+Without `HeuristicTreeWM` the table would read "TreeWM > FixedTreeWM on both datasets ->
+learned allocation matters". That conclusion is an artifact of a missing control.
+
+**TreeWM anti-scales with budget.** Success falls from .267 (64 nodes) to .080 (256) on
+navigate while RandomTreeWM climbs monotonically .127 -> .267. The learned head
+concentrates expansion and doubles down as budget grows; random and novelty-driven
+expansion keep spreading. `gain_rank_correlation` is a healthy +0.43..+0.53, so the head
+*does* predict its target -- the target (retrieval-based marginal new-cell count) appears
+to be the weak link, not the regression.
+
+**Link 3 fails independently.** `q_advantage_over_z` and `q_advantage_over_random_proj`
+are negative in **all 42 runs** (-0.06 to -0.28): q never beats z, nor a random projection
+of z at matched dimension, at future-set retrieval. Since `q = C(z)` is deterministic this
+was always a claim about metric geometry, and the geometry is not there. The
+dimension-matched control is what makes this conclusion stick rather than being
+dismissible as "fewer dimensions retrieve better".
+
+**What did work:** `branching_future_diversity_corr` = **+0.42 (navigate) / +0.82
+(stitch)** -- effective branching factor genuinely tracks empirical local future
+diversity. But it is identical across all seven arms, so it is a property of the shared
+branch network, not of any allocation policy.
+
+### Caveats
+
+- n=3 seeds. Only the SingleWM/FlatKWM gaps are comfortably outside noise; the
+  TreeWM-vs-controls differences are suggestive (Cohen's d 0.9-1.7), not established.
+- 20k steps, not trained to convergence.
+- All tree arms share identical training and differ only in frontier scoring, so this
+  isolates *frontier scoring*. It does not indict the tree representation itself --
+  recursion clearly helps.
+- Absolute success is low (<=0.35) for every arm; the hard split is hard.
+- Coverage uses decoded latents, comparable across arms because encoder/decoder training
+  is identical, but it is not a simulator ground-truth reachable set.
+
+
+---
+
 ## Layout
 
 ```
