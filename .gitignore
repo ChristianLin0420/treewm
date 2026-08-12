@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TreeWM
+runs/
+outputs/
+multirun/
+*.pt

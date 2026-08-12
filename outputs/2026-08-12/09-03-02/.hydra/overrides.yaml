@@ -1,9 +1,0 @@
-- arm=treewm
-- seed=99
-- train.steps=300
-- train.log_every=100
-- train.eval_every=100000
-- train.viz_every=100000
-- train.ckpt_every=100000
-- train.diag_every=100000
-- run_name=timing_test

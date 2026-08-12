@@ -1,4 +1,0 @@
-- experiment=smoke
-- seed=0
-- train.steps=600
-- train.log_every=100
