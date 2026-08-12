@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import os
+from dataclasses import replace
 import sys
 import time
 from pathlib import Path
@@ -112,6 +113,10 @@ def main(cfg: DictConfig) -> None:
     model = build_model(cfg.arm, model_cfg, k_max=int(cfg.model.flatk_max)).to(device)
     base_tree_cfg = cfg_utils.tree_config(cfg)
     tree_cfg = tree_config_for(cfg.arm, base_tree_cfg, model)
+    # Small, uniform tree for gain-head supervision; evaluation still uses tree_cfg.
+    gain_tree_cfg = tree_config_for(
+        cfg.arm, replace(base_tree_cfg, node_budget=int(cfg.train.gain_tree_budget)), model
+    )
     match_cfg = cfg_utils.matching_config(cfg)
     loss_cfg = cfg_utils.loss_config(cfg)
     planner_cfg = cfg_utils.planner_config(cfg)
@@ -210,7 +215,7 @@ def main(cfg: DictConfig) -> None:
                 if loss_cfg.on("expand") and step % int(cfg.train.gain_loss_every) == 0:
                     n_gain = min(int(cfg.train.gain_batch_size), batch["obs"].shape[0])
                     gain_loss, gain_metrics = compute_expansion_gain_loss(
-                        model, artifacts["z"][:n_gain], tree_cfg, latent_index, quantizer,
+                        model, artifacts["z"][:n_gain], gain_tree_cfg, latent_index, quantizer,
                     )
                     loss = loss + loss_cfg.weights.expand * loss_cfg.scale('expand', step) * gain_loss
                     metrics["train/loss_expand"] = float(gain_loss.detach().item())

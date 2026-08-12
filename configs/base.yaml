@@ -42,6 +42,11 @@ train:
   # The expansion-gain stage generates a full tree per step, so it runs on a stride.
   gain_loss_every: 4
   gain_batch_size: 64
+  # Node budget for the tree grown *to train the gain head* -- small and uniform across
+  # arms. This is NOT the evaluation budget. SingleWM's tree is a chain, so at the full
+  # budget it runs 63 sequential expansions per gain step (measured ~2.2x slower overall
+  # than FlatKWM) purely as a training artefact.
+  gain_tree_budget: 16
 
 # ----------------------------------------------------------------- tree/budget
 tree:

@@ -1,0 +1,11 @@
+- arm=treewm
+- seed=98
+- train.steps=200
+- train.log_every=100
+- train.eval_every=100000
+- train.viz_every=100000
+- train.ckpt_every=100000
+- train.diag_every=100000
+- train.max_train_anchors=50000
+- train.num_workers=8
+- run_name=speed_treewm
