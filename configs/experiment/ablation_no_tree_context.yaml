@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: treewm
+
+arm: treewm
+tree:
+  context_pooling: none
+model:
+  use_tree_context: false

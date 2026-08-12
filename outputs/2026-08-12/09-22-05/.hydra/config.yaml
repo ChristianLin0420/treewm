@@ -1,0 +1,170 @@
+env:
+  name: pointmaze-medium-navigate-v0
+  short_name: pointmaze-medium
+  dataset_dir: null
+  obs_dim: 2
+  action_dim: 2
+  xy_dims:
+  - 0
+  - 1
+  max_episode_steps: 1000
+model:
+  z_dim: 128
+  q_dim: 64
+  hidden_dim: 256
+  encoder_hidden: 256
+  num_layers: 3
+  num_heads: 4
+  branch_factor: 4
+  h_max: 64
+  horizons:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  scales:
+  - - short
+    - 8
+    - 1.0
+  - - medium
+    - 32
+    - 1.0
+  max_depth: 16
+  dropout: 0.0
+  reconstruction: true
+  residual_dynamics: true
+  normalize_q: true
+  use_tree_context: true
+  use_depth_embedding: true
+  flatk_max: 256
+seed: 98
+arm: uncertaintytreewm
+device: cuda
+run_root: runs
+run_name: argcheck_uncertaintytreewm
+resume: null
+checkpoint: null
+budgets: null
+train:
+  steps: 30
+  batch_size: 256
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_steps: 1000
+  min_lr_scale: 0.1
+  grad_clip: 1.0
+  grad_accum: 1
+  bf16: true
+  num_workers: 6
+  max_train_anchors: 20000
+  max_val_anchors: 20000
+  log_every: 20
+  hist_every: 500
+  diag_every: 20
+  eval_every: 25
+  viz_every: 100000
+  ckpt_every: 25
+  val_batches: 20
+  gain_loss_every: 4
+  gain_batch_size: 64
+tree:
+  node_budget: 64
+  expansion_batch_size: 4
+  max_depth: 16
+  branch_factor: 4
+  context_pooling: mean
+  scorer: null
+future_sets:
+  num_neighbors: 24
+  query_multiplier: 6
+  time_exclusion: 50
+  retrieval_radius: 1.0
+  include_self: true
+  horizons:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  h_max: 64
+  horizon_rule: displacement
+  displacement_threshold: 0.25
+  fixed_horizon: 32
+  relative_endpoints: true
+  cluster_threshold: 0.25
+  cluster_method: average
+  max_modes: 8
+retrieval:
+  enabled: true
+  num_keys: 100000
+  num_neighbors: 16
+  refresh_every: 2000
+  query_chunk: 4096
+  key_chunk: 50000
+  endpoint_horizon: 32
+  grid_resolution: 0.2
+matching:
+  lambda_z: 1.0
+  lambda_q: 1.0
+  lambda_action: 0.5
+  lambda_horizon: 0.1
+  method: hungarian
+losses:
+  control_objective: future_set
+  redundancy_temperature: 0.25
+  contrastive_temperature: 0.1
+  keep_balance: true
+  coverage_space: q
+  warmup:
+    redundancy: 5000
+    expand: 2000
+    mass: 1000
+  future_scale: 1.0
+  control_batch: 64
+  weights:
+    state: 1.0
+    action: 1.0
+    horizon: 0.5
+    coverage: 1.0
+    redundancy: 0.1
+    mass: 0.2
+    keep: 0.5
+    expand: 0.5
+    bind: 1.0
+    control: 0.5
+    reconstruction: 0.1
+    recursive: 0.2
+    uncertainty: 0.2
+  enabled:
+    state: true
+    action: true
+    horizon: true
+    coverage: true
+    redundancy: true
+    mass: true
+    keep: true
+    expand: true
+    bind: true
+    control: true
+    reconstruction: true
+    recursive: true
+    uncertainty: true
+planner:
+  execute_steps: 16
+  max_env_steps: 60
+  use_uncertainty: false
+  uncertainty_weight: 0.0
+  exclude_root: true
+eval:
+  budgets:
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+  episodes_per_task: 1
+  task_split: hard
+  num_hard_tasks: 1
+  hard_percentile: 75.0
+  seed: 0

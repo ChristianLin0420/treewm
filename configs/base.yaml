@@ -1,0 +1,158 @@
+defaults:
+  - env: pointmaze_medium_navigate
+  - model: treewm
+  - _self_
+  # Listed after _self_ so an experiment file overrides the defaults below it.
+  - experiment: null
+
+# ----------------------------------------------------------------------- run
+seed: 0
+arm: treewm            # singlewm | flatkwm | fixedtreewm | randomtreewm |
+                       # uncertaintytreewm | heuristictreewm | treewm
+device: cuda
+run_root: runs
+run_name: null         # defaults to <date>_seed<seed>
+resume: null           # path to a checkpoint, or "auto" to pick up latest.pt
+
+# Used by scripts/eval.py, scripts/sweep_budget.py and scripts/visualize_tree.py.
+checkpoint: null
+budgets: null
+
+# ------------------------------------------------------------------- training
+train:
+  steps: 50000
+  batch_size: 256
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  warmup_steps: 1000
+  min_lr_scale: 0.1
+  grad_clip: 1.0
+  grad_accum: 1
+  bf16: true                 # A100 default (spec section 24)
+  num_workers: 12
+  max_train_anchors: 200000
+  max_val_anchors: 20000
+  log_every: 50
+  hist_every: 500
+  diag_every: 1000
+  eval_every: 10000
+  viz_every: 10000
+  ckpt_every: 2000
+  val_batches: 20
+  # The expansion-gain stage generates a full tree per step, so it runs on a stride.
+  gain_loss_every: 4
+  gain_batch_size: 64
+
+# ----------------------------------------------------------------- tree/budget
+tree:
+  node_budget: 64
+  expansion_batch_size: 4
+  max_depth: 16
+  branch_factor: 4
+  context_pooling: mean      # none | mean | max  (ablation axis)
+  scorer: null               # null -> use the arm's default scorer
+
+# ------------------------------------------------------- future sets / modes
+future_sets:
+  num_neighbors: 24
+  query_multiplier: 6
+  time_exclusion: 50
+  retrieval_radius: 1.0
+  include_self: true
+  horizons: [4, 8, 16, 32, 64]
+  h_max: 64
+  horizon_rule: displacement
+  displacement_threshold: 0.25
+  fixed_horizon: 32
+  relative_endpoints: true
+  # Tuned on pointmaze-medium: yields ~3 modes/anchor (max 5) and spreads predicted
+  # horizons across all five candidates.
+  cluster_threshold: 0.25
+  cluster_method: average
+  max_modes: 8
+
+# ------------------------------------------------ latent retrieval (gain target)
+retrieval:
+  enabled: true
+  num_keys: 100000
+  num_neighbors: 16
+  refresh_every: 2000
+  query_chunk: 4096
+  key_chunk: 50000
+  endpoint_horizon: 32
+  grid_resolution: 0.2
+
+# ------------------------------------------------------------------- matching
+matching:
+  lambda_z: 1.0
+  lambda_q: 1.0
+  lambda_action: 0.5
+  lambda_horizon: 0.1
+  method: hungarian          # hungarian | greedy
+
+# --------------------------------------------------------------------- losses
+losses:
+  control_objective: future_set   # future_set | contrastive | bootstrap
+  redundancy_temperature: 0.25
+  contrastive_temperature: 0.1
+  keep_balance: true
+  coverage_space: q               # q | z  (ablation axis)
+  # Auxiliary terms ramp in linearly; redundancy is degenerate before the branch heads
+  # differentiate and would otherwise drive every KEEP score to zero.
+  warmup:
+    redundancy: 5000
+    expand: 2000
+    mass: 1000
+  future_scale: 1.0
+  # Anchors per step for the controllability objective; the future-set Chamfer
+  # distance is O(B^2 * M^2) and dominates the step at the full batch size.
+  control_batch: 64
+  # Successors per step for the recursive-consistency loss; O(B*K^2) otherwise.
+  recursive_batch: 256
+  weights:
+    state: 1.0
+    action: 1.0
+    horizon: 0.5
+    coverage: 1.0
+    redundancy: 0.1
+    mass: 0.2
+    keep: 0.5
+    expand: 0.5
+    bind: 1.0
+    control: 0.5
+    reconstruction: 0.1
+    recursive: 0.2
+    uncertainty: 0.2
+  enabled:
+    state: true
+    action: true
+    horizon: true
+    coverage: true
+    redundancy: true
+    mass: true
+    keep: true
+    expand: true
+    bind: true
+    control: true
+    reconstruction: true
+    recursive: true
+    uncertainty: true
+
+# -------------------------------------------------------------------- planner
+planner:
+  execute_steps: 16
+  max_env_steps: 500
+  use_uncertainty: false
+  uncertainty_weight: 0.0
+  exclude_root: true
+
+# ----------------------------------------------------------------- evaluation
+eval:
+  budgets: [16, 32, 64, 128, 256]
+  episodes_per_task: 5
+  # "hard" is the primary split: geodesically distant start/goal pairs.
+  # "standard" is the environment's own five tasks.
+  task_split: hard
+  num_hard_tasks: 10
+  hard_percentile: 75.0
+  seed: 0

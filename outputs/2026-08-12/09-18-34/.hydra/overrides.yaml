@@ -1,0 +1,6 @@
+- env=pointmaze_medium_navigate
+- arm=heuristictreewm
+- seed=1
+- train.steps=20000
+- eval.task_split=hard
+- train.num_workers=10

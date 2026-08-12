@@ -1,0 +1,8 @@
+- experiment=smoke
+- seed=0
+- train.steps=60
+- train.log_every=20
+- train.eval_every=1000
+- train.viz_every=1000
+- train.ckpt_every=50
+- run_name=ddp_test

@@ -1,0 +1,10 @@
+# @package _global_
+# "learned expansion: off" -- the adaptive-but-unlearned control.
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: treewm
+
+arm: heuristictreewm
+losses:
+  enabled:
+    expand: false

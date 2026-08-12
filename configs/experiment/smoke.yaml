@@ -1,0 +1,28 @@
+# @package _global_
+# Tiny end-to-end run used to verify the pipeline before launching the grid.
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: small
+
+arm: treewm
+train:
+  steps: 200
+  batch_size: 64
+  num_workers: 4
+  max_train_anchors: 20000
+  max_val_anchors: 4000
+  log_every: 10
+  hist_every: 50
+  diag_every: 50
+  viz_every: 100
+  eval_every: 100
+  ckpt_every: 100
+  val_batches: 4
+eval:
+  budgets: [16, 64]
+  episodes_per_task: 1
+  num_hard_tasks: 3
+planner:
+  max_env_steps: 200
+retrieval:
+  num_keys: 20000

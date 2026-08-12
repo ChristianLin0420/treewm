@@ -1,0 +1,9 @@
+# @package _global_
+# "coverage space: z" -- tests whether controllability equivalence is doing the work.
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: treewm
+
+arm: treewm
+losses:
+  coverage_space: z

@@ -1,0 +1,12 @@
+# @package _global_
+# "support-frequency split: off" -- KEEP is trained on frequency instead of support,
+# which is the failure mode the project exists to detect.
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: treewm
+
+arm: treewm
+losses:
+  keep_balance: false
+  enabled:
+    mass: false

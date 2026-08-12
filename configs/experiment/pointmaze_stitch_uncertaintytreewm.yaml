@@ -1,0 +1,9 @@
+# @package _global_
+# Primary hard split.
+defaults:
+  - override /env: pointmaze_medium_stitch
+  - override /model: treewm
+
+arm: uncertaintytreewm
+eval:
+  task_split: hard

@@ -1,0 +1,6 @@
+# @package _global_
+defaults:
+  - override /env: pointmaze_medium_navigate
+  - override /model: treewm
+
+arm: fixedtreewm
