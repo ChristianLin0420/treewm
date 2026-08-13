@@ -66,7 +66,13 @@ def main(cfg: DictConfig) -> None:
 
     run_dir = Path(checkpoint).parent.parent
     payload = {"arm": str(run_cfg.arm), "env": str(run_cfg.env.name),
-               "seed": int(run_cfg.seed), "budgets": {str(b): m for b, m in results.items()}}
+               "seed": int(run_cfg.seed),
+               # Stamped so a collector cannot silently mix curves produced under
+               # different leaf-scoring rules (this happened once: killed SingleWM jobs
+               # left yesterday's latent-scoring files in place and they were collected
+               # into a table labelled "decoded").
+               "score_space": str(run_cfg.planner.score_space),
+               "budgets": {str(b): m for b, m in results.items()}}
     out = run_dir / "budget_sweep.json"
     out.write_text(json.dumps(payload, indent=2))
 

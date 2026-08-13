@@ -562,6 +562,36 @@ it stays shallow (depth 2.90 vs 3.16) without being told to.
 (One seed, 10 tasks, budget 64 for the geodesic table; the pattern is consistent with
 every earlier result but deserves more seeds before it is load-bearing.)
 
+### 4d. Original ladder re-scored with decoded goal distance
+
+Same Experiment-1 checkpoints, no retraining. SingleWM excluded: its sweep is
+pathologically slow (a K=1 chain needs 255 sequential expansions per replan at budget
+256) and it scored 0.000 at every budget under latent scoring.
+
+| arm | navigate AUC (latent -> decoded) | stitch AUC (latent -> decoded) |
+|---|---|---|
+| flatkwm | 0.061 -> 0.052 | 0.044 -> 0.033 |
+| fixedtreewm | 0.149 -> **0.279** | 0.127 -> **0.301** |
+| **randomtreewm** | 0.209 -> **0.293** | 0.189 -> **0.443** |
+| uncertaintytreewm | 0.131 -> 0.173 | 0.132 -> 0.361 |
+| heuristictreewm | 0.153 -> 0.219 | 0.287 -> **0.431** |
+| treewm | 0.163 -> 0.253 | 0.175 -> 0.343 |
+
+Every tree arm gains (+0.04 to +0.25). **FlatKWM is the sole exception and gets slightly
+worse** -- consistent with it having nowhere to reach: at depth 1 its nodes are all one
+chunk from the root, so a better goal metric has nothing better to select.
+
+The ordering is unchanged. Random remains best on stitch (0.443); TreeWM (0.343) still
+trails Random and the unlearned heuristic (0.431). Fixing the planner lifted every arm
+without changing a single conclusion about allocation.
+
+**Data-integrity note.** The first decoded collection silently mixed stale curves: the
+killed SingleWM jobs left the previous day's latent-scoring `budget_sweep.json` in place
+and the collector picked them up into a table labelled "decoded" (the giveaway was a delta
+of exactly +0.000). `budget_sweep.json` now records `score_space`, and `run_sweeps.py`
+takes `--expect-score-space` to refuse mixing scoring rules.
+
+
 ### Consequence for the project's premise
 
 The premise is that a world model should allocate finite prediction compute over

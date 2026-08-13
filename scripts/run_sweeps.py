@@ -42,6 +42,8 @@ def main() -> None:
     p.add_argument("--gpus", nargs="+", type=int, default=[0, 0, 1, 1])
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--out", default="results")
+    p.add_argument("--expect-score-space", default=None,
+                   help="skip any budget_sweep.json not produced under this leaf-scoring rule")
     p.add_argument("--plot-only", action="store_true",
                    help="skip evaluation, just re-collect existing budget_sweep.json files")
     args = p.parse_args()
@@ -79,16 +81,27 @@ def main() -> None:
 
     # ---------------------------------------------------------------- collect
     curves: dict[tuple[str, str], dict[int, list[float]]] = {}
+    skipped: list[str] = []
     for ck in checkpoints:
         payload_path = ck.parent.parent / "budget_sweep.json"
         if not payload_path.exists():
             continue
         data = json.loads(payload_path.read_text())
+        if args.expect_score_space is not None:
+            got = data.get("score_space")
+            if got != args.expect_score_space:
+                skipped.append(f"{ck.parts[-5]}/{data['arm']}/{ck.parts[-3]} (score_space={got})")
+                continue
         # parts: runs/<dataset>/<arm>/<stamp>/checkpoints/latest.pt
         key = (ck.parts[-5], data["arm"])
         curves.setdefault(key, {})
         for budget, metrics in data["budgets"].items():
             curves[key].setdefault(int(budget), []).append(metrics["eval/success_rate"])
+
+    if skipped:
+        print(f"[sweep] SKIPPED {len(skipped)} stale/mismatched results:")
+        for s in skipped:
+            print(f"    {s}")
 
     out_dir = REPO / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
