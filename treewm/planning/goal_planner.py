@@ -32,6 +32,20 @@ class PlannerConfig:
     # prediction, never for metric goal matching, so distances in it do not track
     # spatial proximity. The decoder is part of the model, so this is not privileged.
     score_space: str = "decoded"
+    # Track F -- how a node's goal score is formed.
+    #   endpoint  F0: decoded endpoint distance only
+    #   path_aware F2: endpoint distance + lambda_c * cumulative path cost
+    #   ancestor   F3: blend of endpoint distance with the best distance along the
+    #              root-to-node path, so a deep leaf cannot win on its endpoint alone
+    #              after a poor path
+    score_mode: str = "endpoint"
+    path_cost_weight: float = 0.02
+    ancestor_weight: float = 0.5
+    # Track E -- how much of the selected chunk to execute before replanning.
+    #   fixed   execute_steps primitive actions
+    #   clipped min(chunk length, execute_steps)  (previous behaviour)
+    #   full    the whole predicted chunk
+    execute_mode: str = "clipped"
     execute_steps: int = 16
     max_env_steps: int = 500
     use_uncertainty: bool = False
@@ -60,6 +74,30 @@ class GoalPlanner:
         self.cfg = cfg
         self.device = device or next(model.parameters()).device
 
+    def _path_aware_score(self, tree, endpoint_score: torch.Tensor) -> torch.Tensor:
+        """Aggregate goal score along each root-to-node path.
+
+        Parent slots always precede their children, so a single forward pass over slots
+        propagates cumulative path quantities without recursion.
+        """
+        b, n = endpoint_score.shape
+        cost = tree.action_mask.sum(-1).float()  # primitive actions into each node
+        cum_cost = torch.zeros_like(endpoint_score)
+        best_on_path = endpoint_score.clone()
+        for slot in range(1, n):
+            parent = tree.parent_index[:, slot].clamp_min(0)
+            rows = torch.arange(b, device=endpoint_score.device)
+            cum_cost[:, slot] = cum_cost[rows, parent] + cost[:, slot]
+            best_on_path[:, slot] = torch.minimum(
+                best_on_path[rows, parent], endpoint_score[:, slot]
+            )
+        if self.cfg.score_mode == "path_aware":
+            return endpoint_score + self.cfg.path_cost_weight * cum_cost
+        if self.cfg.score_mode == "ancestor":
+            w = self.cfg.ancestor_weight
+            return (1.0 - w) * endpoint_score + w * best_on_path
+        raise ValueError(f"unknown score_mode {self.cfg.score_mode!r}")
+
     @torch.no_grad()
     def plan(self, obs: np.ndarray, goal: np.ndarray, generator=None, return_tree: bool = False) -> PlanResult:
         model = self.model
@@ -80,6 +118,9 @@ class GoalPlanner:
             score = torch.linalg.vector_norm(node_obs - goal_n.unsqueeze(1), dim=-1)
         else:
             score = torch.linalg.vector_norm(tree.latent - z_goal.unsqueeze(1), dim=-1)  # [1, N]
+
+        if self.cfg.score_mode != "endpoint":
+            score = self._path_aware_score(tree, score)
         if self.cfg.use_uncertainty and self.cfg.uncertainty_weight != 0.0:
             score = score + self.cfg.uncertainty_weight * tree.uncertainty
 
@@ -105,8 +146,14 @@ class GoalPlanner:
             first = trimmed[0]
             chunk = tree.action_chunk[0, first]  # [h_max, dA]
             mask = tree.action_mask[0, first]
-            length = int(mask.sum().item())
-            length = max(1, min(length, self.cfg.execute_steps))
+            chunk_len = int(mask.sum().item())
+            if self.cfg.execute_mode == "full":
+                length = max(1, chunk_len)
+            elif self.cfg.execute_mode == "fixed":
+                length = max(1, min(self.cfg.execute_steps, chunk_len))
+            else:  # clipped
+                length = max(1, min(chunk_len, self.cfg.execute_steps))
+            self.last_planned_chunk = chunk_len
             actions = chunk[:length].float().cpu().numpy()
             actions = self.normalizer.denorm_act(actions)
             actions = np.clip(actions, -1.0, 1.0)

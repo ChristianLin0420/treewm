@@ -225,3 +225,6 @@ results_novelty/
 outputs/
 multirun/
 *.pt
+runs_*/
+results*/
+*.log

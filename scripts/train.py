@@ -35,6 +35,7 @@ from treewm.data.maze_utils import MazeSpec
 from treewm.logging.metrics import MetricTracker
 from treewm.logging.tensorboard import TreeWMLogger
 from treewm.losses.expansion_losses import novelty_gain_loss
+from treewm.losses.recursive_losses import multi_step_recursive_loss, scheduled_sampling_schedule
 from treewm.losses.total import compute_branch_losses, compute_expansion_gain_loss
 from treewm.models.baselines import build_model, tree_config_for
 from treewm.planning.goal_planner import GoalPlanner
@@ -212,6 +213,19 @@ def main(cfg: DictConfig) -> None:
                 loss, metrics, artifacts = compute_branch_losses(
                     model, batch, loss_cfg, match_cfg, step=step
                 )
+
+                if loss_cfg.on("multistep"):
+                    p_ss = scheduled_sampling_schedule(
+                        step, float(loss_cfg.scheduled_sampling_p),
+                        int(loss_cfg.scheduled_sampling_warmup),
+                    )
+                    ms_loss, ms_metrics = multi_step_recursive_loss(
+                        model, batch, scheduled_sampling_p=p_ss,
+                        depth_weights=loss_cfg.multistep_depth_weights or None,
+                    )
+                    loss = loss + loss_cfg.weights.multistep * ms_loss
+                    metrics["train/loss_multistep"] = float(ms_loss.detach().item())
+                    metrics.update(ms_metrics)
 
                 if loss_cfg.on("expand") and step % int(cfg.train.gain_loss_every) == 0:
                     n_gain = min(int(cfg.train.gain_batch_size), batch["obs"].shape[0])

@@ -37,6 +37,7 @@ class LossWeights:
     reconstruction: float = 0.1
     recursive: float = 0.2
     uncertainty: float = 0.2
+    multistep: float = 0.0  # Track A1; 0 keeps the exp-1..4 baseline exactly
 
 
 @dataclass
@@ -57,10 +58,17 @@ class LossConfig:
             "reconstruction": True,
             "recursive": True,
             "uncertainty": True,
+            "multistep": False,
         }
     )
     control_objective: str = "future_set"  # future_set | contrastive | bootstrap
     gain_target: str = "novelty"  # novelty | retrieval
+    # Track A2: probability of feeding the model its own predicted latent during the
+    # multi-step rollout, warmed up linearly over scheduled_sampling_warmup steps.
+    scheduled_sampling_p: float = 0.0
+    scheduled_sampling_warmup: int = 2000
+    # Track H2: relative weight of each recursive depth (empty -> uniform).
+    multistep_depth_weights: tuple[float, ...] = ()
     redundancy_temperature: float = 0.25
     contrastive_temperature: float = 0.1
     keep_balance: bool = True

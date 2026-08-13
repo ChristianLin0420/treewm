@@ -48,6 +48,9 @@ class ScoringContext:
     goal_obs: torch.Tensor | None = None  # [B, obs_dim] normalised goal observation
     decoder: torch.nn.Module | None = None
     alpha: float = 0.0  # diversity weight in  S = -d_goal + alpha * novelty_q
+    budget_fraction: float = 0.0  # fraction of the node budget already spent (D6)
+    broad_fraction: float = 0.45  # D6 switch point: broad below, goal-directed above
+    depth_pools: int = 3  # D2 number of depth strata
 
 
 def _mask_scores(scores: torch.Tensor, frontier: torch.Tensor) -> torch.Tensor:
@@ -142,6 +145,72 @@ def goal_novelty_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringCo
     return _mask_scores(score, frontier)
 
 
+def depth_balanced_random_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """D2 -- random, but with the budget explicitly spread across depth strata.
+
+    Tests whether Random wins simply because of the depth distribution it happens to
+    produce. Frontier nodes are split into shallow/medium/deep pools by their depth
+    relative to the deepest frontier node; a random score is offset per pool so pools are
+    visited round-robin rather than in proportion to their size (deep pools are always
+    larger, which is what biases plain Random).
+    """
+    noise = torch.rand(tree.valid.shape, device=tree.valid.device, generator=ctx.generator,
+                       dtype=torch.float32)
+    depth = tree.depth.float()
+    max_d = depth.masked_fill(~frontier, 0).max(dim=1, keepdim=True).values.clamp_min(1.0)
+    pool = (depth / max_d * ctx.depth_pools).floor().clamp(0, ctx.depth_pools - 1)
+    # Rotate which pool is favoured each iteration so all strata get expanded.
+    favoured = ctx.step % ctx.depth_pools
+    bonus = (pool == favoured).float() * 10.0
+    return _mask_scores(noise + bonus, frontier)
+
+
+def root_quota_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """D3 -- guarantee every root subtree recursive budget before any can dominate.
+
+    Score = -(nodes already in this node's root subtree) + noise, so the least-developed
+    subtree is always expanded next. Once ``budget_fraction`` passes ``broad_fraction``
+    the quota is released and selection falls back to plain random.
+    """
+    noise = torch.rand(tree.valid.shape, device=tree.valid.device, generator=ctx.generator,
+                       dtype=torch.float32)
+    if ctx.budget_fraction >= ctx.broad_fraction:
+        return _mask_scores(noise, frontier)
+
+    b, n = tree.valid.shape
+    rb = tree.root_branch  # [B, N], -1 at root
+    # size of each node's own root subtree
+    same = (rb.unsqueeze(2) == rb.unsqueeze(1)) & tree.valid.unsqueeze(1) & (rb.unsqueeze(2) >= 0)
+    subtree_size = same.float().sum(-1)  # [B, N]
+    return _mask_scores(-subtree_size + noise, frontier)
+
+
+def diverse_goal_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """D5 -- goal-directed with an explicit root-subtree diversity term.
+
+    One simple normalised formulation (no alpha sweep): the goal distance is normalised by
+    the frontier's own spread, and a node is penalised in proportion to how much of the
+    tree its root subtree already occupies.
+    """
+    d = _goal_distance(tree, ctx)
+    masked = d.masked_fill(~frontier, float("nan"))
+    lo = torch.nan_to_num(masked, nan=float("inf")).min(1, keepdim=True).values
+    hi = torch.nan_to_num(masked, nan=float("-inf")).max(1, keepdim=True).values
+    norm_d = (d - lo) / (hi - lo).clamp_min(1e-6)
+
+    rb = tree.root_branch
+    same = (rb.unsqueeze(2) == rb.unsqueeze(1)) & tree.valid.unsqueeze(1) & (rb.unsqueeze(2) >= 0)
+    share = same.float().sum(-1) / tree.valid.float().sum(1, keepdim=True).clamp_min(1.0)
+    return _mask_scores(-(norm_d + share), frontier)
+
+
+def broad_to_focused_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """D6 -- balanced/broad expansion first, decoded-goal-directed once the tree exists."""
+    if ctx.budget_fraction < ctx.broad_fraction:
+        return root_quota_score(tree, frontier, ctx)
+    return goal_score(tree, frontier, ctx)
+
+
 def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
     """``g_psi(feat_n, c_T, depth, kappa, sigma)`` -- predicted expansion gain.
 
@@ -171,13 +240,17 @@ SCORERS: dict[str, Callable[[BatchedTree, torch.Tensor, ScoringContext], torch.T
     "novelty_q_penalized": novelty_q_penalized_score,
     "goal": goal_score,
     "goal_novelty": goal_novelty_score,
+    "depth_balanced": depth_balanced_random_score,
+    "root_quota": root_quota_score,
+    "diverse_goal": diverse_goal_score,
+    "broad_to_focused": broad_to_focused_score,
     "learned": learned_score,
 }
 
 
 # Scorers whose ranking depends on the goal. Tree generation must be handed a goal
 # observation for these, and only these.
-GOAL_AWARE_SCORERS = ("goal", "goal_novelty")
+GOAL_AWARE_SCORERS = ("goal", "goal_novelty", "diverse_goal", "broad_to_focused")
 
 
 def get_scorer(name: str):

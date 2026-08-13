@@ -35,6 +35,7 @@ class BatchedTree:
     expanded: torch.Tensor  # [B, N] bool
     valid: torch.Tensor  # [B, N] bool
     order: torch.Tensor  # [B, N] long, -1 until created; expansion order for viz
+    root_branch: torch.Tensor  # [B, N] long, -1 at root; which root child this descends from
     num_nodes: torch.Tensor  # [B] long
 
     @classmethod
@@ -76,6 +77,7 @@ class BatchedTree:
             expanded=torch.zeros(b, capacity, device=dev, dtype=torch.bool),
             valid=torch.zeros(b, capacity, device=dev, dtype=torch.bool),
             order=torch.full((b, capacity), -1, device=dev, dtype=torch.long),
+            root_branch=torch.full((b, capacity), -1, device=dev, dtype=torch.long),
             num_nodes=torch.ones(b, device=dev, dtype=torch.long),
         )
         tree.valid[:, 0] = True
@@ -256,6 +258,12 @@ class BatchedTree:
 
         parent_depth = torch.gather(self.depth, 1, parent_flat)
         _scatter(self.depth, parent_depth + 1)
+
+        # Root-subtree identity: children of the root start a new subtree (indexed by
+        # their slot among the root's children); everything deeper inherits its parent's.
+        parent_rb = torch.gather(self.root_branch, 1, parent_flat)
+        own = torch.arange(flat, device=slot.device).view(1, flat).expand(b, flat)
+        _scatter(self.root_branch, torch.where(parent_flat == 0, own, parent_rb))
         _scatter(self.valid, torch.ones_like(admitted))
         _scatter(self.order, torch.full_like(parent_flat, step))
 

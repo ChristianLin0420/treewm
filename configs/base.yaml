@@ -75,6 +75,7 @@ future_sets:
   cluster_threshold: 0.25
   cluster_method: average
   max_modes: 8
+  multi_step_depth: 3   # Track A: chain length supervised along the anchor's own future
 
 # ------------------------------------------------ latent retrieval (gain target)
 retrieval:
@@ -102,6 +103,11 @@ losses:
   #   novelty   -> G*(n|T) = min_j d(q_n, q_j), the signal the winning heuristic uses
   #   retrieval -> marginal new quantised cells from dataset neighbours (original)
   gain_target: novelty
+  # Track A2 -- scheduled sampling on the multi-step recursive rollout.
+  scheduled_sampling_p: 0.0
+  scheduled_sampling_warmup: 2000
+  # Track H2 -- per-depth weights for the multi-step loss ([] -> uniform).
+  multistep_depth_weights: []
   redundancy_temperature: 0.25
   contrastive_temperature: 0.1
   keep_balance: true
@@ -132,6 +138,7 @@ losses:
     reconstruction: 0.1
     recursive: 0.2
     uncertainty: 0.2
+    multistep: 0.0
   enabled:
     state: true
     action: true
@@ -146,11 +153,16 @@ losses:
     reconstruction: true
     recursive: true
     uncertainty: true
+    multistep: false
 
 # -------------------------------------------------------------------- planner
 planner:
   # decoded | latent -- decoded nearly doubles success (see README, exp 3 D3)
   score_space: decoded
+  score_mode: endpoint      # endpoint | path_aware | ancestor   (Track F)
+  path_cost_weight: 0.02
+  ancestor_weight: 0.5
+  execute_mode: clipped     # clipped | fixed | full             (Track E)
   execute_steps: 16
   max_env_steps: 500
   use_uncertainty: false

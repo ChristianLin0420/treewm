@@ -47,6 +47,9 @@ class FutureSetConfig:
     cluster_threshold: float = 0.12
     cluster_method: str = "average"
     max_modes: int = 8
+    # Track A: supervise the anchor's own continuation at depths 1..multi_step_depth so
+    # recursion is trained on chained predictions, not only single edges.
+    multi_step_depth: int = 3
 
     def __post_init__(self) -> None:
         self.horizons = tuple(int(h) for h in self.horizons)
@@ -247,8 +250,34 @@ class FutureSetBuilder:
         else:
             spread = 0.0
 
+        # ---- multi-step chain along the anchor's own trajectory (Track A) ----
+        d_max = cfg.multi_step_depth
+        ms_actions = np.zeros((d_max, cfg.h_max, self.act_dim), dtype=np.float32)
+        ms_mask = np.zeros((d_max, cfg.h_max), dtype=np.float32)
+        ms_obs = np.tile(anchor.astype(np.float32), (d_max, 1))
+        ms_h_idx = np.zeros(d_max, dtype=np.int64)
+        ms_valid = np.zeros(d_max, dtype=np.float32)
+        cursor = t
+        for d in range(d_max):
+            if self._remaining[cursor] < int(self.horizons.min()):
+                break
+            h = self._pick_horizon(cursor, rng)
+            if h > int(self._remaining[cursor]):
+                break
+            ms_actions[d, :h] = self.act_norm[cursor : cursor + h]
+            ms_mask[d, :h] = 1.0
+            ms_obs[d] = self.obs_norm[cursor + h]
+            ms_h_idx[d] = h_lookup[h]
+            ms_valid[d] = 1.0
+            cursor = cursor + h
+
         return {
             "anchor_index": np.int64(t),
+            "ms_actions": ms_actions,
+            "ms_action_mask": ms_mask,
+            "ms_obs": ms_obs,
+            "ms_horizon_idx": ms_h_idx,
+            "ms_valid": ms_valid,
             "obs": anchor.astype(np.float32),
             "fut_actions": fut_actions,
             "fut_action_mask": fut_mask,

@@ -71,6 +71,10 @@ def loss_config(cfg: DictConfig) -> LossConfig:
     raw = to_container(cfg.losses)
     weights = LossWeights(**raw.pop("weights"))
     enabled = raw.pop("enabled")
+    if raw.get("multistep_depth_weights"):
+        raw["multistep_depth_weights"] = tuple(float(x) for x in raw["multistep_depth_weights"])
+    else:
+        raw["multistep_depth_weights"] = ()
     return LossConfig(weights=weights, enabled=dict(enabled), **raw)
 
 
