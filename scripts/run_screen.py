@@ -33,6 +33,7 @@ MULTISTEP = "losses.enabled.multistep=true losses.weights.multistep=1.0"
 RECIPES: dict[str, tuple[str, str]] = {
     # ---- Track A: recursive robustness -------------------------------------------
     "A0_random":      ("A", "arm=randomtreewm"),
+    "A0_flat":        ("A", "arm=flatkwm"),  # mandatory flat control for generalisation
     "A0_bfs":         ("A", "arm=fixedtreewm"),
     "A1_multistep":   ("A", f"arm=randomtreewm {MULTISTEP}"),
     "A2_ss25":        ("A", f"arm=randomtreewm {MULTISTEP} losses.scheduled_sampling_p=0.25"),

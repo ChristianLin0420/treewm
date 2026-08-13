@@ -19,7 +19,7 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -96,6 +96,15 @@ def main(cfg: DictConfig) -> None:
         max_val_anchors=int(cfg.train.max_val_anchors),
         seed=int(cfg.seed),
     )
+    # AntMaze env configs leave obs/action dims null; fill them from the loaded data so
+    # a new environment needs no hand-edited dimensions.
+    if cfg.env.obs_dim is None or cfg.env.action_dim is None:
+        with open_dict(cfg):
+            cfg.env.obs_dim = int(train_ds.obs_dim)
+            cfg.env.action_dim = int(train_ds.act_dim)
+        if dist_info.is_main:
+            print(f"[treewm] inferred obs_dim={cfg.env.obs_dim} action_dim={cfg.env.action_dim}")
+
     if dist_info.is_main:
         print(f"[treewm] train {train_ds.summary()}")
         print(f"[treewm] val   {val_ds.summary()}")
