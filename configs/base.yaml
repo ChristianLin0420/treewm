@@ -98,6 +98,10 @@ matching:
 # --------------------------------------------------------------------- losses
 losses:
   control_objective: future_set   # future_set | contrastive | bootstrap
+  # Expansion-gain supervision target.
+  #   novelty   -> G*(n|T) = min_j d(q_n, q_j), the signal the winning heuristic uses
+  #   retrieval -> marginal new quantised cells from dataset neighbours (original)
+  gain_target: novelty
   redundancy_temperature: 0.25
   contrastive_temperature: 0.1
   keep_balance: true

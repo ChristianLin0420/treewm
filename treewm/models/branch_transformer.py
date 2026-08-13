@@ -175,26 +175,30 @@ class BranchHeads(nn.Module):
 
 
 class ExpansionGainHead(nn.Module):
-    """``g_psi(q_n, c_T, depth, kappa, sigma) -> G``.
+    """``g_psi(feat_n, c_T, depth, kappa, sigma) -> G``.
 
-    Scores how much *new* controllability coverage expanding a frontier node would add,
-    given a pooled summary of what the tree already covers. Mean pooling only -- a graph
-    network is out of scope for v1 (spec section 9).
+    Scores how much a frontier node would add, given a pooled summary of what the tree
+    already covers. Mean pooling only -- a graph network is out of scope for v1
+    (spec section 9).
+
+    ``feat_dim`` selects the metric space: ``q_dim * num_scales`` for controllability
+    features, ``z_dim`` for state features. The head must consume the same representation
+    whose novelty it is trained to predict, or the learned arm is handicapped relative to
+    its own direct heuristic for a reason unrelated to learning.
     """
 
     def __init__(
         self,
-        q_dim: int,
-        num_scales: int,
+        feat_dim: int,
         hidden_dim: int = 128,
         use_context: bool = True,
         max_depth: int = 16,
     ) -> None:
         super().__init__()
-        self.q_flat = q_dim * num_scales
+        self.feat_dim = feat_dim
         self.use_context = use_context
         self.max_depth = max_depth
-        in_dim = self.q_flat + (self.q_flat if use_context else 0) + 3
+        in_dim = feat_dim + (feat_dim if use_context else 0) + 3
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),
             nn.Linear(hidden_dim, 1),
@@ -202,18 +206,19 @@ class ExpansionGainHead(nn.Module):
 
     def forward(
         self,
-        q_node: torch.Tensor,
+        node_feats: torch.Tensor,
         context: torch.Tensor | None,
         depth: torch.Tensor,
         keep: torch.Tensor,
         uncertainty: torch.Tensor,
     ) -> torch.Tensor:
-        """``q_node``: ``[B, N, S, D]``; ``context``: ``[B, S, D]``; others ``[B, N]``."""
-        b, n = q_node.shape[:2]
-        feats = [q_node.reshape(b, n, self.q_flat)]
+        """``node_feats``: ``[B, N, F]`` (or ``[B, N, S, D]``); ``context``: ``[B, F]``
+        (or any shape with ``F`` elements per batch item); others ``[B, N]``."""
+        b, n = node_feats.shape[:2]
+        feats = [node_feats.reshape(b, n, self.feat_dim)]
         if self.use_context:
             assert context is not None, "use_context=True requires a pooled tree context"
-            feats.append(context.reshape(b, 1, self.q_flat).expand(b, n, self.q_flat))
+            feats.append(context.reshape(b, 1, self.feat_dim).expand(b, n, self.feat_dim))
         feats.append((depth.float() / self.max_depth).unsqueeze(-1))
         feats.append(keep.unsqueeze(-1))
         feats.append(uncertainty.unsqueeze(-1))

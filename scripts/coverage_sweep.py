@@ -38,7 +38,7 @@ from scripts.eval import load_run
 
 REPO = Path(__file__).resolve().parents[1]
 ARM_ORDER = ["singlewm", "flatkwm", "fixedtreewm", "randomtreewm", "uncertaintytreewm",
-             "heuristictreewm", "treewm"]
+             "heuristictreewm", "treewm", "noveltyq", "learnedq", "noveltyz", "learnedz"]
 
 
 @torch.no_grad()

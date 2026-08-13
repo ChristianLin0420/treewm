@@ -53,6 +53,14 @@ class ExpansionTrace:
     selected_scores: list[torch.Tensor] = field(default_factory=list)
     num_iterations: int = 0
     budget_reached: bool = False
+    # Mean novelty of the frontier immediately before and after each expansion batch.
+    # A healthy allocator should keep finding novel frontier nodes; a collapsing one
+    # drives frontier novelty toward zero and then spends budget on redundant nodes.
+    frontier_novelty_before: list[float] = field(default_factory=list)
+    frontier_novelty_after: list[float] = field(default_factory=list)
+    # Detached per-iteration state for training the gain head against the *partial*
+    # tree it will actually face at inference, rather than the finished tree.
+    snapshots: list[dict[str, torch.Tensor]] = field(default_factory=list)
 
 
 @torch.no_grad()
@@ -71,6 +79,10 @@ def generate_tree(
     on_iteration: Callable[[dict[str, Any]], None] | None = None,
     h_max: int = 64,
     action_dim: int = 2,
+    q_cdist: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    novelty_space: str = "q",
+    collect_snapshots: bool = False,
+    track_novelty: bool = False,
 ) -> tuple[BatchedTree, ExpansionTrace]:
     """Grow a batch of trees to exactly ``cfg.node_budget`` nodes (frontier permitting).
 
@@ -99,14 +111,40 @@ def generate_tree(
         if not bool(frontier.any()):
             break
 
+        use_ctx = cfg.context_pooling != "none"
         ctx = ScoringContext(
-            context=tree.context(cfg.context_pooling) if cfg.context_pooling != "none" else None,
+            context=tree.context(cfg.context_pooling) if use_ctx else None,
+            context_flat=tree.context_features(novelty_space, cfg.context_pooling) if use_ctx else None,
             gain_head=gain_head,
             q_distance=q_distance,
+            q_cdist=q_cdist,
             generator=generator,
             step=step,
+            novelty_space=novelty_space,
         )
         scores = scorer(tree, frontier, ctx)
+
+        if track_novelty or collect_snapshots:
+            from treewm.tree.novelty import node_features, novelty_of
+
+            target = novelty_of(tree, novelty_space, q_cdist)
+            if track_novelty:
+                fmask = frontier.float()
+                trace.frontier_novelty_before.append(
+                    float((target * fmask).sum() / fmask.sum().clamp_min(1.0))
+                )
+            if collect_snapshots:
+                trace.snapshots.append(
+                    {
+                        "feats": node_features(tree, novelty_space).detach(),
+                        "context": ctx.context_flat.detach() if ctx.context_flat is not None else None,
+                        "depth": tree.depth.clone(),
+                        "keep": tree.keep_score.float().detach(),
+                        "sigma": tree.uncertainty.float().detach(),
+                        "frontier": frontier.clone(),
+                        "target": target.detach(),
+                    }
+                )
 
         remaining = int((cfg.node_budget - tree.num_nodes).clamp_min(0).max())
         take = max(1, min(cfg.expansion_batch_size, remaining))
@@ -146,6 +184,15 @@ def generate_tree(
         tree.add_children(
             sel_idx, child, cfg.node_budget, step, child_valid=child_valid, parent_valid=sel_valid
         )
+
+        if track_novelty:
+            from treewm.tree.novelty import novelty_of
+
+            after = novelty_of(tree, novelty_space, q_cdist)
+            fmask_after = tree.expandable_frontier(cfg.max_depth).float()
+            trace.frontier_novelty_after.append(
+                float((after * fmask_after).sum() / fmask_after.sum().clamp_min(1.0))
+            )
 
         trace.frontier_sizes.append(int(frontier.sum(1).float().mean().item()))
         trace.selected_scores.append(chosen_scores.detach())

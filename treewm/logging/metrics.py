@@ -107,6 +107,25 @@ def rank_correlation(a: np.ndarray | torch.Tensor, b: np.ndarray | torch.Tensor)
     return float(rho) if np.isfinite(rho) else 0.0
 
 
+def pearson_correlation(a: np.ndarray | torch.Tensor, b: np.ndarray | torch.Tensor) -> float:
+    """Linear correlation. Returns 0.0 for degenerate input.
+
+    Reported alongside Spearman because they answer different questions: Pearson says
+    whether the head reproduces the *magnitude* of the novelty target, Spearman whether
+    it reproduces the *ordering*. Best-first expansion consumes only the ordering, so a
+    high Pearson with a low Spearman would still produce bad allocation.
+    """
+    a = a.detach().float().cpu().numpy() if torch.is_tensor(a) else np.asarray(a, dtype=float)
+    b = b.detach().float().cpu().numpy() if torch.is_tensor(b) else np.asarray(b, dtype=float)
+    a, b = a.ravel(), b.ravel()
+    if a.size < 2 or a.size != b.size:
+        return 0.0
+    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
+        return 0.0
+    out = float(np.corrcoef(a, b)[0, 1])
+    return out if np.isfinite(out) else 0.0
+
+
 def entropy_from_probs(probs: torch.Tensor, dim: int = -1, eps: float = 1e-8) -> torch.Tensor:
     """Shannon entropy in nats of a normalised distribution."""
     p = probs.clamp_min(eps)

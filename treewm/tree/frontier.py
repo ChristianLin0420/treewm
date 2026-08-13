@@ -32,11 +32,14 @@ NEG_INF = -1e9
 class ScoringContext:
     """Everything a scorer may read. Deliberately small and explicit."""
 
-    context: torch.Tensor | None = None  # [B, S, q_dim] pooled tree context
+    context: torch.Tensor | None = None  # [B, S, q_dim] pooled q context (heuristic)
+    context_flat: torch.Tensor | None = None  # [B, F] pooled context for the gain head
     gain_head: torch.nn.Module | None = None
     q_distance: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+    q_cdist: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
     generator: torch.Generator | None = None
     step: int = 0
+    novelty_space: str = "q"  # q | z -- metric space for novelty scorers and the head
 
 
 def _mask_scores(scores: torch.Tensor, frontier: torch.Tensor) -> torch.Tensor:
@@ -75,12 +78,33 @@ def heuristic_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringConte
     return _mask_scores(dist, frontier)
 
 
+def novelty_q_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """Direct ``min_j d_q(q_n, q_j)`` -- the exact signal the learned head must predict."""
+    from treewm.tree.novelty import q_novelty
+
+    assert ctx.q_cdist is not None, "q-novelty scorer needs a q cdist function"
+    return _mask_scores(q_novelty(tree, ctx.q_cdist), frontier)
+
+
+def novelty_z_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """Direct ``min_j ||z_n - z_j||`` -- the state-space control for q-novelty."""
+    from treewm.tree.novelty import z_novelty
+
+    return _mask_scores(z_novelty(tree), frontier)
+
+
 def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
-    """``g_psi(q_n, c_T, depth, kappa, sigma)`` -- predicted marginal coverage gain."""
+    """``g_psi(feat_n, c_T, depth, kappa, sigma)`` -- predicted expansion gain.
+
+    Feature space follows ``ctx.novelty_space`` so the learned arm consumes exactly the
+    representation whose novelty it is trained to predict.
+    """
+    from treewm.tree.novelty import node_features
+
     assert ctx.gain_head is not None, "learned scorer needs an ExpansionGainHead"
     gain = ctx.gain_head(
-        tree.q.float(),
-        ctx.context.float() if ctx.context is not None else None,
+        node_features(tree, ctx.novelty_space),
+        ctx.context_flat.float() if ctx.context_flat is not None else None,
         tree.depth,
         tree.keep_score.float(),
         tree.uncertainty.float(),
@@ -92,7 +116,9 @@ SCORERS: dict[str, Callable[[BatchedTree, torch.Tensor, ScoringContext], torch.T
     "bfs": bfs_score,
     "random": random_score,
     "uncertainty": uncertainty_score,
-    "heuristic": heuristic_score,
+    "heuristic": heuristic_score,  # mean-pooled context distance (the original arm)
+    "novelty_q": novelty_q_score,
+    "novelty_z": novelty_z_score,
     "learned": learned_score,
 }
 

@@ -34,6 +34,7 @@ from treewm.evaluation.coverage import StateQuantizer
 from treewm.data.maze_utils import MazeSpec
 from treewm.logging.metrics import MetricTracker
 from treewm.logging.tensorboard import TreeWMLogger
+from treewm.losses.expansion_losses import novelty_gain_loss
 from treewm.losses.total import compute_branch_losses, compute_expansion_gain_loss
 from treewm.models.baselines import build_model, tree_config_for
 from treewm.planning.goal_planner import GoalPlanner
@@ -214,9 +215,15 @@ def main(cfg: DictConfig) -> None:
 
                 if loss_cfg.on("expand") and step % int(cfg.train.gain_loss_every) == 0:
                     n_gain = min(int(cfg.train.gain_batch_size), batch["obs"].shape[0])
-                    gain_loss, gain_metrics = compute_expansion_gain_loss(
-                        model, artifacts["z"][:n_gain], gain_tree_cfg, latent_index, quantizer,
-                    )
+                    if str(cfg.losses.gain_target) == "novelty":
+                        gain_loss, gain_metrics = novelty_gain_loss(
+                            model, artifacts["z"][:n_gain], gain_tree_cfg,
+                            space=str(cfg.model.novelty_space),
+                        )
+                    else:
+                        gain_loss, gain_metrics = compute_expansion_gain_loss(
+                            model, artifacts["z"][:n_gain], gain_tree_cfg, latent_index, quantizer,
+                        )
                     loss = loss + loss_cfg.weights.expand * loss_cfg.scale('expand', step) * gain_loss
                     metrics["train/loss_expand"] = float(gain_loss.detach().item())
                     metrics.update(gain_metrics)

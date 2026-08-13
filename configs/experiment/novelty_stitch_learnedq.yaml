@@ -1,0 +1,10 @@
+# @package _global_
+# Novelty-target diagnostic: isolates the expansion-gain target. Architecture, planner,
+# budgets, schedule and evaluation are unchanged from the main grid.
+defaults:
+  - override /env: pointmaze_medium_stitch
+  - override /model: treewm
+
+arm: learnedq
+losses:
+  gain_target: novelty

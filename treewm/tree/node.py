@@ -117,6 +117,26 @@ class BatchedTree:
             return self.q.masked_fill(mask == 0, -1e4).max(1).values
         raise ValueError(f"unknown pooling {pooling!r}")
 
+    def context_features(self, space: str = "q", pooling: str = "mean") -> torch.Tensor:
+        """Pooled tree context flattened for the gain head. Returns ``[B, F]``.
+
+        ``space="z"`` pools state latents instead of controllability embeddings, so a
+        z-novelty head sees a z-space summary rather than a q-space one.
+        """
+        if pooling == "none":
+            source = self.q if space == "q" else self.latent
+            return torch.zeros(self.batch_size, source[:, 0].numel() // self.batch_size,
+                               device=source.device, dtype=torch.float32)
+        if space == "q":
+            return self.context(pooling).reshape(self.batch_size, -1).float()
+        mask = self.valid.float().unsqueeze(-1)
+        latent = self.latent.float()
+        if pooling == "mean":
+            return (latent * mask).sum(1) / mask.sum(1).clamp_min(1.0)
+        if pooling == "max":
+            return latent.masked_fill(mask == 0, -1e4).max(1).values
+        raise ValueError(f"unknown pooling {pooling!r}")
+
     def path_to_root(self, node_idx: torch.Tensor) -> list[torch.Tensor]:
         """Trace ``[B]`` node indices back to the root.
 

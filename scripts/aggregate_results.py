@@ -21,13 +21,24 @@ REPO = Path(__file__).resolve().parents[1]
 LADDER = ["singlewm", "flatkwm", "fixedtreewm", "treewm"]
 CONTROLS = ["randomtreewm", "uncertaintytreewm", "heuristictreewm"]
 ARM_ORDER = ["singlewm", "flatkwm", "fixedtreewm", "randomtreewm", "uncertaintytreewm",
-             "heuristictreewm", "treewm"]
+             "heuristictreewm", "treewm", "noveltyq", "learnedq", "noveltyz", "learnedz"]
 
 PRIMARY = [
     ("eval/success_rate", "success"),
     ("eval/goal_distance_final", "goal_dist"),
     ("eval/world_model_nodes_per_replan", "nodes/replan"),
     ("eval/action_chunk_execution_length", "chunk_len"),
+]
+
+NOVELTY_DIAG = [
+    ("expansion/gain_rank_correlation", "spearman"),
+    ("expansion/gain_pearson_correlation", "pearson"),
+    ("expansion/controllability_coverage", "coverage"),
+    ("expansion/coverage_per_expanded_node", "cov/expanded"),
+    ("expansion/redundant_expansion_fraction", "redundant"),
+    ("expansion/mean_depth", "mean_depth"),
+    ("expansion/depth_std", "depth_std"),
+    ("expansion/frontier_novelty_decay", "front_decay"),
 ]
 
 DIAGNOSTICS = [
@@ -172,6 +183,59 @@ def ladder_verdict(results: dict, dataset: str) -> str:
     return "\n".join(lines)
 
 
+def novelty_verdict(results: dict, dataset: str) -> str:
+    """Apply the pre-registered interpretation criteria for the novelty-target rerun."""
+    def val(arm: str, tag: str = "eval/success_rate") -> float:
+        runs = results.get((dataset, arm), [])
+        m, _, n = agg([r.get(tag) for r in runs])
+        return m if n else float("nan")
+
+    present = [a for a in ("noveltyq", "learnedq", "noveltyz", "learnedz") if (dataset, a) in results]
+    if not present:
+        return ""
+
+    ok, parity = training_parity(results, dataset)
+    lines = [f"\n### Novelty-target verdict — {dataset}\n", f"  training parity: {parity}\n"]
+    if not ok:
+        lines.append("  *** SUPPRESSED: unequal training steps.\n")
+
+    dq, lq = val("noveltyq"), val("learnedq")
+    dz, lz = val("noveltyz"), val("learnedz")
+    rho_q, rho_z = val("learnedq", "expansion/gain_rank_correlation"), val("learnedz", "expansion/gain_rank_correlation")
+
+    def gap(direct: float, learned: float, name: str, rho: float) -> str:
+        if not (np.isfinite(direct) and np.isfinite(learned)):
+            return f"  {name:14s} no data"
+        rel = (learned - direct) / max(abs(direct), 1e-6)
+        if abs(rel) <= 0.15:
+            verdict = "CLOSED -- bad gain target was the problem; learned allocation viable"
+        elif learned > direct:
+            verdict = "learned EXCEEDS direct"
+        elif np.isfinite(rho) and rho > 0.7:
+            verdict = ("STILL FAR BELOW despite high target correlation -> inspect best-first "
+                       "batching / tree-context feedback, not the representation")
+        else:
+            verdict = "STILL BELOW, and target correlation is weak -> the head is not learning the signal"
+        return f"  {name:14s} direct={direct:.3f} learned={learned:.3f} (rel {rel:+.0%}, spearman {rho:.2f}) -> {verdict}"
+
+    lines.append("  Q1. Does learned novelty close the gap to its direct heuristic?")
+    lines.append(gap(dq, lq, "q-novelty", rho_q))
+    lines.append(gap(dz, lz, "z-novelty", rho_z))
+
+    lines.append("\n  Q2. Is q-novelty actually better than z-novelty?")
+    if np.isfinite(dq) and np.isfinite(dz):
+        rel = (dq - dz) / max(abs(dz), 1e-6)
+        verdict = ("q ~= z -- do NOT attribute the gain to controllability-aware q"
+                   if abs(rel) <= 0.15 else ("q BETTER than z" if dq > dz else "z BETTER than q"))
+        lines.append(f"  direct: q={dq:.3f} vs z={dz:.3f} (rel {rel:+.0%}) -> {verdict}")
+
+    lines.append("\n  Q3. Controls")
+    for a in ("randomtreewm", "fixedtreewm"):
+        if (dataset, a) in results:
+            lines.append(f"  {a:20s} {val(a):.3f}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--runs", default="runs")
@@ -190,7 +254,9 @@ def main() -> None:
     for dataset in datasets:
         report.append(table(results, dataset, PRIMARY, "Primary (success vs matched node budget)"))
         report.append(table(results, dataset, DIAGNOSTICS, "Diagnostics"))
+        report.append(table(results, dataset, NOVELTY_DIAG, "Novelty-target diagnostics"))
         report.append(ladder_verdict(results, dataset))
+        report.append(novelty_verdict(results, dataset))
 
     text = "\n".join(report)
     print(text)

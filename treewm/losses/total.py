@@ -60,6 +60,7 @@ class LossConfig:
         }
     )
     control_objective: str = "future_set"  # future_set | contrastive | bootstrap
+    gain_target: str = "novelty"  # novelty | retrieval
     redundancy_temperature: float = 0.25
     contrastive_temperature: float = 0.1
     keep_balance: bool = True

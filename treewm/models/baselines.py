@@ -90,6 +90,38 @@ class HeuristicTreeWM(TreeWM):
     default_scorer = "heuristic"
 
 
+class NoveltyQTreeWM(TreeWM):
+    """Direct ``min_j d_q(q_n, q_j)`` expansion. No learned allocation."""
+
+    arm_name = "noveltyq"
+    default_scorer = "novelty_q"
+    novelty_space = "q"
+
+
+class LearnedNoveltyQTreeWM(TreeWM):
+    """Learned head predicting q-novelty. Paired one-to-one with ``noveltyq``."""
+
+    arm_name = "learnedq"
+    default_scorer = "learned"
+    novelty_space = "q"
+
+
+class NoveltyZTreeWM(TreeWM):
+    """Direct ``min_j ||z_n - z_j||`` expansion -- the state-space control for q-novelty."""
+
+    arm_name = "noveltyz"
+    default_scorer = "novelty_z"
+    novelty_space = "z"
+
+
+class LearnedNoveltyZTreeWM(TreeWM):
+    """Learned head predicting z-novelty. Paired one-to-one with ``noveltyz``."""
+
+    arm_name = "learnedz"
+    default_scorer = "learned"
+    novelty_space = "z"
+
+
 ARMS: dict[str, type[TreeWM]] = {
     "singlewm": SingleWM,
     "flatkwm": FlatKWM,
@@ -98,7 +130,16 @@ ARMS: dict[str, type[TreeWM]] = {
     "uncertaintytreewm": UncertaintyTreeWM,
     "heuristictreewm": HeuristicTreeWM,
     "treewm": TreeWM,
+    "noveltyq": NoveltyQTreeWM,
+    "learnedq": LearnedNoveltyQTreeWM,
+    "noveltyz": NoveltyZTreeWM,
+    "learnedz": LearnedNoveltyZTreeWM,
 }
+
+# The novelty experiment: each learned arm is paired with the direct heuristic computing
+# the identical signal, so "does learning close the gap" is a one-variable question.
+NOVELTY_ARMS = ("noveltyq", "learnedq", "noveltyz", "learnedz", "randomtreewm", "fixedtreewm")
+NOVELTY_PAIRS = (("noveltyq", "learnedq"), ("noveltyz", "learnedz"))
 
 TREE_ARMS = ("fixedtreewm", "randomtreewm", "uncertaintytreewm", "heuristictreewm", "treewm")
 
@@ -107,9 +148,15 @@ def build_model(arm: str, cfg: TreeWMConfig, k_max: int = 256) -> TreeWM:
     arm = arm.lower()
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}; options: {sorted(ARMS)}")
+    cls = ARMS[arm]
+    # The arm dictates the metric space so the head's input features and its regression
+    # target can never disagree.
+    space = getattr(cls, "novelty_space", None)
+    if space is not None:
+        cfg = replace(cfg, novelty_space=space)
     if arm == "flatkwm":
         return FlatKWM(cfg, k_max=k_max)
-    return ARMS[arm](cfg)
+    return cls(cfg)
 
 
 def tree_config_for(arm: str, base: TreeConfig, model: TreeWM) -> TreeConfig:

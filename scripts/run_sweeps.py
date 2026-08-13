@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 
 REPO = Path(__file__).resolve().parents[1]
 ARM_ORDER = ["singlewm", "flatkwm", "fixedtreewm", "randomtreewm", "uncertaintytreewm",
-             "heuristictreewm", "treewm"]
+             "heuristictreewm", "treewm", "noveltyq", "learnedq", "noveltyz", "learnedz"]
 
 
 def find_checkpoints(runs_root: Path, dataset: str | None) -> list[Path]:

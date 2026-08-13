@@ -26,6 +26,7 @@ from treewm.models.controllability_encoder import ControllabilityEncoder, ScaleS
 from treewm.models.latent_dynamics import LatentDynamics, SoftHorizonSelector
 from treewm.models.state_encoder import RandomProjection, StateDecoder, StateEncoder
 from treewm.tree.expansion import TreeConfig, generate_tree
+from treewm.tree.novelty import feature_dim
 
 
 @dataclass
@@ -49,6 +50,9 @@ class TreeWMConfig:
     normalize_q: bool = True
     use_tree_context: bool = True
     use_depth_embedding: bool = True
+    # Metric space for the expansion-gain target and the head's input features.
+    # "q" = controllability novelty, "z" = state novelty. Tested, not assumed.
+    novelty_space: str = "q"
 
     @property
     def num_horizons(self) -> int:
@@ -104,8 +108,9 @@ class TreeWM(nn.Module):
             residual=cfg.residual_dynamics,
         )
         self.gain_head = ExpansionGainHead(
-            q_dim=cfg.q_dim,
-            num_scales=self.controllability.num_scales,
+            feat_dim=feature_dim(
+                cfg.novelty_space, cfg.z_dim, cfg.q_dim, self.controllability.num_scales
+            ),
             use_context=cfg.use_tree_context,
             max_depth=cfg.max_depth,
         )
@@ -203,6 +208,8 @@ class TreeWM(nn.Module):
         tree_cfg: TreeConfig,
         generator: torch.Generator | None = None,
         on_iteration=None,
+        collect_snapshots: bool = False,
+        track_novelty: bool = False,
     ):
         """Goal-independent tree generation under a node budget."""
         q0 = self.q_of(z0)
@@ -217,6 +224,10 @@ class TreeWM(nn.Module):
             on_iteration=on_iteration,
             h_max=self.cfg.h_max,
             action_dim=self.cfg.action_dim,
+            q_cdist=self.q_cdist,
+            novelty_space=self.cfg.novelty_space,
+            collect_snapshots=collect_snapshots,
+            track_novelty=track_novelty,
         )
 
     def generate_from_obs(self, obs: torch.Tensor, tree_cfg: TreeConfig, **kwargs):
