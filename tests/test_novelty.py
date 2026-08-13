@@ -58,6 +58,7 @@ def test_z_novelty_matches_manual_computation():
 def test_novelty_scorer_selects_the_most_novel_frontier_node():
     from treewm.tree.frontier import novelty_z_score, ScoringContext, select_topk
 
+    torch.manual_seed(0)  # otherwise the tree depends on suite-wide RNG order
     model = build_model("noveltyz", SMALL).eval()
     cfg = tree_config_for("noveltyz", TreeConfig(node_budget=32, branch_factor=4, max_depth=16), model)
     with torch.no_grad():
@@ -65,11 +66,17 @@ def test_novelty_scorer_selects_the_most_novel_frontier_node():
 
     frontier = tree.expandable_frontier(cfg.max_depth)
     scores = novelty_z_score(tree, frontier, ScoringContext(novelty_space="z"))
-    idx, valid = select_topk(scores, 1)
-    chosen = int(idx[0, 0])
+    idx, _ = select_topk(scores, 1)
     nov = z_novelty(tree)[0]
-    best = int(torch.where(frontier[0], nov, torch.full_like(nov, -1e9)).argmax())
-    assert chosen == best, "top-k must pick the highest-novelty frontier node"
+    masked = torch.where(frontier[0], nov, torch.full_like(nov, -1e9))
+
+    # Compare the selected node's novelty to the maximum, not the index: several
+    # frontier nodes can tie exactly, and then argmax and top-k may disagree on which
+    # index to return while both being correct.
+    chosen_novelty = float(masked[int(idx[0, 0])])
+    assert chosen_novelty == pytest.approx(float(masked.max()), abs=1e-5), (
+        "top-k must pick a node whose novelty equals the frontier maximum"
+    )
 
 
 @pytest.mark.parametrize("arm", list(NOVELTY_ARMS))
