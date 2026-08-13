@@ -46,7 +46,7 @@ train:
   # arms. This is NOT the evaluation budget. SingleWM's tree is a chain, so at the full
   # budget it runs 63 sequential expansions per gain step (measured ~2.2x slower overall
   # than FlatKWM) purely as a training artefact.
-  gain_tree_budget: 16
+  gain_tree_budget: 64
 
 # ----------------------------------------------------------------- tree/budget
 tree:

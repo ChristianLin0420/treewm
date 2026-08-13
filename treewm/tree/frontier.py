@@ -40,6 +40,7 @@ class ScoringContext:
     generator: torch.Generator | None = None
     step: int = 0
     novelty_space: str = "q"  # q | z -- metric space for novelty scorers and the head
+    depth_penalty: float = 0.0  # lambda in  S = novelty - lambda * depth
 
 
 def _mask_scores(scores: torch.Tensor, frontier: torch.Tensor) -> torch.Tensor:
@@ -93,6 +94,19 @@ def novelty_z_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringConte
     return _mask_scores(z_novelty(tree), frontier)
 
 
+def novelty_q_penalized_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """``S = min_j d_q(q_n, q_j) - lambda * depth``.
+
+    Trades novelty against the depth at which the world model stops being reliable,
+    without needing a learned uncertainty model.
+    """
+    from treewm.tree.novelty import q_novelty
+
+    assert ctx.q_cdist is not None, "penalised q-novelty needs a q cdist function"
+    score = q_novelty(tree, ctx.q_cdist) - ctx.depth_penalty * tree.depth.float()
+    return _mask_scores(score, frontier)
+
+
 def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
     """``g_psi(feat_n, c_T, depth, kappa, sigma)`` -- predicted expansion gain.
 
@@ -119,6 +133,7 @@ SCORERS: dict[str, Callable[[BatchedTree, torch.Tensor, ScoringContext], torch.T
     "heuristic": heuristic_score,  # mean-pooled context distance (the original arm)
     "novelty_q": novelty_q_score,
     "novelty_z": novelty_z_score,
+    "novelty_q_penalized": novelty_q_penalized_score,
     "learned": learned_score,
 }
 

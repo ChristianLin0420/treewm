@@ -28,6 +28,7 @@ class EpisodeResult:
     final_goal_distance: float
     best_goal_distance: float
     chunk_lengths: list[int] = field(default_factory=list)
+    selected_depths: list[int] = field(default_factory=list)
     trajectory: list[np.ndarray] = field(default_factory=list)
 
 
@@ -58,6 +59,7 @@ def run_episode(
     success = False
     best_dist = float("inf")
     chunks: list[int] = []
+    depths: list[int] = []
     traj: list[np.ndarray] = [np.asarray(ob, dtype=np.float32)] if record_trajectory else []
 
     while steps < max_steps and not success:
@@ -67,6 +69,7 @@ def run_episode(
         if len(plan.actions) == 0:
             break
         chunks.append(len(plan.actions))
+        depths.append(plan.selected_depth)
 
         for action in plan.actions:
             ob, _, terminated, truncated, info = env.step(action)
@@ -89,6 +92,7 @@ def run_episode(
         final_goal_distance=final_dist,
         best_goal_distance=min(best_dist, final_dist),
         chunk_lengths=chunks,
+        selected_depths=depths,
         trajectory=traj,
     )
 
@@ -118,6 +122,7 @@ def evaluate(
     final = np.array([r.final_goal_distance for r in results], dtype=np.float32)
     best = np.array([r.best_goal_distance for r in results], dtype=np.float32)
     chunk_lens = np.array([c for r in results for c in r.chunk_lengths], dtype=np.float32)
+    sel_depths = np.array([d for r in results for d in r.selected_depths], dtype=np.float32)
 
     nodes_per_success = float(nodes[successes > 0].mean()) if successes.any() else float("nan")
 
@@ -132,6 +137,7 @@ def evaluate(
         "eval/world_model_nodes_total": float(nodes.mean()),
         "eval/world_model_nodes_per_success": nodes_per_success,
         "eval/action_chunk_execution_length": float(chunk_lens.mean()) if chunk_lens.size else 0.0,
+        "eval/selected_leaf_depth": float(sel_depths.mean()) if sel_depths.size else 0.0,
         "eval/planning_wall_clock_s": float(elapsed / max(len(results), 1)),
         "eval/num_episodes": float(len(results)),
     }

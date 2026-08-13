@@ -219,6 +219,9 @@ __marimo__/
 
 # TreeWM
 runs/
+runs_novelty/
+results/
+results_novelty/
 outputs/
 multirun/
 *.pt

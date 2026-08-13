@@ -36,6 +36,7 @@ class PlanResult:
     selected_node: int
     path_length: int
     num_nodes: int
+    selected_depth: int
     goal_distance: float
     tree: object = None
 
@@ -99,6 +100,7 @@ class GoalPlanner:
             selected_node=best,
             path_length=len(trimmed),
             num_nodes=int(tree.num_nodes[0].item()),
+            selected_depth=int(tree.depth[0, best].item()),
             goal_distance=float(score[0, best].item()),
             tree=tree if return_tree else None,
         )

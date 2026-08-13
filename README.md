@@ -383,6 +383,104 @@ The uncertainty head already exists and is trained; a novelty/reliability-traded
 
 ---
 
+## Experiment 3 — reliability diagnostics (no retraining)
+
+Both diagnostics run on the Experiment-2 checkpoints. `train.gain_tree_budget` raised
+16 -> 64 for future runs (at 16 with `expansion_batch_size=4` the scorer never ranks
+competing nodes, which is why all q-space arms logged an identical Spearman of 0.796).
+
+### D1. Depth-limited novelty — helps, never catches Random
+
+Success on stitch, 3 seeds, with selected-leaf depth matched between arms:
+
+| depth cap | noveltyq (leaf depth) | Random (leaf depth) | delta |
+|---|---|---|---|
+| 3 | 0.178 (2.53) | 0.222 (2.53) | -0.044 |
+| 5 | 0.189 (3.77) | 0.300 (3.54) | -0.111 |
+| 8 | 0.233 (3.78) | 0.300 (3.47) | -0.067 |
+| none | 0.122 (3.82) | 0.289 (3.43) | -0.167 |
+
+(budget 64; budget 256 is the same story, worst at -0.267.) Depth penalty
+`S = novelty_q - lambda*d` peaks at 0.233 (lambda=0.05), also below Random.
+
+Capping depth **does** help novelty (0.122 -> 0.233 at budget 64), so the
+coverage-vs-reliability tradeoff is real. But **Random wins at every matched depth**,
+including depth 3 where selected-leaf depths are identical to two decimals. The two arms
+respond to depth in *opposite* directions -- Random improves with depth, novelty degrades
+-- even though they share one world model. Random simply never goes deep on its own
+(leaf depth 5.5 uncapped vs 9.9 for novelty). Depth is not the explanation.
+
+### D2. Oracle-grounded leaf selection — the tree is the problem
+
+Every node's root-to-node chunks replayed in MuJoCo (DFS with exact state save/restore),
+then leaves selected three ways on the identical tree. 10 episodes/cell, seed 0:
+
+| arm / budget | latent | predicted | **oracle** |
+|---|---|---|---|
+| noveltyq B64 | 0.000 | 0.200 | **0.200** |
+| noveltyq B256 | 0.000 | 0.100 | **0.100** |
+| randomtreewm B64 | 0.200 | 0.300 | **0.400** |
+| randomtreewm B256 | 0.100 | 0.100 | **0.300** |
+
+| arm / budget | disagree | min predicted d | min actual d | regret |
+|---|---|---|---|---|
+| noveltyq B64 | 0.415 | 15.17 | 15.91 | 0.33 |
+| noveltyq B256 | 0.780 | 9.93 | 14.68 | 0.49 |
+| randomtreewm B64 | 0.455 | 12.94 | 13.06 | 0.20 |
+| randomtreewm B256 | 0.867 | 9.60 | 11.69 | 0.79 |
+
+**Oracle selection does not rescue novelty.** For noveltyq, oracle == predicted (0.200 /
+0.100): grounding adds nothing beyond decoding, so long-horizon endpoint error is *not*
+its bottleneck. Random gains from grounding (0.300 -> 0.400) -- its trees contain good
+futures that selection misses -- and **Random under oracle selection still beats noveltyq
+under oracle selection, 0.400 vs 0.200.**
+
+The best *actually reachable* node in a novelty tree ends 15.9 units from the goal
+(budget 64) versus 13.1 for Random, in a maze ~20 units across. Novelty trees simply
+contain worse futures. Regret is small everywhere (0.2-0.8), i.e. selection picks a
+node nearly as good as the best one available -- the best one available just is not good.
+
+Novelty trees are also more over-optimistic: predicted-vs-actual gap 4.8 units at budget
+256 versus 2.1 for Random, consistent with their greater depth.
+
+### D3. Latent goal matching is a separate, large bottleneck
+
+Confirmed on 90 episodes/cell (3 seeds x 10 tasks x 3 episodes), budget 64:
+
+| arm | latent (deployed) | decoded position | gain |
+|---|---|---|---|
+| noveltyq | 0.144 +/- 0.079 | **0.367 +/- 0.047** | +155% |
+| randomtreewm | 0.256 +/- 0.016 | **0.489 +/- 0.042** | +91% |
+
+Scoring leaves by `d_z(z_n, z_g)` is far worse than decoding both to position and
+comparing there. `z` is trained for dynamics and future prediction, never for metric goal
+matching, so distances in it do not track spatial proximity. The decoder is part of the
+model, so this is a deployable change, not privileged information -- and it is free.
+
+### Verdict against the pre-registered criteria
+
+```
+oracle q-novelty >> Random ?           NO  -> endpoint error is NOT the bottleneck
+depth-limited novelty improves ?       PARTLY -> real but secondary; never catches Random
+oracle still does not rescue novelty ? YES -> coverage maximisation is misaligned
+                                              with goal control
+```
+
+**Do not build uncertainty/reliability-weighted novelty yet.** The evidence says the
+expansion objective is pointed at the wrong thing: maximising q-novelty drives expansion
+toward states that are maximally *distinct*, which in a maze means the far corners, while
+goal-reaching needs dense coverage of the corridor the goal sits in. A reliability weight
+would make novelty trees shallower and safer without making them more useful.
+
+Two changes the data actually supports, in order:
+1. **Score leaves by decoded position, not latent distance** (+0.22 absolute, free).
+2. **Replace the expansion objective.** Novelty/coverage is not the right target; the
+   evidence points toward goal-agnostic *reachability spread* that stays within the
+   model's reliable horizon, or accepting that goal-conditioned expansion is required.
+
+
+---
+
 ## Layout
 
 ```

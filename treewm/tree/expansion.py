@@ -29,6 +29,7 @@ class TreeConfig:
     branch_factor: int = 4
     context_pooling: str = "mean"  # none | mean | max
     scorer: str = "learned"
+    depth_penalty: float = 0.0  # lambda for the novelty_q_penalized scorer
 
     def __post_init__(self) -> None:
         assert self.node_budget >= 1
@@ -121,6 +122,7 @@ def generate_tree(
             generator=generator,
             step=step,
             novelty_space=novelty_space,
+            depth_penalty=cfg.depth_penalty,
         )
         scores = scorer(tree, frontier, ctx)
 
