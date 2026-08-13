@@ -149,6 +149,8 @@ losses:
 
 # -------------------------------------------------------------------- planner
 planner:
+  # decoded | latent -- decoded nearly doubles success (see README, exp 3 D3)
+  score_space: decoded
   execute_steps: 16
   max_env_steps: 500
   use_uncertainty: false

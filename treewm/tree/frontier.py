@@ -41,6 +41,13 @@ class ScoringContext:
     step: int = 0
     novelty_space: str = "q"  # q | z -- metric space for novelty scorers and the head
     depth_penalty: float = 0.0  # lambda in  S = novelty - lambda * depth
+    # Goal-directed allocation. The goal reaches the *frontier ordering only* -- the
+    # branch network, dynamics and q never see it, so the world model stays
+    # goal-independent (spec section 8). A tree built this way is, however, no longer
+    # reusable across goals.
+    goal_obs: torch.Tensor | None = None  # [B, obs_dim] normalised goal observation
+    decoder: torch.nn.Module | None = None
+    alpha: float = 0.0  # diversity weight in  S = -d_goal + alpha * novelty_q
 
 
 def _mask_scores(scores: torch.Tensor, frontier: torch.Tensor) -> torch.Tensor:
@@ -107,6 +114,34 @@ def novelty_q_penalized_score(tree: BatchedTree, frontier: torch.Tensor, ctx: Sc
     return _mask_scores(score, frontier)
 
 
+def _goal_distance(tree: BatchedTree, ctx: ScoringContext) -> torch.Tensor:
+    """Decoded-position distance from every node to the goal. ``[B, N]``."""
+    assert ctx.decoder is not None and ctx.goal_obs is not None, (
+        "goal-directed scorers need a decoder and a normalised goal observation"
+    )
+    node_obs = ctx.decoder(tree.latent)  # [B, N, obs_dim]
+    return torch.linalg.vector_norm(node_obs - ctx.goal_obs.unsqueeze(1), dim=-1)
+
+
+def goal_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """Pure goal-directed best-first: expand whatever is closest to the goal."""
+    return _mask_scores(-_goal_distance(tree, ctx), frontier)
+
+
+def goal_novelty_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    """``S = -d_goal(n) + alpha * min_j d_q(q_n, q_j)``.
+
+    q-novelty as a *diversity bonus inside* goal-directed search rather than as the sole
+    objective -- the question is whether it stops the search collapsing into one greedy
+    corridor without dragging it into the far corners of the maze.
+    """
+    from treewm.tree.novelty import q_novelty
+
+    assert ctx.q_cdist is not None, "goal+novelty scorer needs a q cdist function"
+    score = -_goal_distance(tree, ctx) + ctx.alpha * q_novelty(tree, ctx.q_cdist)
+    return _mask_scores(score, frontier)
+
+
 def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
     """``g_psi(feat_n, c_T, depth, kappa, sigma)`` -- predicted expansion gain.
 
@@ -134,8 +169,15 @@ SCORERS: dict[str, Callable[[BatchedTree, torch.Tensor, ScoringContext], torch.T
     "novelty_q": novelty_q_score,
     "novelty_z": novelty_z_score,
     "novelty_q_penalized": novelty_q_penalized_score,
+    "goal": goal_score,
+    "goal_novelty": goal_novelty_score,
     "learned": learned_score,
 }
+
+
+# Scorers whose ranking depends on the goal. Tree generation must be handed a goal
+# observation for these, and only these.
+GOAL_AWARE_SCORERS = ("goal", "goal_novelty")
 
 
 def get_scorer(name: str):

@@ -210,6 +210,7 @@ class TreeWM(nn.Module):
         on_iteration=None,
         collect_snapshots: bool = False,
         track_novelty: bool = False,
+        goal_obs: torch.Tensor | None = None,
     ):
         """Goal-independent tree generation under a node budget."""
         q0 = self.q_of(z0)
@@ -228,6 +229,8 @@ class TreeWM(nn.Module):
             novelty_space=self.cfg.novelty_space,
             collect_snapshots=collect_snapshots,
             track_novelty=track_novelty,
+            goal_obs=goal_obs,
+            decoder=self.decoder,
         )
 
     def generate_from_obs(self, obs: torch.Tensor, tree_cfg: TreeConfig, **kwargs):

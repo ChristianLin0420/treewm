@@ -29,7 +29,8 @@ class TreeConfig:
     branch_factor: int = 4
     context_pooling: str = "mean"  # none | mean | max
     scorer: str = "learned"
-    depth_penalty: float = 0.0  # lambda for the novelty_q_penalized scorer
+    depth_penalty: float = 0.0
+    alpha: float = 0.0  # diversity weight for the goal_novelty scorer  # lambda for the novelty_q_penalized scorer
 
     def __post_init__(self) -> None:
         assert self.node_budget >= 1
@@ -59,6 +60,9 @@ class ExpansionTrace:
     # drives frontier novelty toward zero and then spends budget on redundant nodes.
     frontier_novelty_before: list[float] = field(default_factory=list)
     frontier_novelty_after: list[float] = field(default_factory=list)
+    # Best decoded goal distance in the tree after each expansion batch; its decrease
+    # per batch is 'goal progress per expansion'.
+    best_goal_distance: list[float] = field(default_factory=list)
     # Detached per-iteration state for training the gain head against the *partial*
     # tree it will actually face at inference, rather than the finished tree.
     snapshots: list[dict[str, torch.Tensor]] = field(default_factory=list)
@@ -84,6 +88,8 @@ def generate_tree(
     novelty_space: str = "q",
     collect_snapshots: bool = False,
     track_novelty: bool = False,
+    goal_obs: torch.Tensor | None = None,
+    decoder: torch.nn.Module | None = None,
 ) -> tuple[BatchedTree, ExpansionTrace]:
     """Grow a batch of trees to exactly ``cfg.node_budget`` nodes (frontier permitting).
 
@@ -123,6 +129,9 @@ def generate_tree(
             step=step,
             novelty_space=novelty_space,
             depth_penalty=cfg.depth_penalty,
+            goal_obs=goal_obs,
+            decoder=decoder,
+            alpha=cfg.alpha,
         )
         scores = scorer(tree, frontier, ctx)
 
@@ -195,6 +204,13 @@ def generate_tree(
             trace.frontier_novelty_after.append(
                 float((after * fmask_after).sum() / fmask_after.sum().clamp_min(1.0))
             )
+
+        if goal_obs is not None and decoder is not None:
+            with torch.no_grad():
+                d_goal = torch.linalg.vector_norm(
+                    decoder(tree.latent) - goal_obs.unsqueeze(1), dim=-1
+                ).masked_fill(~tree.valid, float("inf"))
+                trace.best_goal_distance.append(float(d_goal.min(1).values.mean().item()))
 
         trace.frontier_sizes.append(int(frontier.sum(1).float().mean().item()))
         trace.selected_scores.append(chosen_scores.detach())

@@ -481,6 +481,102 @@ Two changes the data actually supports, in order:
 
 ---
 
+## Experiment 4 — decoded goal scoring + expansion-policy diagnostic
+
+No retraining; all results reuse the Experiment-2 checkpoints.
+
+### 4a. Decoded goal scoring is now the default -- and it is the single biggest win so far
+
+`PlannerConfig.score_space = "decoded"`: score nodes by decoding both node and goal to
+observation space instead of `d_z(z_n, z_g)`. Success AUC over budgets 16-256, same
+checkpoints, latent -> decoded:
+
+| arm | navigate | stitch |
+|---|---|---|
+| fixedtreewm | 0.189 -> **0.271** | 0.137 -> **0.397** |
+| randomtreewm | 0.199 -> **0.288** | 0.271 -> **0.460** |
+| noveltyq | 0.155 -> 0.216 | 0.171 -> 0.349 |
+| learnedq | 0.172 -> 0.252 | 0.140 -> 0.365 |
+| noveltyz | 0.167 -> 0.259 | 0.123 -> 0.255 |
+| learnedz | 0.165 -> **0.331** | 0.149 -> 0.335 |
+
+Every arm improves, by +0.06 to +0.26 AUC. The ordering is unchanged: Random is still best
+on stitch, and the novelty arms still anti-scale (noveltyq .460@16 -> .227@256).
+
+### 4b. Expansion policies -- q-novelty is inert as a diversity bonus
+
+Seven allocation policies on identical checkpoints (3 seeds, 60 episodes/cell). The goal
+reaches the frontier ordering only; the branch network, dynamics and q never see it.
+
+| policy | 16 | 32 | 64 | 128 | 256 | AUC |
+|---|---|---|---|---|---|---|
+| **random** | 0.417 | 0.417 | 0.417 | 0.450 | 0.500 | **0.440** |
+| goal + 0.5*novelty | 0.417 | 0.433 | 0.467 | 0.450 | 0.350 | 0.423 |
+| goal + 0.1*novelty | 0.467 | 0.417 | 0.400 | 0.433 | 0.383 | 0.420 |
+| goal (only) | 0.483 | 0.417 | 0.350 | 0.333 | 0.450 | 0.407 |
+| goal + 0.25*novelty | 0.417 | 0.467 | 0.367 | 0.383 | 0.367 | 0.400 |
+| goal + 1.0*novelty | 0.417 | 0.400 | 0.450 | 0.350 | 0.383 | 0.400 |
+| novelty_q (only) | 0.383 | 0.450 | 0.283 | 0.183 | 0.083 | 0.277 |
+
+**alpha is inert.** Every goal+novelty setting lands in 0.400-0.423, indistinguishable
+from goal-only (0.407) and from each other across a 10x range of alpha. q-novelty does not
+become useful as a diversity bonus.
+
+**Random still wins**, and is the only policy whose success rises with budget
+(.417 -> .500). Goal-directed policies are flat; novelty-only collapses.
+
+Tree quality at budget 64 (simulator-grounded):
+
+| policy | best reachable d | regret | coverage | depth | goal progress/expansion |
+|---|---|---|---|---|---|
+| random | 15.86 | 0.187 | 17.8 | 2.90 | n/a |
+| novelty_q | 16.04 | 0.240 | 17.3 | 3.12 | n/a |
+| goal | **14.73** | **0.130** | 16.3 | 3.16 | 0.206 |
+| goal + 0.5 | 15.07 | 0.139 | 16.5 | 3.17 | 0.203 |
+
+Goal-directed search *does* build better trees by euclidean measures -- best reachable node
+1.1 units closer, regret 30% lower -- and it still does not convert into success.
+
+### 4c. Why: tree reach is invariant to allocation
+
+Measuring **geodesic** (maze-traversal) distance rather than euclidean, budget 64:
+
+| policy | best euclid | best geodesic | start geodesic | geodesic progress |
+|---|---|---|---|---|
+| random | 14.17 | 6.50 | 7.80 | 1.30 |
+| novelty_q | 13.69 | 6.40 | 7.80 | 1.40 |
+| goal | 13.91 | 6.40 | 7.80 | 1.40 |
+| goal + 0.5 | 13.37 | 6.40 | 7.80 | 1.40 |
+
+**Every policy makes the same geodesic progress (1.3-1.4 cells of the 7.8 needed).** The
+small euclidean differences do not correspond to real traversal progress -- they are the
+artefact of a metric that ignores walls.
+
+This reframes the whole allocation question. At a given budget the tree's *reach in
+traversable space* is set by the model's reliable horizon, not by how nodes are
+distributed. Allocation therefore has almost no headroom to help; it can mainly **hurt**,
+by pushing nodes to depths where decoded positions stop being trustworthy and leaf
+selection starts making mistakes. Random wins because it is the policy that hurts least --
+it stays shallow (depth 2.90 vs 3.16) without being told to.
+
+(One seed, 10 tasks, budget 64 for the geodesic table; the pattern is consistent with
+every earlier result but deserves more seeds before it is load-bearing.)
+
+### Consequence for the project's premise
+
+The premise is that a world model should allocate finite prediction compute over
+controllability-distinct futures. Across three experiments, at matched node budget, **no
+allocation policy has beaten random** -- not learned coverage gain, not min-novelty in q or
+z, not goal-directed best-first, not goal+novelty at any alpha. The measured reason is that
+allocation does not change what the tree can actually reach; the binding constraint is the
+chunk-level model's reliable horizon.
+
+That points at prediction reliability and horizon, not allocation, as the thing to fix
+before any further expansion-policy work.
+
+
+---
+
 ## Layout
 
 ```
