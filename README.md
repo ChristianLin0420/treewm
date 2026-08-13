@@ -278,6 +278,111 @@ branch network, not of any allocation policy.
 
 ---
 
+## Experiment 2 — novelty gain target (diagnostic rerun)
+
+36 runs (6 arms x 3 seeds x {navigate, stitch}), 0 failures, 292 min. Gain target replaced
+with `G*(n|T) = min_j d(q_n, q_j)`; architecture, planner, budgets, schedule and evaluation
+unchanged. Tables in `results_novelty/`.
+
+### The target change fixed coverage
+
+Distinct regions at budget 256:
+
+| arm | navigate | stitch |
+|---|---|---|
+| FixedTree | 43.5 | 31.4 |
+| Random | 63.1 | 45.8 |
+| **noveltyq (direct)** | **100.0** | **84.4** |
+| learnedq | 79.1 | 67.9 |
+| noveltyz (direct) | 87.4 | 82.8 |
+| learnedz | 63.3 | 56.8 |
+| *exp-1 TreeWM (retrieval target)* | *50.1* | *53.6* |
+
+Learned allocation gained **+58% / +27%** over the retrieval target, and **no arm
+anti-scales** -- coverage is monotone in budget for all six. Min-novelty also beats the
+old mean-pool heuristic (100.0 vs 90.8). The gain target really was a large part of the
+earlier failure.
+
+### But coverage does not buy success
+
+Success AUC over budgets 16-256, and its correlation with coverage across arms:
+
+| arm | navigate AUC | stitch AUC |
+|---|---|---|
+| FixedTree | 0.189 | 0.137 |
+| **Random** | **0.199** | **0.271** |
+| noveltyq | 0.155 | 0.171 |
+| learnedq | 0.172 | 0.140 |
+| noveltyz | 0.167 | 0.123 |
+| learnedz | 0.165 | 0.149 |
+
+```
+spearman(coverage@256, success AUC) = -0.77 (navigate),  -0.03 (stitch)
+```
+
+Random wins on both datasets with 40-50% *less* coverage than noveltyq, and is the only
+arm that scales cleanly with budget on stitch (.107 -> .367).
+
+### Why: novelty buys depth, and depth is where the model breaks
+
+Executing every sampled tree node's root-to-node chunks in the simulator and comparing
+against the model's decoded prediction (`scripts/grounded_coverage.py`, stitch, budget 256):
+
+| arm | mean depth | mean error | predicted/actual regions |
+|---|---|---|---|
+| FixedTree | 3.58 | 1.07 | 1.03 |
+| Random | 4.66 | 1.76 | 1.08 |
+| noveltyq | 8.05 | 5.00 | 1.06 |
+| learnedq | 9.06 | 3.25 | 1.10 |
+| noveltyz | 8.08 | 3.42 | 1.07 |
+| learnedz | 8.75 | 4.24 | 1.05 |
+
+Open-loop error compounds with depth and is essentially arm-independent (all arms share
+one world model): **d1 ~0.1, d4 ~1.3, d8 ~3.9, d12+ 4-13** world units, against a maze
+corridor width of 4.0. Arms differ only in *how deep they choose to go*.
+
+The region *count* is honest -- predicted/actual region ratio is 1.03-1.10 for every arm,
+so the tree really does reach about as many distinct regions as it claims. What breaks is
+the **node -> position mapping**: at depth 8 a node's predicted position is off by more
+than a corridor width. The planner selects a node by latent distance to the goal and then
+executes that node's path, so a deep node with a wrong mapping produces a wrong plan.
+
+**Coverage and planning utility are in tension under an imperfect chunk-level model.**
+Novelty-driven allocation converts budget into depth, depth into compounding error, and
+the planner needs an accurate mapping more than it needs breadth of coverage. Shallow,
+accurate allocation (random/BFS) wins despite covering far less.
+
+### Answers to the pre-registered questions
+
+1. **Does learned novelty close the gap to direct?** For coverage, partly -- learnedq
+   reaches 79% (navigate) / 80% (stitch) of noveltyq with Spearman 0.80-0.91 on the
+   target. For success, both are noise-dominated and neither beats random.
+2. **Does success stop anti-scaling?** Coverage: yes, monotone everywhere. Success: no arm
+   except random scales cleanly; the rest are flat-to-declining past budget 64.
+3. **Does the head preserve ranking?** Yes -- Spearman 0.80-0.91, Pearson 0.78-0.89.
+4. **Is q-novelty better than z-novelty?** For coverage, modestly (100.0 vs 87.4 navigate;
+   84.4 vs 82.8 stitch -- near parity). For success, no. **Do not attribute the gain to
+   controllability-aware q.**
+5. **Coverage at equal budget:** table above; ordering is the near-inverse of success.
+
+### Caveat retracted from the training logs
+
+`expansion/*` diagnostics logged *during training* are uninformative: the gain-training
+tree uses budget 16 with `expansion_batch_size=4`, so iteration 1 has only the root on the
+frontier and iteration 2 expands all four children -- the scorer never chooses, and all
+arms log identical values. Evaluation at budget >= 64 is unaffected. Raise
+`train.gain_tree_budget` before relying on those columns.
+
+### What this implies for the next step
+
+The bottleneck is no longer the gain target or the representation -- it is that expansion
+maximises novelty without regard to whether the prediction at that depth is still valid.
+The uncertainty head already exists and is trained; a novelty/reliability-traded score
+(or a depth-discounted planner objective) is the change the evidence actually points to.
+
+
+---
+
 ## Layout
 
 ```

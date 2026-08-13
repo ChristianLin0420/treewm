@@ -1,0 +1,77 @@
+{
+  "arm": "noveltyz",
+  "env": "pointmaze-medium-navigate-v0",
+  "seed": 0,
+  "budgets": {
+    "16": {
+      "eval/success_rate": 0.10000000149011612,
+      "eval/episode_return": 0.10000000149011612,
+      "eval/goal_distance_final": 13.697948455810547,
+      "eval/goal_distance_best": 12.69456672668457,
+      "eval/environment_steps": 473.6000061035156,
+      "eval/replans": 39.84000015258789,
+      "eval/world_model_nodes_per_replan": 16.0,
+      "eval/world_model_nodes_total": 637.4400024414062,
+      "eval/world_model_nodes_per_success": 256.0,
+      "eval/action_chunk_execution_length": 12.078312873840332,
+      "eval/planning_wall_clock_s": 0.6201593674399192,
+      "eval/num_episodes": 50.0
+    },
+    "32": {
+      "eval/success_rate": 0.10000000149011612,
+      "eval/episode_return": 0.10000000149011612,
+      "eval/goal_distance_final": 13.146078109741211,
+      "eval/goal_distance_best": 12.29638385772705,
+      "eval/environment_steps": 473.1600036621094,
+      "eval/replans": 40.380001068115234,
+      "eval/world_model_nodes_per_replan": 32.0,
+      "eval/world_model_nodes_total": 1292.1600341796875,
+      "eval/world_model_nodes_per_success": 518.4000244140625,
+      "eval/action_chunk_execution_length": 11.893016815185547,
+      "eval/planning_wall_clock_s": 0.8329838772199583,
+      "eval/num_episodes": 50.0
+    },
+    "64": {
+      "eval/success_rate": 0.23999999463558197,
+      "eval/episode_return": 0.23999999463558197,
+      "eval/goal_distance_final": 10.045506477355957,
+      "eval/goal_distance_best": 9.18953800201416,
+      "eval/environment_steps": 441.9599914550781,
+      "eval/replans": 38.779998779296875,
+      "eval/world_model_nodes_per_replan": 64.0,
+      "eval/world_model_nodes_total": 2481.919921875,
+      "eval/world_model_nodes_per_success": 1146.6666259765625,
+      "eval/action_chunk_execution_length": 11.566786766052246,
+      "eval/planning_wall_clock_s": 1.1897611195599893,
+      "eval/num_episodes": 50.0
+    },
+    "128": {
+      "eval/success_rate": 0.2800000011920929,
+      "eval/episode_return": 0.2800000011920929,
+      "eval/goal_distance_final": 8.029943466186523,
+      "eval/goal_distance_best": 7.396205425262451,
+      "eval/environment_steps": 460.32000732421875,
+      "eval/replans": 37.060001373291016,
+      "eval/world_model_nodes_per_replan": 128.0,
+      "eval/world_model_nodes_total": 4743.68017578125,
+      "eval/world_model_nodes_per_success": 3163.428466796875,
+      "eval/action_chunk_execution_length": 12.61090087890625,
+      "eval/planning_wall_clock_s": 1.8301151614601259,
+      "eval/num_episodes": 50.0
+    },
+    "256": {
+      "eval/success_rate": 0.25999999046325684,
+      "eval/episode_return": 0.25999999046325684,
+      "eval/goal_distance_final": 7.6836981773376465,
+      "eval/goal_distance_best": 7.023821830749512,
+      "eval/environment_steps": 460.1600036621094,
+      "eval/replans": 31.81999969482422,
+      "eval/world_model_nodes_per_replan": 256.0,
+      "eval/world_model_nodes_total": 8145.919921875,
+      "eval/world_model_nodes_per_success": 6144.0,
+      "eval/action_chunk_execution_length": 14.682589530944824,
+      "eval/planning_wall_clock_s": 2.892109594560461,
+      "eval/num_episodes": 50.0
+    }
+  }
+}

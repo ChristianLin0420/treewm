@@ -54,6 +54,8 @@ def build_jobs(args) -> list[dict]:
                     f"train.steps={args.steps}",
                     f"eval.task_split={args.task_split}",
                     f"train.num_workers={args.num_workers}",
+                    f"run_root={args.run_root}",
+                    *args.extra,
                 ],
             }
         )
@@ -70,12 +72,14 @@ def main() -> None:
     p.add_argument("--gpus", nargs="+", type=int, default=[0, 1])
     p.add_argument("--num-workers", type=int, default=10)
     p.add_argument("--python", default=sys.executable)
-    p.add_argument("--log-dir", default="runs/_logs")
+    p.add_argument("--run-root", default="runs")
+    p.add_argument("--extra", nargs="*", default=[], help="extra hydra overrides")
+    p.add_argument("--log-dir", default=None)
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     jobs = build_jobs(args)
-    log_dir = REPO / args.log_dir
+    log_dir = REPO / (args.log_dir or f"{args.run_root}/_logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     print(f"[grid] {len(jobs)} jobs over {len(args.gpus)} GPUs, {args.steps} steps each")
 
