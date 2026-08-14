@@ -41,6 +41,21 @@ ARM_ORDER = ["singlewm", "flatkwm", "fixedtreewm", "randomtreewm", "uncertaintyt
              "heuristictreewm", "treewm", "noveltyq", "learnedq", "noveltyz", "learnedz"]
 
 
+def recipe_label(ck, arm: str) -> str:
+    """Group by *recipe*, not by arm.
+
+    Screening recipes all share ``arm=randomtreewm`` and are distinguished only by their
+    run name, so grouping on the arm directory silently averaged every recipe together.
+    A plain timestamped run name (``20260813_seed0``) has no recipe, so fall back to arm.
+    """
+    import re
+
+    run_name = ck.parts[-3]
+    if re.match(r"^\d{8}_seed\d+$", run_name):
+        return arm
+    return re.sub(r"_s\d+$", "", run_name)
+
+
 @torch.no_grad()
 def coverage_for(model, normalizer, maze_spec, quantizer, tree_cfg, starts, device):
     obs = torch.from_numpy(normalizer.norm_obs(starts)).to(device)
@@ -71,6 +86,7 @@ def main() -> None:
     env_cache: dict[str, tuple] = {}
     for ck in checkpoints:
         dataset, arm = ck.parts[-5], ck.parts[-4]
+        label = recipe_label(ck, arm)
         model, normalizer, cfg, _ = load_run(str(ck), device)
         if model.decoder is None:
             continue
@@ -95,7 +111,7 @@ def main() -> None:
                 model, normalizer, spec, quantizer, tc, starts, device
             )
             assert nodes <= budget + 1e-6, f"{arm} exceeded budget {budget}"
-            results.setdefault(dataset, {}).setdefault(arm, {}).setdefault(budget, []).append(cov)
+            results.setdefault(dataset, {}).setdefault(label, {}).setdefault(budget, []).append(cov)
         print(f"  {dataset}/{arm}/{ck.parts[-3]}")
 
     out_dir = REPO / args.out
@@ -107,9 +123,9 @@ def main() -> None:
         print(f"{'arm':20s} " + " ".join(f"{b:>7d}" for b in args.budgets))
         print("-" * 70)
         fig, ax = plt.subplots(figsize=(7, 4.6))
-        for arm in ARM_ORDER:
-            if arm not in arms:
-                continue
+        labels = [a for a in ARM_ORDER if a in arms]
+        labels += sorted(a for a in arms if a not in labels)
+        for arm in labels:
             ys = [float(np.mean(arms[arm][b])) for b in args.budgets]
             print(f"{arm:20s} " + " ".join(f"{y:7.2f}" for y in ys))
             style = dict(marker="o", lw=2.2) if arm == "treewm" else dict(marker=".", lw=1.2, alpha=0.85)

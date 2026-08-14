@@ -25,6 +25,21 @@ ARM_ORDER = ["singlewm", "flatkwm", "fixedtreewm", "randomtreewm", "uncertaintyt
              "heuristictreewm", "treewm", "noveltyq", "learnedq", "noveltyz", "learnedz"]
 
 
+def recipe_label(ck, arm: str) -> str:
+    """Group by *recipe*, not by arm.
+
+    Screening recipes all share ``arm=randomtreewm`` and are distinguished only by their
+    run name, so grouping on the arm directory silently averaged every recipe together.
+    A plain timestamped run name (``20260813_seed0``) has no recipe, so fall back to arm.
+    """
+    import re
+
+    run_name = ck.parts[-3]
+    if re.match(r"^\d{8}_seed\d+$", run_name):
+        return arm
+    return re.sub(r"_s\d+$", "", run_name)
+
+
 def find_checkpoints(runs_root: Path, dataset: str | None) -> list[Path]:
     out = []
     for ck in sorted(runs_root.glob("*/*/*/checkpoints/latest.pt")):
@@ -93,7 +108,7 @@ def main() -> None:
                 skipped.append(f"{ck.parts[-5]}/{data['arm']}/{ck.parts[-3]} (score_space={got})")
                 continue
         # parts: runs/<dataset>/<arm>/<stamp>/checkpoints/latest.pt
-        key = (ck.parts[-5], data["arm"])
+        key = (ck.parts[-5], recipe_label(ck, data["arm"]))
         curves.setdefault(key, {})
         for budget, metrics in data["budgets"].items():
             curves[key].setdefault(int(budget), []).append(metrics["eval/success_rate"])
@@ -111,9 +126,9 @@ def main() -> None:
 
     for dataset in sorted({d for d, _ in curves}):
         fig, ax = plt.subplots(figsize=(7, 4.6))
-        for arm in ARM_ORDER:
-            if (dataset, arm) not in curves:
-                continue
+        labels = [a for a in ARM_ORDER if (dataset, a) in curves]
+        labels += sorted(a for (d, a) in curves if d == dataset and a not in labels)
+        for arm in labels:
             pts = curves[(dataset, arm)]
             xs = sorted(pts)
             ys = [sum(pts[x]) / len(pts[x]) for x in xs]
