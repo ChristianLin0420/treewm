@@ -59,7 +59,10 @@ def tree_config(cfg: DictConfig) -> TreeConfig:
     scorer = raw.pop("scorer", None)
     tc = TreeConfig(**raw)
     if scorer:
+        # Recorded as an override so tree_config_for cannot silently replace it with the
+        # arm's default scorer.
         tc.scorer = scorer
+        tc.scorer_override = scorer
     return tc
 
 

@@ -32,7 +32,9 @@ class TreeConfig:
     depth_penalty: float = 0.0
     alpha: float = 0.0  # diversity weight for the goal_novelty scorer
     broad_fraction: float = 0.45  # D6 broad -> focused switch point
-    depth_pools: int = 3  # D2 depth strata  # lambda for the novelty_q_penalized scorer
+    depth_pools: int = 3  # D2 depth strata
+    # Explicit user override; when set it wins over the arm's default scorer.
+    scorer_override: str | None = None  # lambda for the novelty_q_penalized scorer
 
     def __post_init__(self) -> None:
         assert self.node_budget >= 1

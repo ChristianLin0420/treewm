@@ -17,4 +17,6 @@ normalize_q: true
 use_tree_context: true
 use_depth_embedding: true
 novelty_space: q        # q | z -- overridden by the arm class
+horizon_mode: learned   # learned | random | fixed | depth_schedule  (Q2)
+fixed_horizon_index: 0  # index into future_sets.horizons when horizon_mode=fixed
 flatk_max: 256          # FlatKWM breadth; one checkpoint covers the whole budget curve

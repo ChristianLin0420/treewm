@@ -28,6 +28,9 @@ from treewm.data.ogbench_dataset import build_datasets
 from treewm.data.retrieval_index import LatentIndex, compute_endpoint_cells
 from treewm.data.samplers import InfiniteLoader, build_dataloader, to_device
 from treewm.evaluation import diagnostics as diag
+from treewm.evaluation import tree_stats as tstats
+from treewm.evaluation import tree_viz as tv
+from treewm.tree.frontier import GOAL_AWARE_SCORERS
 from treewm.evaluation.rollout import evaluate
 from treewm.evaluation.tasks import build_tasks, describe_tasks
 from treewm.evaluation.coverage import StateQuantizer
@@ -50,6 +53,19 @@ from treewm.utils.distributed import (
 )
 from treewm.utils.meta import build_run_dir, count_parameters, env_summary, git_commit, hostname
 from treewm.utils.seeding import seed_everything
+
+
+def should_visualise(step: int, cfg) -> bool:
+    """Dense visualisation early, sparser later (spec section 12).
+
+    Tree structure changes fastest in the first couple of thousand steps, so a single
+    fixed stride either floods the run or misses the interesting phase entirely.
+    """
+    if step == 0:
+        return False
+    early_until = int(cfg.train.viz_early_until)
+    every = int(cfg.train.viz_every_early) if step <= early_until else int(cfg.train.viz_every)
+    return step % max(every, 1) == 0
 
 
 def build_scheduler(optimizer, cfg):
@@ -161,6 +177,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     maze_spec = MazeSpec.from_env(env)
+    anchors = tv.build_anchors(maze_spec, num=int(cfg.train.viz_anchors))
     tasks = build_tasks(
         env, str(cfg.eval.task_split), int(cfg.eval.num_hard_tasks),
         float(cfg.eval.hard_percentile), int(cfg.eval.seed),
@@ -354,7 +371,7 @@ def main(cfg: DictConfig) -> None:
             print(f"[treewm] step {step} success={emetrics['eval/success_rate']:.3f}")
 
         # ------------------------------------------------------ visualisations
-        if step > 0 and step % int(cfg.train.viz_every) == 0 and dist_info.is_main:
+        if should_visualise(step, cfg) and dist_info.is_main:
             model.eval()
             try:
                 logger.figure(
@@ -370,12 +387,35 @@ def main(cfg: DictConfig) -> None:
                     fig = diag.q_pca_plot(model, vbatch, normalizer, maze_spec)
                     if fig is not None:
                         logger.figure("viz/q_pca", fig, step)
-                    for i in range(min(2, vbatch["obs"].shape[0])):
-                        tree, _ = model.generate(model.encode(vbatch["obs"][i : i + 1]), tree_cfg)
-                        logger.figure(
-                            f"viz/tree_example_{i}",
-                            diag.tree_plot(model, tree, normalizer, maze_spec, 0), step,
+                    # Fixed anchors, identical across every run, so two runs can be
+                    # compared by flipping between them in TensorBoard.
+                    for a in range(min(int(cfg.train.viz_anchors), len(anchors))):
+                        start, goal = anchors.starts[a], anchors.goals[a]
+                        obs_a = torch.from_numpy(normalizer.norm_obs(start[None])).to(device)
+                        goal_a = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
+                        tree, _ = model.generate(
+                            model.encode(obs_a), tree_cfg,
+                            goal_obs=goal_a if tree_cfg.scorer in GOAL_AWARE_SCORERS else None,
                         )
+                        node_obs = model.decoder(tree.latent)
+                        gd = torch.linalg.vector_norm(node_obs - goal_a.unsqueeze(1), dim=-1)
+                        gd = gd.masked_fill(~tree.valid, float("inf")); gd[:, 0] = float("inf")
+                        r = tv.TreeRender.from_tree(model, tree, normalizer, goal, start, 0,
+                                                    int(gd.argmin(dim=1).item()))
+                        nm = anchors.names[a]
+                        logger.figure(f"viz/tree_xy_depth/{nm}", tv.view_depth(r, maze_spec, nm), step)
+                        logger.figure(f"viz/tree_xy_expansion_order/{nm}",
+                                      tv.view_expansion_order(r, maze_spec, nm), step)
+                        logger.figure(f"viz/tree_xy_goal_distance/{nm}",
+                                      tv.view_goal_distance(r, maze_spec, nm), step)
+                        logger.figure(f"viz/tree_xy_root_subtree/{nm}",
+                                      tv.view_root_subtree(r, maze_spec, nm), step)
+                        logger.figure(f"viz/tree_horizon/{nm}", tv.view_horizon(r, maze_spec, nm), step)
+                        logger.figure(f"viz/tree_selected_path/{nm}",
+                                      tv.view_selected_path(r, maze_spec, nm), step)
+                        logger.scalars(tstats.structural_summary(tree, model, normalizer), step)
+                        logger.histogram(f"tree/horizon_hist/{nm}",
+                                         tree.action_mask.sum(-1)[tree.valid].float(), step)
             except Exception as exc:  # visualisation must never kill a run
                 print(f"[treewm] visualisation skipped at step {step}: {exc}")
 

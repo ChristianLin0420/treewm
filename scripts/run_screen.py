@@ -59,6 +59,27 @@ RECIPES: dict[str, tuple[str, str]] = {
     "H3_noredundancy": ("H", "arm=randomtreewm losses.weights.redundancy=0.0"),
 }
 
+# ---- Q1: AntMaze generalisation (50k) ---------------------------------------------
+ANT: dict[str, tuple[str, str]] = {
+    "Q1_flat":        ("Q1", "arm=flatkwm"),
+    "Q1_random":      ("Q1", "arm=randomtreewm"),
+    "Q1_short":       ("Q1", f"arm=randomtreewm {SHORT_H}"),
+    "Q1_short_combo": ("Q1", f"arm=randomtreewm {SHORT_H} tree.scorer=root_quota "
+                             "planner.score_mode=ancestor"),
+}
+
+# ---- Q2: is the win learned horizon selection, or just short horizons available? ----
+# Every variant shares the SAME available set [2,4,8,16]; only selection differs.
+Q2: dict[str, tuple[str, str]] = {
+    "Q2_learned":  ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=learned"),
+    "Q2_random_h": ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=random"),
+    "Q2_fixed2":   ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=fixed model.fixed_horizon_index=0"),
+    "Q2_fixed4":   ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=fixed model.fixed_horizon_index=1"),
+    "Q2_fixed8":   ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=fixed model.fixed_horizon_index=2"),
+    "Q2_fixed16":  ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=fixed model.fixed_horizon_index=3"),
+    "Q2_depthsched": ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=depth_schedule"),
+}
+
 # Phase-2 combinations, launched only after screening motivates them.
 COMBOS: dict[str, tuple[str, str]] = {
     "P_k8_short_ms":  ("combo", f"arm=randomtreewm model.branch_factor=8 {SHORT_H} {MULTISTEP}"),
@@ -68,7 +89,7 @@ COMBOS: dict[str, tuple[str, str]] = {
     "P_short_ms":     ("combo", f"arm=randomtreewm {SHORT_H} {MULTISTEP}"),
 }
 
-ALL = {**RECIPES, **COMBOS}
+ALL = {**RECIPES, **COMBOS, **ANT, **Q2}
 
 
 def throughput(log: Path) -> float | None:

@@ -53,6 +53,15 @@ class TreeWMConfig:
     # Metric space for the expansion-gain target and the head's input features.
     # "q" = controllability novelty, "z" = state novelty. Tested, not assumed.
     novelty_space: str = "q"
+    # Q2 -- how a branch's horizon is chosen. The *available* horizon set is fixed by
+    # future_sets.horizons in every mode, so this isolates horizon SELECTION from
+    # horizon AVAILABILITY, which is exactly the question.
+    #   learned         argmax of the horizon head (current C1 behaviour)
+    #   random          uniform over the available horizons
+    #   fixed           always fixed_horizon_index
+    #   depth_schedule  longer near the root, shorter deeper
+    horizon_mode: str = "learned"
+    fixed_horizon_index: int = 0
 
     @property
     def num_horizons(self) -> int:
@@ -164,7 +173,7 @@ class TreeWM(nn.Module):
         than being read off ``z`` alone.
         """
         out = self.branch(z, depth)
-        h_idx = out.horizon_index() if horizon_override is None else horizon_override
+        h_idx = self._select_horizon(out, z, depth) if horizon_override is None else horizon_override
         actions = out.action if action_override is None else action_override
         mask = horizon_mask(h_idx, self.horizons, self.cfg.h_max)
 
@@ -182,6 +191,27 @@ class TreeWM(nn.Module):
             "uncertainty": out.uncertainty,
             "expansion_gain": out.gain_prior,
         }
+
+    def _select_horizon(self, out, z: torch.Tensor, depth: torch.Tensor | None) -> torch.Tensor:
+        """Pick a horizon index per branch according to ``cfg.horizon_mode``."""
+        mode = self.cfg.horizon_mode
+        n_h = len(self.cfg.horizons)
+        shape = out.horizon_logits.shape[:2]  # [B, K]
+        if mode == "learned":
+            return out.horizon_index()
+        if mode == "random":
+            return torch.randint(0, n_h, shape, device=z.device)
+        if mode == "fixed":
+            return torch.full(shape, int(self.cfg.fixed_horizon_index), device=z.device,
+                              dtype=torch.long)
+        if mode == "depth_schedule":
+            # Longest horizon at the root, one step shorter per level, floored at the
+            # shortest available.
+            d = torch.zeros(shape[0], device=z.device, dtype=torch.long) if depth is None \
+                else depth.long()
+            idx = (n_h - 1 - d).clamp(0, n_h - 1)
+            return idx.view(-1, 1).expand(shape)
+        raise ValueError(f"unknown horizon_mode {mode!r}")
 
     @torch.no_grad()
     def expand_nodes(self, z: torch.Tensor, depth: torch.Tensor) -> dict[str, torch.Tensor]:

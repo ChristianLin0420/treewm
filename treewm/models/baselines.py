@@ -165,7 +165,8 @@ def tree_config_for(arm: str, base: TreeConfig, model: TreeWM) -> TreeConfig:
     The node budget is never modified here -- that is the controlled variable.
     """
     arm = arm.lower()
-    cfg = replace(base, branch_factor=model.cfg.branch_factor, scorer=ARMS[arm].default_scorer)
+    scorer = base.scorer_override or ARMS[arm].default_scorer
+    cfg = replace(base, branch_factor=model.cfg.branch_factor, scorer=scorer)
     if arm == "singlewm":
         # A chain needs depth room equal to the budget; max_depth must not bind.
         return replace(cfg, max_depth=max(base.node_budget, base.max_depth), expansion_batch_size=1)

@@ -36,7 +36,10 @@ train:
   hist_every: 500
   diag_every: 1000
   eval_every: 10000
-  viz_every: 10000
+  viz_every: 500          # after viz_early_until
+  viz_every_early: 250    # dense early, when tree structure changes fastest
+  viz_early_until: 2000
+  viz_anchors: 4          # fixed diagnostic anchors rendered during training
   ckpt_every: 2000
   val_batches: 20
   # The expansion-gain stage generates a full tree per step, so it runs on a stride.

@@ -29,6 +29,9 @@ class EpisodeResult:
     best_goal_distance: float
     chunk_lengths: list[int] = field(default_factory=list)
     selected_depths: list[int] = field(default_factory=list)
+    displacement: float = 0.0
+    path_length: float = 0.0
+    action_magnitude: float = 0.0
     trajectory: list[np.ndarray] = field(default_factory=list)
 
 
@@ -54,6 +57,10 @@ def run_episode(
         }
     ob, info = env.reset(options=options, seed=seed)
     goal = np.asarray(info["goal"], dtype=np.float32)
+    start_xy = np.asarray(ob, dtype=np.float32)[:2].copy()
+    prev_xy = start_xy.copy()
+    path_len = 0.0
+    act_mag: list[float] = []
 
     steps = replans = nodes = 0
     success = False
@@ -74,6 +81,10 @@ def run_episode(
         for action in plan.actions:
             ob, _, terminated, truncated, info = env.step(action)
             steps += 1
+            cur_xy = np.asarray(ob, dtype=np.float32)[:2]
+            path_len += float(np.linalg.norm(cur_xy - prev_xy))
+            prev_xy = cur_xy.copy()
+            act_mag.append(float(np.abs(action).mean()))
             if record_trajectory:
                 traj.append(np.asarray(ob, dtype=np.float32))
             dist = float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - goal[:2]))
@@ -93,6 +104,9 @@ def run_episode(
         best_goal_distance=min(best_dist, final_dist),
         chunk_lengths=chunks,
         selected_depths=depths,
+        displacement=float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - start_xy)),
+        path_length=path_len,
+        action_magnitude=float(np.mean(act_mag)) if act_mag else 0.0,
         trajectory=traj,
     )
 
@@ -123,6 +137,9 @@ def evaluate(
     best = np.array([r.best_goal_distance for r in results], dtype=np.float32)
     chunk_lens = np.array([c for r in results for c in r.chunk_lengths], dtype=np.float32)
     sel_depths = np.array([d for r in results for d in r.selected_depths], dtype=np.float32)
+    disp = np.array([r.displacement for r in results], dtype=np.float32)
+    path_len = np.array([r.path_length for r in results], dtype=np.float32)
+    act_mag = np.array([r.action_magnitude for r in results], dtype=np.float32)
 
     nodes_per_success = float(nodes[successes > 0].mean()) if successes.any() else float("nan")
 
@@ -138,6 +155,12 @@ def evaluate(
         "eval/world_model_nodes_per_success": nodes_per_success,
         "eval/action_chunk_execution_length": float(chunk_lens.mean()) if chunk_lens.size else 0.0,
         "eval/selected_leaf_depth": float(sel_depths.mean()) if sel_depths.size else 0.0,
+        # Locomotion diagnostics -- on AntMaze a zero success rate is uninformative
+        # unless we can also say whether the ant moved at all.
+        "eval/displacement": float(disp.mean()),
+        "eval/path_length": float(path_len.mean()),
+        "eval/action_magnitude": float(act_mag.mean()),
+        "eval/fraction_moving": float((disp > 1.0).mean()),
         "eval/planning_wall_clock_s": float(elapsed / max(len(results), 1)),
         "eval/num_episodes": float(len(results)),
     }
