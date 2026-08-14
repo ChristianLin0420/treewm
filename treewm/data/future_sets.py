@@ -50,6 +50,12 @@ class FutureSetConfig:
     # Track A: supervise the anchor's own continuation at depths 1..multi_step_depth so
     # recursion is trained on chained predictions, not only single edges.
     multi_step_depth: int = 3
+    # Size of the retrieval pool. k-d trees degrade toward a linear scan in high
+    # dimensions, and AntMaze observations are 29-D: querying 145 neighbours over 1M
+    # points measured 0.37 it/s (9h for a 12k-step run). Subsampling the pool restores
+    # sublinear behaviour; it changes which neighbours are found, not what a mode is.
+    # 0 keeps the whole dataset (the PointMaze default).
+    retrieval_pool: int = 0
 
     def __post_init__(self) -> None:
         self.horizons = tuple(int(h) for h in self.horizons)
@@ -94,7 +100,14 @@ class FutureSetBuilder:
 
             # Retrieval uses normalised *raw* state, which is stable from step 0
             # (spec section 11 recommends this over a moving learned latent).
-            self._tree = cKDTree(self.obs_norm)
+            pool = int(self.cfg.retrieval_pool)
+            if pool and pool < len(self.obs_norm):
+                rng = np.random.default_rng(0)  # fixed: the pool must not vary by worker
+                self._pool_idx = np.sort(rng.choice(len(self.obs_norm), size=pool, replace=False))
+                self._tree = cKDTree(self.obs_norm[self._pool_idx])
+            else:
+                self._pool_idx = None
+                self._tree = cKDTree(self.obs_norm)
         return self._tree
 
     def _neighbors(self, t: int) -> np.ndarray:
@@ -103,6 +116,8 @@ class FutureSetBuilder:
         dists, idxs = self.tree.query(self.obs_norm[t], k=k)
         idxs = np.atleast_1d(idxs)
         dists = np.atleast_1d(dists)
+        if getattr(self, "_pool_idx", None) is not None:
+            idxs = self._pool_idx[idxs]  # map pool positions back to dataset indices
 
         min_h = int(self.horizons.min())
         keep = (
