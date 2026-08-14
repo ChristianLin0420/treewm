@@ -105,7 +105,9 @@ def main() -> None:
         mark = "  <- baseline" if name == args.baseline else ""
         print(f"{name:20s} {r['_steps']:7d} " + " ".join(cells) + f"  {wins:4d}{mark}")
 
-    promoted = [n for n, w, r in scored
+    # Sorted by how many criteria improved, so a consumer taking the top-k gets the
+    # *strongest* recipes. Alphabetical order silently promoted the weakest two.
+    promoted = [n for n, w, _ in sorted(scored, key=lambda x: -x[1])
                 if n != args.baseline and w >= args.min_criteria and n not in incomplete]
     print(f"\n=== promotion (>= {args.min_criteria} criteria improved by >{args.rel_threshold:.0%}) ===")
     for n, w, _ in sorted(scored, key=lambda x: -x[1]):
