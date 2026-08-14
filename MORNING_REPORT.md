@@ -127,4 +127,6 @@ Screening = 1 seed (**preliminary**); Phase 2 = 3 seeds (**more robust**). Rando
 
 ### Axis: generalisation — AntMaze
 
-_AntMaze results missing (pipeline did not reach this stage)._
+- `A0_flat` on antmaze-teleport: b32=0.000, b64=0.000, b128=0.000
+- `A0_random` on antmaze-teleport: b32=0.000, b64=0.000, b128=0.000
+- `C1_short` on antmaze-teleport: b32=0.000, b64=0.000, b128=0.000
