@@ -64,6 +64,12 @@ def bfs_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) ->
 
 
 def random_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
+    # Fail loudly rather than fall back to the global stream: silently sharing it with
+    # training and visualisation is exactly what made results depend on viz cadence.
+    assert ctx.generator is not None, (
+        "random frontier expansion requires an explicit generator; pass one from "
+        "RngStreams so logging cannot perturb training or planning"
+    )
     noise = torch.rand(
         tree.valid.shape, device=tree.valid.device, generator=ctx.generator, dtype=torch.float32
     )

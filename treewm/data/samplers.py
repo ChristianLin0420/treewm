@@ -23,12 +23,24 @@ def build_dataloader(
     seed: int = 0,
     drop_last: bool = True,
     pin_memory: bool = True,
+    generator: torch.Generator | None = None,
 ) -> tuple[DataLoader, DistributedSampler | None]:
+    """Build a DataLoader on an explicit generator.
+
+    Without one, PyTorch draws each iterator's worker ``base_seed`` from the *global*
+    torch stream. Any code that re-creates an iterator -- e.g. ``next(iter(val_loader))``
+    inside a diagnostic -- therefore advances the stream training samples from, which is
+    how visualisation cadence was changing training results.
+    """
     sampler: DistributedSampler | None = None
     if is_distributed():
         sampler = DistributedSampler(dataset, shuffle=shuffle, seed=seed, drop_last=drop_last)
+    if generator is None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
     loader = DataLoader(
         dataset,
+        generator=generator,
         batch_size=batch_size,
         shuffle=(shuffle and sampler is None),
         sampler=sampler,

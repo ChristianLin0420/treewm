@@ -80,6 +80,26 @@ Q2: dict[str, tuple[str, str]] = {
     "Q2_depthsched": ("Q2", f"arm=randomtreewm {SHORT_H} model.horizon_mode=depth_schedule"),
 }
 
+
+# ---- Cycle 4: fixed edge-horizon sweep (isolate temporal edge length) --------------
+# Every recipe: K=4, recursive TreeWM, residual dynamics, RandomTree expansion,
+# decoded goal scoring, identical training/eval/viz settings. The ONLY difference is the
+# single fixed horizon h. horizons=[h] makes h the only edge length available, so the
+# dataset targets and the model agree and nothing else varies.
+def _fixed_h(h: int) -> str:
+    return (f"arm=randomtreewm future_sets.horizons=[{h}] future_sets.h_max={h} "
+            f"future_sets.horizon_rule=fixed future_sets.fixed_horizon={h} "
+            f"model.horizon_mode=fixed model.fixed_horizon_index=0")
+
+
+HSWEEP: dict[str, tuple[str, str]] = {f"H{h}": ("H", _fixed_h(h)) for h in (8, 12, 16, 20, 24, 32)}
+
+# Cycle-4 AntMaze: flat control vs the best fixed horizon (filled in after the sweep).
+ANT4: dict[str, tuple[str, str]] = {
+    "A4_flat":   ("ANT4", "arm=flatkwm"),
+    "A4_best_h": ("ANT4", _fixed_h(16)),  # h replaced by the sweep winner before launch
+}
+
 # Phase-2 combinations, launched only after screening motivates them.
 COMBOS: dict[str, tuple[str, str]] = {
     "P_k8_short_ms":  ("combo", f"arm=randomtreewm model.branch_factor=8 {SHORT_H} {MULTISTEP}"),
@@ -89,7 +109,7 @@ COMBOS: dict[str, tuple[str, str]] = {
     "P_short_ms":     ("combo", f"arm=randomtreewm {SHORT_H} {MULTISTEP}"),
 }
 
-ALL = {**RECIPES, **COMBOS, **ANT, **Q2}
+ALL = {**RECIPES, **COMBOS, **ANT, **Q2, **HSWEEP, **ANT4}
 
 
 def throughput(log: Path) -> float | None:

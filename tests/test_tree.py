@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from treewm.utils.rng import make_generator
 from treewm.models.baselines import ARMS, build_model, tree_config_for
 from treewm.models.treewm import TreeWMConfig
 from treewm.tree.expansion import TreeConfig
@@ -38,7 +39,7 @@ def test_tree_parent_child_indexing():
     model = build_model("treewm", SMALL).eval()
     cfg = TreeConfig(node_budget=32, expansion_batch_size=2, branch_factor=4, max_depth=8, scorer="bfs")
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(3, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(3, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
 
     parent = tree.parent_index
     valid = tree.valid
@@ -60,7 +61,7 @@ def test_node_budget_enforced_for_every_arm():
             base = TreeConfig(node_budget=budget, expansion_batch_size=4, max_depth=16, branch_factor=4)
             cfg = tree_config_for(arm, base, model)
             with torch.no_grad():
-                tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg)
+                tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
             counts = tree.num_nodes
             assert int(counts.max()) <= budget, f"{arm} exceeded budget {budget}"
             assert int(tree.valid.sum(1).max()) <= budget
@@ -76,7 +77,7 @@ def test_shape_of_spend_differs_by_arm():
         model = build_model(arm, SMALL, k_max=256).eval()
         cfg = tree_config_for(arm, TreeConfig(node_budget=budget, branch_factor=4, max_depth=16), model)
         with torch.no_grad():
-            tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg)
+            tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
         depths[arm] = int(tree.depth.masked_fill(~tree.valid, 0).max())
     assert depths["singlewm"] == budget - 1, "SingleWM must spend the budget on depth"
     assert depths["flatkwm"] == 1, "FlatKWM must spend the budget on breadth"
@@ -88,7 +89,7 @@ def test_best_first_expansion_ordering_is_breadth_first_for_bfs():
     model = build_model("fixedtreewm", SMALL).eval()
     cfg = TreeConfig(node_budget=40, expansion_batch_size=1, branch_factor=4, max_depth=8, scorer="bfs")
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(1, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(1, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
     expanded = tree.expanded[0] & tree.valid[0]
     depths = tree.depth[0][expanded].tolist()
     # Breadth-first: the sequence of expanded depths is non-decreasing.
@@ -112,7 +113,7 @@ def test_every_arm_generates_under_autocast(arm):
     with torch.autocast(device_type=device, dtype=dtype, enabled=(device == "cuda")):
         with torch.no_grad():
             z = model.encode(torch.randn(2, SMALL.obs_dim, device=device))
-            tree, _ = model.generate(z, cfg)
+            tree, _ = model.generate(z, cfg, generator=make_generator(0, 'eval', device))
     assert int(tree.num_nodes.min()) == 16
     assert tree.expansion_gain.dtype == torch.float32
     assert tree.keep_score.dtype == torch.float32
@@ -131,7 +132,7 @@ def test_every_node_carries_an_executable_action_chunk(arm):
     cfg = tree_config_for(arm, TreeConfig(node_budget=48, expansion_batch_size=4, branch_factor=4,
                                           max_depth=48), model)
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(3, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(3, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
 
     non_root = tree.valid.clone()
     non_root[:, 0] = False
@@ -185,7 +186,7 @@ def test_path_to_root_reaches_root():
     model = build_model("fixedtreewm", SMALL).eval()
     cfg = TreeConfig(node_budget=32, expansion_batch_size=2, branch_factor=4, max_depth=8, scorer="bfs")
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
     target = torch.tensor([20, 15])
     chain = tree.path_to_root(target)
     assert (chain[0] == 0).all(), "path must start at the root"

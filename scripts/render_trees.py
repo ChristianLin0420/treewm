@@ -29,6 +29,7 @@ from treewm.logging.tensorboard import TreeWMLogger
 from treewm.models.baselines import tree_config_for
 from treewm.utils import config as cfg_utils
 from treewm.utils.provenance import provenance, write_artifact
+from treewm.utils.rng import make_generator
 from treewm.utils.seeding import seed_everything
 from scripts.eval import load_run
 
@@ -61,7 +62,8 @@ def render_checkpoint(ck: Path, scorer: str | None, budget: int, num_anchors: in
         goal_n = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
         z = model.encode(obs)
         tree, _ = model.generate(
-            z, tc, goal_obs=goal_n if tc.scorer in
+            z, tc, generator=make_generator(0, 'viz', device),
+            goal_obs=goal_n if tc.scorer in
             ("goal", "goal_novelty", "diverse_goal", "broad_to_focused") else None
         )
 

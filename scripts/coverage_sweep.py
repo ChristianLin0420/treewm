@@ -33,6 +33,7 @@ from treewm.data.ogbench_dataset import load_ogbench
 from treewm.evaluation.coverage import StateQuantizer, unique_cells_per_row
 from treewm.models.baselines import tree_config_for
 from treewm.utils import config as cfg_utils
+from treewm.utils.rng import make_generator
 from treewm.utils.seeding import seed_everything
 from scripts.eval import load_run
 
@@ -60,7 +61,7 @@ def recipe_label(ck, arm: str) -> str:
 def coverage_for(model, normalizer, maze_spec, quantizer, tree_cfg, starts, device):
     obs = torch.from_numpy(normalizer.norm_obs(starts)).to(device)
     z = model.encode(obs)
-    tree, _ = model.generate(z, tree_cfg)
+    tree, _ = model.generate(z, tree_cfg, generator=make_generator(0, 'viz', device))
     states = model.decoder(tree.latent)  # [B, N, obs_dim]
     cells = quantizer.cell_ids(states)
     covered = unique_cells_per_row(cells, tree.valid.float()).float()

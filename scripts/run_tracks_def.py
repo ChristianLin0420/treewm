@@ -30,6 +30,7 @@ from treewm.models.baselines import tree_config_for
 from treewm.planning.goal_planner import GoalPlanner
 from treewm.utils import config as cfg_utils
 from treewm.utils.provenance import provenance, write_artifact
+from treewm.utils.rng import make_generator
 from treewm.utils.seeding import seed_everything
 from scripts.eval import load_run
 
@@ -53,7 +54,8 @@ def tree_shape(model, normalizer, env, tasks, tc, device, n=6):
     z = model.encode(obs)
     from treewm.tree.frontier import GOAL_AWARE_SCORERS
 
-    tree, _ = model.generate(z, tc, goal_obs=goal if tc.scorer in GOAL_AWARE_SCORERS else None)
+    tree, _ = model.generate(z, tc, generator=make_generator(0, 'viz', device),
+                             goal_obs=goal if tc.scorer in GOAL_AWARE_SCORERS else None)
     return structural_summary(tree, model, normalizer)
 
 

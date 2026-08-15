@@ -52,6 +52,7 @@ from treewm.utils.distributed import (
     unwrap_model,
 )
 from treewm.utils.meta import build_run_dir, count_parameters, env_summary, git_commit, hostname
+from treewm.utils.rng import RngStreams, make_generator
 from treewm.utils.seeding import seed_everything
 
 
@@ -125,13 +126,17 @@ def main(cfg: DictConfig) -> None:
         print(f"[treewm] train {train_ds.summary()}")
         print(f"[treewm] val   {val_ds.summary()}")
 
+    # Separate loader generators: re-creating the val iterator inside a diagnostic must
+    # not advance the stream the training loader samples from.
     train_loader, train_sampler = build_dataloader(
         train_ds, int(cfg.train.batch_size), shuffle=True,
         num_workers=int(cfg.train.num_workers), seed=int(cfg.seed),
+        generator=make_generator(int(cfg.seed), "train"),
     )
     val_loader, _ = build_dataloader(
         val_ds, int(cfg.train.batch_size), shuffle=False,
         num_workers=max(2, int(cfg.train.num_workers) // 4), seed=int(cfg.seed),
+        generator=make_generator(int(cfg.seed), "viz"),
     )
     train_iter = InfiniteLoader(train_loader, train_sampler)
 
@@ -147,6 +152,10 @@ def main(cfg: DictConfig) -> None:
     match_cfg = cfg_utils.matching_config(cfg)
     loss_cfg = cfg_utils.loss_config(cfg)
     planner_cfg = cfg_utils.planner_config(cfg)
+
+    # Four isolated streams so diagnostics cannot perturb training or planning.
+    rng = RngStreams(seed=int(cfg.seed), device=device)
+    model._horizon_gen = make_generator(int(cfg.seed), "train", device)
 
     ddp_model = model
     if is_distributed():
@@ -258,7 +267,7 @@ def main(cfg: DictConfig) -> None:
                     if str(cfg.losses.gain_target) == "novelty":
                         gain_loss, gain_metrics = novelty_gain_loss(
                             model, artifacts["z"][:n_gain], gain_tree_cfg,
-                            space=str(cfg.model.novelty_space),
+                            space=str(cfg.model.novelty_space), generator=rng.planner,
                         )
                     else:
                         gain_loss, gain_metrics = compute_expansion_gain_loss(
@@ -356,7 +365,8 @@ def main(cfg: DictConfig) -> None:
         # ---------------------------------------------------- goal evaluation
         if step > 0 and step % int(cfg.train.eval_every) == 0 and dist_info.is_main:
             model.eval()
-            planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, device)
+            planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, device,
+                                  generator=rng.reset("eval"))
             emetrics = evaluate(
                 env, planner, tasks, int(cfg.eval.episodes_per_task),
                 int(cfg.planner.max_env_steps), int(cfg.eval.seed),
@@ -394,7 +404,7 @@ def main(cfg: DictConfig) -> None:
                         obs_a = torch.from_numpy(normalizer.norm_obs(start[None])).to(device)
                         goal_a = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
                         tree, _ = model.generate(
-                            model.encode(obs_a), tree_cfg,
+                            model.encode(obs_a), tree_cfg, generator=rng.viz,
                             goal_obs=goal_a if tree_cfg.scorer in GOAL_AWARE_SCORERS else None,
                         )
                         node_obs = model.decoder(tree.latent)
@@ -422,7 +432,8 @@ def main(cfg: DictConfig) -> None:
     # ------------------------------------------------------------ final eval
     if dist_info.is_main:
         model.eval()
-        planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, device)
+        planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, device,
+                              generator=rng.reset("eval"))
         final = evaluate(
             env, planner, tasks, int(cfg.eval.episodes_per_task),
             int(cfg.planner.max_env_steps), int(cfg.eval.seed),

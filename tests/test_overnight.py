@@ -8,6 +8,7 @@ import torch
 
 from treewm.evaluation.tree_stats import structural_summary
 from treewm.losses.recursive_losses import multi_step_recursive_loss, scheduled_sampling_schedule
+from treewm.utils.rng import make_generator
 from treewm.models.baselines import build_model, tree_config_for
 from treewm.models.treewm import TreeWMConfig
 from treewm.tree.expansion import TreeConfig
@@ -90,7 +91,7 @@ def _tree(arm="randomtreewm", scorer="random", budget=32, goal=None, model=None)
 
     cfg = replace(cfg, scorer=scorer)
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, goal_obs=goal)
+        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, goal_obs=goal, generator=make_generator(0, 'eval'))
     return model, tree, cfg
 
 
@@ -114,26 +115,58 @@ def test_new_policies_fill_the_budget(scorer):
     assert int(tree.num_nodes.min()) == 32, f"{scorer} underspent the budget"
 
 
-def test_root_quota_spreads_across_subtrees_more_than_plain_random():
-    """D3 exists to stop one subtree eating the budget; verify it actually does."""
-    torch.manual_seed(0)
+def test_root_quota_prefers_the_least_developed_subtree():
+    """D3's guarantee, tested directly rather than through a stochastic outcome.
+
+    Comparing end-of-run subtree concentration against plain random is far too noisy at
+    this scale (two trees, 48 nodes, four subtrees: the difference is well under one
+    node). The actual guarantee is per-decision -- while the quota phase is active, a
+    frontier node belonging to a smaller root subtree must score above one belonging to a
+    larger subtree -- so assert that instead.
+    """
+    from treewm.tree.frontier import root_quota_score
+
     model = build_model("randomtreewm", SMALL).eval()
-    _, quota_tree, _ = _tree(scorer="root_quota", budget=48, model=model)
-    _, random_tree, _ = _tree(scorer="random", budget=48, model=model)
+    _, tree, cfg = _tree(scorer="bfs", budget=48, model=model)
 
-    def top_share(tree):
-        shares = []
-        for b in range(tree.batch_size):
-            ids = tree.root_branch[b][tree.valid[b]]
-            ids = ids[ids >= 0]
-            if ids.numel():
-                _, cnt = torch.unique(ids, return_counts=True)
-                shares.append(float(cnt.max()) / float(cnt.sum()))
-        return float(np.mean(shares)) if shares else 1.0
+    frontier = tree.expandable_frontier(cfg.max_depth)
+    ctx = ScoringContext(generator=make_generator(0, "eval"), budget_fraction=0.0,
+                         broad_fraction=0.45)
+    scores = root_quota_score(tree, frontier, ctx)
 
-    assert top_share(quota_tree) <= top_share(random_tree) + 1e-6, (
-        "root_quota should not concentrate more than plain random"
-    )
+    # subtree size for every frontier node
+    checked = 0
+    for b in range(tree.batch_size):
+        idx = torch.nonzero(frontier[b]).flatten().tolist()
+        sizes = {}
+        for n in idx:
+            rb = int(tree.root_branch[b, n])
+            sizes[n] = int(((tree.root_branch[b] == rb) & tree.valid[b]).sum())
+        for i in idx:
+            for j in idx:
+                if sizes[i] + 1 < sizes[j]:  # strictly smaller subtree, margin > noise
+                    assert scores[b, i] > scores[b, j], (
+                        f"node in a {sizes[i]}-node subtree scored below one in a "
+                        f"{sizes[j]}-node subtree"
+                    )
+                    checked += 1
+    assert checked > 0, "test did not exercise any unequal-subtree pair"
+
+
+def test_root_quota_releases_after_the_broad_phase():
+    """Past broad_fraction the quota is lifted and selection becomes plain random."""
+    from treewm.tree.frontier import root_quota_score
+
+    model = build_model("randomtreewm", SMALL).eval()
+    _, tree, cfg = _tree(scorer="bfs", budget=32, model=model)
+    frontier = tree.expandable_frontier(cfg.max_depth)
+
+    early = root_quota_score(tree, frontier, ScoringContext(
+        generator=make_generator(0, "eval"), budget_fraction=0.0, broad_fraction=0.45))
+    late = root_quota_score(tree, frontier, ScoringContext(
+        generator=make_generator(0, "eval"), budget_fraction=0.9, broad_fraction=0.45))
+    assert not torch.allclose(early, late), "quota must stop biasing selection after the broad phase"
+    assert float(late[frontier].max()) <= 1.0, "released phase should be plain uniform noise"
 
 
 def test_goal_aware_scorers_require_a_goal():

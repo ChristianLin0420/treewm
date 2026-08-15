@@ -67,12 +67,17 @@ class PlanResult:
 class GoalPlanner:
     """Wraps a model + normaliser into a replanning controller."""
 
-    def __init__(self, model, normalizer, tree_cfg: TreeConfig, cfg: PlannerConfig, device=None) -> None:
+    def __init__(self, model, normalizer, tree_cfg: TreeConfig, cfg: PlannerConfig, device=None,
+                 generator: torch.Generator | None = None) -> None:
         self.model = model
         self.normalizer = normalizer
         self.tree_cfg = tree_cfg
         self.cfg = cfg
         self.device = device or next(model.parameters()).device
+        # Own stream: a diagnostic render must not change what the planner does.
+        from treewm.utils.rng import make_generator
+
+        self.generator = generator or make_generator(0, "planner", self.device)
 
     def _path_aware_score(self, tree, endpoint_score: torch.Tensor) -> torch.Tensor:
         """Aggregate goal score along each root-to-node path.
@@ -100,6 +105,7 @@ class GoalPlanner:
 
     @torch.no_grad()
     def plan(self, obs: np.ndarray, goal: np.ndarray, generator=None, return_tree: bool = False) -> PlanResult:
+        generator = generator or self.generator
         model = self.model
         obs_n = torch.from_numpy(self.normalizer.norm_obs(np.asarray(obs, dtype=np.float32)[None])).to(self.device)
         goal_n = torch.from_numpy(self.normalizer.norm_obs(np.asarray(goal, dtype=np.float32)[None])).to(self.device)

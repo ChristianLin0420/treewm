@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from treewm.logging.metrics import pearson_correlation, rank_correlation
+from treewm.utils.rng import make_generator
 from treewm.models.baselines import NOVELTY_ARMS, NOVELTY_PAIRS, build_model, tree_config_for
 from treewm.models.treewm import TreeWMConfig
 from treewm.tree.expansion import TreeConfig
@@ -41,7 +42,7 @@ def test_z_novelty_matches_manual_computation():
     model = build_model("noveltyz", SMALL).eval()
     cfg = tree_config_for("noveltyz", TreeConfig(node_budget=16, branch_factor=4, max_depth=16), model)
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(2, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
     nov = z_novelty(tree)
     d = torch.cdist(tree.latent.float(), tree.latent.float())
     for b in range(tree.batch_size):
@@ -62,7 +63,7 @@ def test_novelty_scorer_selects_the_most_novel_frontier_node():
     model = build_model("noveltyz", SMALL).eval()
     cfg = tree_config_for("noveltyz", TreeConfig(node_budget=32, branch_factor=4, max_depth=16), model)
     with torch.no_grad():
-        tree, _ = model.generate(torch.randn(1, SMALL.z_dim), cfg)
+        tree, _ = model.generate(torch.randn(1, SMALL.z_dim), cfg, generator=make_generator(0, 'eval'))
 
     frontier = tree.expandable_frontier(cfg.max_depth)
     scores = novelty_z_score(tree, frontier, ScoringContext(novelty_space="z"))

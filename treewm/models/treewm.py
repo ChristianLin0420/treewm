@@ -135,6 +135,8 @@ class TreeWM(nn.Module):
         # trained, never used by any loss.
         self.z_control_projection = RandomProjection(cfg.z_dim, cfg.q_dim * len(scales))
         self.register_buffer("horizons", torch.tensor(cfg.horizons, dtype=torch.long))
+        # Set by the trainer/evaluator so random horizon selection is on its own stream.
+        self._horizon_gen: torch.Generator | None = None
 
     # ------------------------------------------------------------------ encoders
 
@@ -200,7 +202,8 @@ class TreeWM(nn.Module):
         if mode == "learned":
             return out.horizon_index()
         if mode == "random":
-            return torch.randint(0, n_h, shape, device=z.device)
+            gen = getattr(self, "_horizon_gen", None)
+            return torch.randint(0, n_h, shape, device=z.device, generator=gen)
         if mode == "fixed":
             return torch.full(shape, int(self.cfg.fixed_horizon_index), device=z.device,
                               dtype=torch.long)
