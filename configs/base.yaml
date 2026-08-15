@@ -80,6 +80,7 @@ future_sets:
   max_modes: 8
   multi_step_depth: 3   # Track A: chain length supervised along the anchor's own future
   retrieval_pool: 0     # 0 = whole dataset; subsample for high-dim observations
+  cache: false          # cache built future sets per anchor (big win for long runs)
 
 # ------------------------------------------------ latent retrieval (gain target)
 retrieval:

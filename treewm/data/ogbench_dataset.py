@@ -145,6 +145,7 @@ class ChunkDataset(Dataset):
         xy_dims: tuple[int, ...] = (0, 1),
         max_anchors: int | None = None,
         seed: int = 0,
+        cache_future_sets: bool = False,
     ) -> None:
         self.obs = np.ascontiguousarray(dataset["observations"], dtype=np.float32)
         self.act = np.ascontiguousarray(dataset["actions"], dtype=np.float32)
@@ -167,6 +168,12 @@ class ChunkDataset(Dataset):
             anchors = np.sort(rng.choice(anchors, size=max_anchors, replace=False))
         self.anchors = anchors
 
+        # Future sets are a deterministic function of the anchor index, and with
+        # 150k anchors over a 300k-step run each anchor is rebuilt ~500 times. Caching
+        # turns the dataloader from the bottleneck into a lookup after one epoch --
+        # essential for AntMaze, where a k-d tree query in 29-D dominates the step.
+        self._cache: dict[int, dict] | None = {} if cache_future_sets else None
+
         self.builder = FutureSetBuilder(
             obs_norm=self.obs_norm,
             act_norm=self.act_norm,
@@ -180,7 +187,13 @@ class ChunkDataset(Dataset):
 
     def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
         t = int(self.anchors[i])
-        item = self.builder.build(t)
+        if self._cache is None:
+            item = self.builder.build(t)
+        else:
+            item = self._cache.get(t)
+            if item is None:
+                item = self.builder.build(t)
+                self._cache[t] = item
         return {k: torch.from_numpy(v) if isinstance(v, np.ndarray) else torch.tensor(v) for k, v in item.items()}
 
     # ------------------------------------------------------------------ helpers
@@ -207,12 +220,14 @@ def build_datasets(
     max_train_anchors: int | None = None,
     max_val_anchors: int | None = None,
     seed: int = 0,
+    cache_future_sets: bool = False,
 ) -> tuple[Any, ChunkDataset, ChunkDataset, Normalizer]:
     """Load ``dataset_name`` and build train/val :class:`ChunkDataset` objects."""
     env, train, val = load_ogbench(dataset_name, dataset_dir=dataset_dir)
     normalizer = Normalizer.fit(train["observations"], train["actions"])
     train_ds = ChunkDataset(
-        train, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_train_anchors, seed=seed
+        train, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_train_anchors, seed=seed,
+        cache_future_sets=cache_future_sets,
     )
     val_ds = ChunkDataset(
         val, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors, seed=seed + 1
