@@ -112,6 +112,7 @@ def main(cfg: DictConfig) -> None:
         max_train_anchors=int(cfg.train.max_train_anchors),
         max_val_anchors=int(cfg.train.max_val_anchors),
         seed=int(cfg.seed),
+        cache_future_sets=bool(cfg.future_sets.get("cache", False)),
     )
     # AntMaze env configs leave obs/action dims null; fill them from the loaded data so
     # a new environment needs no hand-edited dimensions.
