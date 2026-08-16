@@ -74,8 +74,14 @@ def collect(budgets: list[int], out: str) -> list[dict]:
             if not per or max(per.values()) <= 0.02 or label not in turns:
                 continue
             t = turns[label]
+            hstar = max(per, key=per.get)
+            # An argmax sitting at either end of the tested ladder is not a located
+            # optimum -- the true peak may lie outside it. Large's farthest bin is the
+            # known case (success still rising at h=64). Flag rather than silently fit.
+            tested = sorted(per)
             rows.append({"env": name, "label": label, "d": geo[label], "turns": t,
-                         "seg": geo[label] / (t + 1.0), "hstar": max(per, key=per.get),
+                         "seg": geo[label] / (t + 1.0), "hstar": hstar,
+                         "censored": hstar in (tested[0], tested[-1]),
                          "best": max(per.values()), "per": per})
     return rows
 
@@ -93,15 +99,25 @@ def main() -> None:
     p.add_argument("--out", default="results_difficulty")
     args = p.parse_args()
 
-    rows = collect(args.budgets, args.out)
-    envs = sorted({r["env"] for r in rows})
-    print(f"\n{len(rows)} identifiable bins across {len(envs)} layouts: {envs}")
-    print(f"\n{'env':8s} {'bin':>7s} {'d':>6s} {'turns':>6s} {'seg':>6s} {'h*':>4s} {'best':>6s}")
-    for r in rows:
+    allrows = collect(args.budgets, args.out)
+    print(f"\n{len(allrows)} bins with a measurable optimum")
+    print(f"\n{'env':8s} {'bin':>7s} {'d':>6s} {'turns':>6s} {'seg':>6s} {'h*':>4s} {'best':>6s} {'':>9s}")
+    for r in allrows:
         print(f"{r['env']:8s} {r['label']:>7s} {r['d']:6.1f} {r['turns']:6.1f} "
-              f"{r['seg']:6.2f} {r['hstar']:4d} {r['best']:6.3f}")
+              f"{r['seg']:6.2f} {r['hstar']:4d} {r['best']:6.3f} "
+              f"{'CENSORED' if r['censored'] else '':>9s}")
 
-    if len({r["env"] for r in rows}) < 2:
+    ncens = sum(r["censored"] for r in allrows)
+    rows = [r for r in allrows if not r["censored"]]
+    print(f"\ndropping {ncens} censored bins (argmax at the end of the tested ladder, so the")
+    print(f"optimum is not bracketed); {len(rows)} bins remain for the fit")
+    if not rows:
+        print("no bracketed optima -- cannot fit")
+        return
+    envs = sorted({r["env"] for r in rows})
+    print(f"layouts contributing: {envs}")
+
+    if len(envs) < 2:
         print("\nneed >=2 layouts to compare models -- stopping")
         return
 
