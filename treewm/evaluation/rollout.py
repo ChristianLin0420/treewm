@@ -29,6 +29,7 @@ class EpisodeResult:
     best_goal_distance: float
     chunk_lengths: list[int] = field(default_factory=list)
     selected_depths: list[int] = field(default_factory=list)
+    initial_goal_distance: float = 0.0
     displacement: float = 0.0
     path_length: float = 0.0
     action_magnitude: float = 0.0
@@ -58,6 +59,7 @@ def run_episode(
     ob, info = env.reset(options=options, seed=seed)
     goal = np.asarray(info["goal"], dtype=np.float32)
     start_xy = np.asarray(ob, dtype=np.float32)[:2].copy()
+    initial_d = float(np.linalg.norm(start_xy - goal[:2]))
     prev_xy = start_xy.copy()
     path_len = 0.0
     act_mag: list[float] = []
@@ -104,6 +106,7 @@ def run_episode(
         best_goal_distance=min(best_dist, final_dist),
         chunk_lengths=chunks,
         selected_depths=depths,
+        initial_goal_distance=initial_d,
         displacement=float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - start_xy)),
         path_length=path_len,
         action_magnitude=float(np.mean(act_mag)) if act_mag else 0.0,
@@ -138,6 +141,7 @@ def evaluate(
     chunk_lens = np.array([c for r in results for c in r.chunk_lengths], dtype=np.float32)
     sel_depths = np.array([d for r in results for d in r.selected_depths], dtype=np.float32)
     disp = np.array([r.displacement for r in results], dtype=np.float32)
+    init_d = np.array([r.initial_goal_distance for r in results], dtype=np.float32)
     path_len = np.array([r.path_length for r in results], dtype=np.float32)
     act_mag = np.array([r.action_magnitude for r in results], dtype=np.float32)
 
@@ -158,6 +162,9 @@ def evaluate(
         # Locomotion diagnostics -- on AntMaze a zero success rate is uninformative
         # unless we can also say whether the ant moved at all.
         "eval/displacement": float(disp.mean()),
+        "eval/initial_goal_distance": float(init_d.mean()),
+        "eval/distance_reduction": float((init_d - final).mean()),
+        "eval/distance_reduction_frac": float(((init_d - final) / np.maximum(init_d, 1e-6)).mean()),
         "eval/path_length": float(path_len.mean()),
         "eval/action_magnitude": float(act_mag.mean()),
         "eval/fraction_moving": float((disp > 1.0).mean()),

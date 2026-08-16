@@ -148,6 +148,45 @@ def sample_hard_goal_pairs(
     return pairs
 
 
+def sample_goal_pairs_by_distance(
+    spec: "MazeSpec",
+    bins: list[tuple[int, int]],
+    pairs_per_bin: int = 12,
+    seed: int = 0,
+) -> dict[str, list[dict]]:
+    """Start/goal pairs bucketed by *geodesic* separation.
+
+    Turns a binary pass/fail benchmark into a difficulty curve: each bucket holds pairs
+    whose maze-traversal distance falls in a known range, so success can be read as a
+    function of required planning horizon rather than as one saturated number.
+    """
+    cells, dist = spec.all_pairs_geodesic()
+    rng = np.random.default_rng(seed)
+    out: dict[str, list[dict]] = {}
+    for lo, hi in bins:
+        sel = np.argwhere(np.isfinite(dist) & (dist >= lo) & (dist < hi))
+        label = f"{lo}-{hi}" if np.isfinite(hi) else f"{lo}+"
+        if len(sel) == 0:
+            out[label] = []
+            continue
+        picks = rng.choice(len(sel), size=min(pairs_per_bin, len(sel)), replace=False)
+        tasks = []
+        for p in picks:
+            a, b = sel[p]
+            si, sj = cells[a]
+            gi, gj = cells[b]
+            tasks.append({
+                "task_name": f"bin{label}",
+                "init_ij": (int(si), int(sj)), "goal_ij": (int(gi), int(gj)),
+                "init_xy": spec.ij_to_xy(int(si), int(sj)).tolist(),
+                "goal_xy": spec.ij_to_xy(int(gi), int(gj)).tolist(),
+                "geodesic": float(dist[a, b]),
+                "geodesic_world": float(dist[a, b]) * spec.unit,
+            })
+        out[label] = tasks
+    return out
+
+
 def env_task_pairs(env) -> list[dict]:
     """The environment's own built-in tasks, in OGBench's ordering (task_id 1..N)."""
     infos = env.unwrapped.task_infos

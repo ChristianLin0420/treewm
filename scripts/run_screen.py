@@ -95,6 +95,12 @@ def _fixed_h(h: int) -> str:
 HSWEEP: dict[str, tuple[str, str]] = {f"H{h}": ("H", _fixed_h(h)) for h in (8, 12, 16, 20, 24, 32)}
 
 # Cycle-4 AntMaze: flat control vs the best fixed horizon (filled in after the sweep).
+# Matched flat control at the sweep-optimal horizon, so flat-vs-recursive differs only
+# in recursion -- not in edge length.
+FLAT_H: dict[str, tuple[str, str]] = {
+    "Fh20": ("FH", "arm=flatkwm " + _fixed_h(20).split("arm=randomtreewm ")[1]),
+}
+
 ANT4: dict[str, tuple[str, str]] = {
     "A4_flat":   ("ANT4", "arm=flatkwm"),
     "A4_best_h": ("ANT4", _fixed_h(16)),  # h replaced by the sweep winner before launch
@@ -109,7 +115,7 @@ COMBOS: dict[str, tuple[str, str]] = {
     "P_short_ms":     ("combo", f"arm=randomtreewm {SHORT_H} {MULTISTEP}"),
 }
 
-ALL = {**RECIPES, **COMBOS, **ANT, **Q2, **HSWEEP, **ANT4}
+ALL = {**RECIPES, **COMBOS, **ANT, **Q2, **HSWEEP, **ANT4, **FLAT_H}
 
 
 def throughput(log: Path) -> float | None:
