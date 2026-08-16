@@ -92,7 +92,11 @@ def _fixed_h(h: int) -> str:
             f"model.horizon_mode=fixed model.fixed_horizon_index=0")
 
 
-HSWEEP: dict[str, tuple[str, str]] = {f"H{h}": ("H", _fixed_h(h)) for h in (8, 12, 16, 20, 24, 32)}
+# h up to 64 only: model.h_max is 64, so every horizon here shares one action-head size
+# and h* cannot be confounded with head capacity. Testing past 64 needs a capacity bump,
+# which would break that matching -- so a win at h=64 must be reported as a boundary.
+HSWEEP: dict[str, tuple[str, str]] = {f"H{h}": ("H", _fixed_h(h))
+                                      for h in (8, 12, 16, 20, 24, 32, 48, 64)}
 
 # Cycle-4 AntMaze: flat control vs the best fixed horizon (filled in after the sweep).
 # Matched flat control at the sweep-optimal horizon, so flat-vs-recursive differs only

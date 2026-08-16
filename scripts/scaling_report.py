@@ -41,12 +41,13 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 REPO = Path(__file__).resolve().parents[1]
-HORIZONS = [8, 16, 20, 32]
+HORIZONS = [8, 16, 20, 32, 48, 64]
 FLAT = "Fh20"
-BINS = [(1, 3), (3, 5), (5, 7), (7, 9), (9, 12), (12, 16), (16, 21)]
+BINS = [(1, 3), (3, 5), (5, 7), (7, 9), (9, 12), (12, 16), (16, 21), (21, 26), (26, 32)]
 ENVS = [("medium", "pointmaze", "pointmaze-medium-stitch-v0"),
-        ("large", "pointmaze_large", "pointmaze-large-stitch-v0")]
-COLORS = {"medium": "tab:blue", "large": "tab:red"}
+        ("large", "pointmaze_large", "pointmaze-large-stitch-v0"),
+        ("giant", "pointmaze_giant", "pointmaze-giant-stitch-v0")]
+COLORS = {"medium": "tab:blue", "large": "tab:red", "giant": "tab:green"}
 
 
 def turns_by_bin(env_name: str) -> dict[str, float]:
@@ -111,7 +112,8 @@ def main() -> None:
         return
     pooled = [r for recs in data.values() for r in recs]
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 9.5))
+    ncol = 3 + (len(data) > 2)
+    fig, axes = plt.subplots(2, ncol, figsize=(6 * ncol, 9.5), squeeze=False)
 
     # ---- 1. Delta success vs distance (best recursive per bin) --------------------
     ax = axes[0][0]
@@ -148,8 +150,9 @@ def main() -> None:
 
     # ---- 3. S(h, d) heatmaps ------------------------------------------------------
     print("\n=== 3. S(h,d) heatmaps ===")
+    slots = [axes[0][2], axes[1][2], axes[0][3], axes[1][3]]
     for k, (name, recs) in enumerate(data.items()):
-        ax = axes[0][2] if k == 0 else axes[1][2]
+        ax = slots[k]
         grid = np.array([[r["per"].get(h, np.nan) for r in recs] for h in HORIZONS], float)
         im = ax.imshow(grid, aspect="auto", cmap="viridis", origin="lower", vmin=0, vmax=1)
         ax.set_xticks(range(len(recs)))
