@@ -108,6 +108,39 @@ class MazeSpec:
         return deg
 
 
+def shortest_path(spec: "MazeSpec", start_ij: tuple[int, int], goal_ij: tuple[int, int]) -> list[tuple[int, int]]:
+    """One BFS shortest path in cells, start -> goal (empty if unreachable)."""
+    field = spec.geodesic_field(goal_ij)
+    if not np.isfinite(field[start_ij]):
+        return []
+    path = [tuple(int(x) for x in start_ij)]
+    cur = tuple(int(x) for x in start_ij)
+    while cur != tuple(int(x) for x in goal_ij):
+        best, bestd = None, field[cur]
+        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nxt = (cur[0] + di, cur[1] + dj)
+            if spec.is_free(*nxt) and field[nxt] < bestd:
+                best, bestd = nxt, field[nxt]
+        if best is None:
+            break
+        path.append(best)
+        cur = best
+    return path
+
+
+def path_turns(path: list[tuple[int, int]]) -> int:
+    """Direction changes along a cell path.
+
+    A compositional-complexity proxy independent of raw length: two goals at the same
+    geodesic distance can require one straight corridor or several linked segments, and
+    only the latter needs futures to be *composed*.
+    """
+    if len(path) < 3:
+        return 0
+    dirs = [(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1]) for i in range(len(path) - 1)]
+    return sum(1 for a, b in zip(dirs, dirs[1:]) if a != b)
+
+
 def sample_hard_goal_pairs(
     spec: MazeSpec,
     num_pairs: int,
@@ -182,6 +215,7 @@ def sample_goal_pairs_by_distance(
                 "goal_xy": spec.ij_to_xy(int(gi), int(gj)).tolist(),
                 "geodesic": float(dist[a, b]),
                 "geodesic_world": float(dist[a, b]) * spec.unit,
+                "turns": path_turns(shortest_path(spec, (int(si), int(sj)), (int(gi), int(gj)))),
             })
         out[label] = tasks
     return out
