@@ -1,0 +1,51 @@
+
+20 bins with a measurable optimum
+
+env          bin      d  turns    seg   h*   best          
+medium       1-3    6.3    0.4   4.47    8  0.951  CENSORED
+medium       3-5   14.0    1.4   5.79    8  0.979  CENSORED
+medium       5-7   22.0    2.8   5.87   20  0.736          
+medium       7-9   29.7    4.1   5.84   20  0.660          
+medium      9-12   37.0    5.1   6.08   20  0.549          
+large        1-3    6.7    0.2   5.71   20  0.840          
+large        3-5   13.7    0.9   7.13   20  0.799          
+large        5-7   23.0    1.8   8.12   16  0.799          
+large        7-9   29.7    2.4   8.68   32  0.486          
+large       9-12   41.3    3.2   9.92   48  0.312          
+large      12-16   52.3    4.3   9.81   32  0.312          
+large      16-21   68.7    6.8   8.77   64  0.104  CENSORED
+giant        1-3    6.3    0.2   5.07   16  0.944          
+giant        3-5   14.0    1.0   7.00   16  0.840          
+giant        5-7   22.0    1.7   8.25   16  0.736          
+giant        7-9   29.0    2.8   7.73   16  0.590          
+giant       9-12   40.0    3.8   8.28   16  0.319          
+giant      12-16   54.3    6.2   7.58   64  0.201  CENSORED
+giant      16-21   72.0    8.2   7.78   64  0.153  CENSORED
+giant      21-26   89.7   10.3   7.91   64  0.035  CENSORED
+
+dropping 6 censored bins (argmax at the end of the tested ladder, so the
+optimum is not bracketed); 14 bins remain for the fit
+layouts contributing: ['giant', 'large', 'medium']
+
+corr(d, seg) pooled = +0.689  (near +-1 would mean the layouts still cannot separate the two claims)
+
+=== leave-one-layout-out R^2 on log2(h*) ===
+model                   LOLO R^2  in-sample R^2   per-layout held-out R^2
+d                         -0.547          0.294   giant=+0.21  large=+0.11  medium=-9.35
+log d                     -0.623          0.198   giant=+0.14  large=+0.08  medium=-9.49
+constant                  -0.761         -0.000   giant=-0.00  large=-0.00  medium=+0.00
+turns                     -0.815          0.109   giant=+0.19  large=+0.03  medium=-50.00
+log seg                   -1.335          0.278   giant=-0.16  large=-0.31  medium=-28.27
+d + seg                   -1.348          0.374   giant=+0.00  large=-0.32  medium=-51.22
+seg                       -1.413          0.336   giant=-0.07  large=-0.39  medium=-36.09
+seg + turns               -2.117          0.359   giant=-0.02  large=-0.38  medium=-231.93
+log d + log seg           -2.686          0.292   giant=-0.14  large=-0.37  medium=-370.27
+d + turns                 -6.923          0.409   giant=+0.05  large=-0.57  medium=-1453.02
+
+best transferring model: d   (LOLO R^2 = -0.547)
+  log2(h*) = +3.858  +0.020*d
+
+reading: if a distance-only model transfers, the claim is task-horizon-dependent
+temporal resolution. If seg (straight-run length) is needed, the claim is the
+stronger environment-decision-timescale one. If 'constant' wins, h* does not
+scale at all and both claims fail.

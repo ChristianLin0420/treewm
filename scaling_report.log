@@ -1,0 +1,22 @@
+
+=== 1. Recursive(h=20) - Flat success advantage vs distance ===
+  medium  d=[6.3, 14.0, 22.0, 29.7, 37.0]
+          delta=[0.299, 0.347, 0.528, 0.597, 0.528]  spearman=+0.900
+  large   d=[6.7, 13.7, 23.0, 29.7, 41.3, 52.3, 68.7]
+          delta=[0.285, 0.542, 0.521, 0.326, 0.139, 0.208, 0.0]  spearman=-0.750
+
+=== 2. Optimal horizon vs task distance ===
+  medium  d=[6.3, 14.0, 22.0, 29.7, 37.0]
+          h*=[8, 8, 20, 20, 20]
+  large   d=[6.7, 13.7, 23.0, 29.7, 41.3, 52.3, 68.7]
+          h*=[20, 20, 16, 32, 32, 32, 32]
+
+=== 3. S(h,d) heatmap written for large ===
+
+=== 4. Recursion advantage vs compositional complexity (path turns) ===
+  medium  turns=[0.4, 1.4, 2.8, 4.1, 5.1]
+          delta=[0.299, 0.347, 0.528, 0.597, 0.528]  spearman=+0.900
+  large   turns=[0.2, 0.9, 1.8, 2.4, 3.2, 4.3, 6.8]
+          delta=[0.285, 0.542, 0.521, 0.326, 0.139, 0.208, 0.0]  spearman=-0.750
+
+wrote /localhome/local-chrislin/treewm/results_difficulty/scaling_report.png

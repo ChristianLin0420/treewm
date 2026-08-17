@@ -228,3 +228,12 @@ multirun/
 runs_*/
 results*/
 *.log
+
+# ...but the difficulty curves ARE the scientific record, not a bulky sweep artifact
+# (1.5 MB of JSON + figures), so they are versioned alongside the code that made them.
+!results_difficulty/
+!results_difficulty/**
+# the numeric tables behind the report, likewise small and worth freezing
+!diffcurve_*.log
+!hstar_model.log
+!scaling_report*.log
