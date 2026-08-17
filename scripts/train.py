@@ -264,6 +264,9 @@ def main(cfg: DictConfig) -> None:
     )
     last_log = time.perf_counter()
     examples_since_log = 0
+    # Time blocked waiting on the dataloader. High values mean retrieval, not the GPU,
+    # is the bottleneck -- which is exactly what the retrieval_pool calibration fixed.
+    data_wait = 0.0
 
     for step in progress:
         model.train()
@@ -271,7 +274,9 @@ def main(cfg: DictConfig) -> None:
         optimizer.zero_grad(set_to_none=True)
 
         for micro in range(accum):
+            _t_wait = time.perf_counter()
             batch = to_device(next(train_iter), device)
+            data_wait += time.perf_counter() - _t_wait
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_bf16):
                 loss, metrics, artifacts = compute_branch_losses(
                     model, batch, loss_cfg, match_cfg, step=step
@@ -338,6 +343,12 @@ def main(cfg: DictConfig) -> None:
             if device.type == "cuda":
                 scalars["train/gpu_memory_allocated_gb"] = torch.cuda.memory_allocated(device) / 1e9
                 scalars["train/gpu_memory_reserved_gb"] = torch.cuda.memory_reserved(device) / 1e9
+            # Emitted every log_every steps, not only at eval: scripts/fleet.py bin-packs
+            # from these, and a short resource probe never reaches an eval.
+            scalars.update(resource_metrics())
+            scalars["train/data_wait_frac"] = float(data_wait / max(elapsed, 1e-6))
+            print(f"data_wait_frac={scalars['train/data_wait_frac']:.3f}", flush=True)
+            data_wait = 0.0
             logger.scalars(scalars, step)
             logger.histograms(tracker.histograms(), step)
             if dist_info.is_main:
