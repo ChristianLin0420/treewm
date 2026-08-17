@@ -369,6 +369,42 @@ ARMS = {"flatkwm": f"arm=flatkwm {H16} {RESOURCE}",
         "randomtreewm": f"arm=randomtreewm {H16} {RESOURCE}"}
 
 
+# ---- Wave 1b: extended training on the manipulation subset ------------------------
+# Wave 1 put every environment on the floor at 20k steps -- OGBench's own baselines train
+# these for 500k-1M, so 20k is 2-4% of standard and uniform zeros are the expected result
+# rather than a finding. Locomotion is excluded: antmaze/humanoidmaze/antsoccer showed no
+# displacement toward goals, matching the locomotion-competence bottleneck already
+# established at 300k in cycle 07.
+#
+# max_train_anchors 100k -> 300k matters at least as much as the extra steps: at 100k the
+# model saw 10% of each dataset, so more steps mostly bought more passes over the same
+# subsample. 300k anchors costs ~15 GB/job of future-set cache (14.9 KB/anchor x 2
+# workers), i.e. ~55 GB across six jobs against 251 GB of host RAM. 500k would be 91 GB,
+# and a host-RAM OOM is killed by the kernel and misreported as a scientific failure.
+WAVE1B_ENVS = [
+    ("cube_single_play", "cube-single-play-v0"),
+    ("cube_double_play", "cube-double-play-v0"),
+    ("scene_play", "scene-play-v0"),
+]
+RESOURCE_1B = ("future_sets.retrieval_pool=50000 train.max_train_anchors=300000 "
+               "train.max_val_anchors=30000 train.num_workers=2 "
+               # 100 evaluation episodes per arm (5 built-in tasks x 20). At n=25 the
+               # binomial CI was +-0.14, wider than any effect being looked for.
+               "eval.episodes_per_task=20 train.eval_every=25000")
+
+
+def wave1b_jobs(seeds: list[int], steps: int) -> list[Job]:
+    jobs = []
+    for cfg, env_name in WAVE1B_ENVS:
+        for arm in ("flatkwm", "randomtreewm"):
+            for s in seeds:
+                jobs.append(Job(job_id=f"{cfg}|{arm}|s{s}", env=cfg, env_name=env_name,
+                                arm=arm, seed=s, steps=steps,
+                                run_root="experiments/09-cross-family/runs/wave1b",
+                                overrides=" ".join(f"{H16} {RESOURCE_1B}".split())))
+    return jobs
+
+
 def wave1_jobs(seeds: list[int], steps: int) -> list[Job]:
     jobs = []
     for cfg, env_name in WAVE1_ENVS:
@@ -420,9 +456,9 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    jobs = wave1_jobs(args.seeds, args.steps)
-    print(f"[fleet] wave {args.wave}: {len(jobs)} jobs "
-          f"({len(WAVE1_ENVS)} envs x {len(ARMS)} arms x {len(args.seeds)} seed)")
+    jobs = (wave1b_jobs if args.wave == 2 else wave1_jobs)(args.seeds, args.steps)
+    print(f"[fleet] wave {'1b' if args.wave == 2 else args.wave}: {len(jobs)} jobs "
+          f"x {len(args.seeds)} seed(s), {args.steps:,} steps")
     if args.dry_run:
         for j in jobs:
             print(f"  {j.job_id:34s} env={j.env_name:32s} {j.overrides}")

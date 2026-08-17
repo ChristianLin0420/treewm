@@ -75,6 +75,11 @@ def run_episode(
 
     start_gv = gv(ob).copy()
     initial_d = dist_of(ob)
+    # Baseline for partial progress. Reporting a raw subgoal fraction is misleading:
+    # with nine binary buttons, a random state already matches the goal on ~50% of them,
+    # so puzzle scored 0.48 while doing nothing. Progress is measured as the fraction of
+    # the *remaining* subgoals that were actually closed.
+    initial_frac = domain.subgoal_fraction(ob, goal) if domain is not None and domain.subgoals else float("nan")
     prev_gv = start_gv.copy()
     path_len = 0.0
     act_mag: list[float] = []
@@ -87,7 +92,8 @@ def run_episode(
     traj: list[np.ndarray] = [np.asarray(ob, dtype=np.float32)] if record_trajectory else []
     best_progress = 0.0
 
-    while steps < max_steps and not success:
+    done = False
+    while steps < max_steps and not success and not done:
         plan = planner.plan(np.asarray(ob, dtype=np.float32), goal)
         replans += 1
         nodes += plan.num_nodes
@@ -110,7 +116,16 @@ def run_episode(
                 best_progress = max(best_progress, domain.subgoal_fraction(ob, goal))
             if info.get("success", False):
                 success = True
-            if success or terminated or truncated or steps >= max_steps:
+            if terminated or truncated:
+                # The episode is over. Previously only the inner loop broke, so the outer
+                # loop replanned and kept stepping an environment past its own time
+                # limit. cube-single-play truncates at 200 steps while max_env_steps is
+                # 500, so every episode ran 300 extra steps at one action per replan --
+                # 276-313 replans instead of 32, a 30x eval slowdown, and any "success"
+                # recorded after truncation was not a real success.
+                done = True
+                break
+            if success or steps >= max_steps:
                 break
 
     final_dist = dist_of(ob)
@@ -120,6 +135,14 @@ def run_episode(
 
         extra = progress_metrics(env, domain, ob, goal, info)
         extra["progress/best_subgoal_fraction"] = best_progress
+        if np.isfinite(initial_frac):
+            final_frac = domain.subgoal_fraction(ob, goal)
+            room = max(1.0 - initial_frac, 1e-6)
+            extra["progress/subgoal_fraction_initial"] = initial_frac
+            # 0 = no better than the starting state, 1 = every remaining subgoal closed,
+            # negative = actively undid subgoals that started correct.
+            extra["progress/subgoal_gain"] = (final_frac - initial_frac) / room
+            extra["progress/best_subgoal_gain"] = (best_progress - initial_frac) / room
     return EpisodeResult(
         success=success,
         steps=steps,

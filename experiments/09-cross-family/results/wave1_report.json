@@ -1,0 +1,422 @@
+{
+  "provenance": {
+    "git_commit": "7591edd748b1f369e67b0c6a7e3a9eabfd2dc609",
+    "ogbench_version": "unspecified",
+    "checkpoints": [
+      5000,
+      10000,
+      15000,
+      20000
+    ],
+    "runs_root": "/localhome/local-chrislin/treewm/experiments/09-cross-family/runs/wave1",
+    "promotion_rule": {
+      "success_floor": 0.05,
+      "success_ceiling": 0.95,
+      "ranks_by": "flat-vs-recursive separation, stability, competence; NOT validation loss"
+    }
+  },
+  "environments": [
+    {
+      "env": "cube-single-play",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.11999999731779099,
+          "delta_success": 0.11999999731779099,
+          "flat_progress": 0.0,
+          "rec_progress": 0.11999999731779099,
+          "delta_progress": 0.11999999731779099
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.11999999731779099,
+          "delta_success": 0.11999999731779099,
+          "flat_progress": 0.0,
+          "rec_progress": 0.11999999731779099,
+          "delta_progress": 0.11999999731779099
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.11999999731779099,
+          "delta_success": 0.11999999731779099,
+          "flat_progress": 0.0,
+          "rec_progress": 0.11999999731779099,
+          "delta_progress": 0.11999999731779099
+        }
+      ],
+      "verdict": "PROMOTE",
+      "competent": true,
+      "non_saturated": true,
+      "progress_separates": true,
+      "stable": true,
+      "separation_step": 10000,
+      "delta_success_final": 0.11999999731779099,
+      "delta_progress_final": 0.11999999731779099,
+      "rank_key": [
+        1.0,
+        0.11999999731779099,
+        1.0,
+        0.11999999731779099
+      ],
+      "level": "success",
+      "cache_ok": true
+    },
+    {
+      "env": "antmaze-large-navigate",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        }
+      ],
+      "verdict": "NOT_DISCRIMINATIVE",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": false,
+      "stable": true,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": 0.0,
+      "rank_key": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "level": "none",
+      "cache_ok": true
+    },
+    {
+      "env": "antsoccer-medium-navigate",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        }
+      ],
+      "verdict": "NOT_DISCRIMINATIVE",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": false,
+      "stable": true,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": 0.0,
+      "rank_key": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "level": "none",
+      "cache_ok": true
+    },
+    {
+      "env": "cube-double-play",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.10000000149011612,
+          "rec_progress": 0.07999999821186066,
+          "delta_progress": -0.020000003278255463
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.10000000149011612,
+          "rec_progress": 0.07999999821186066,
+          "delta_progress": -0.020000003278255463
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.10000000149011612,
+          "rec_progress": 0.07999999821186066,
+          "delta_progress": -0.020000003278255463
+        }
+      ],
+      "verdict": "NOT_DISCRIMINATIVE",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": false,
+      "stable": true,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": -0.020000003278255463,
+      "rank_key": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "level": "none",
+      "cache_ok": true
+    },
+    {
+      "env": "humanoidmaze-medium-navigate",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.0,
+          "rec_progress": 0.0,
+          "delta_progress": 0.0
+        }
+      ],
+      "verdict": "NOT_DISCRIMINATIVE",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": false,
+      "stable": true,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": 0.0,
+      "rank_key": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "level": "none",
+      "cache_ok": true
+    },
+    {
+      "env": "puzzle-3x3-play",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.4888888895511627,
+          "rec_progress": 0.47999998927116394,
+          "delta_progress": -0.00888890027999878
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.4888888895511627,
+          "rec_progress": 0.47999998927116394,
+          "delta_progress": -0.00888890027999878
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.4888888895511627,
+          "rec_progress": 0.47999998927116394,
+          "delta_progress": -0.00888890027999878
+        }
+      ],
+      "verdict": "NOT_DISCRIMINATIVE",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": false,
+      "stable": true,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": -0.00888890027999878,
+      "rank_key": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "level": "none",
+      "cache_ok": true
+    },
+    {
+      "env": "scene-play",
+      "rows": [
+        {
+          "step": 5000,
+          "flat_success": NaN,
+          "rec_success": NaN,
+          "delta_success": NaN,
+          "flat_progress": NaN,
+          "rec_progress": NaN,
+          "delta_progress": NaN
+        },
+        {
+          "step": 10000,
+          "flat_success": 0.0,
+          "rec_success": 0.03999999910593033,
+          "delta_success": 0.03999999910593033,
+          "flat_progress": 0.5199999809265137,
+          "rec_progress": 0.5759999752044678,
+          "delta_progress": 0.0559999942779541
+        },
+        {
+          "step": 15000,
+          "flat_success": 0.0,
+          "rec_success": 0.03999999910593033,
+          "delta_success": 0.03999999910593033,
+          "flat_progress": 0.5199999809265137,
+          "rec_progress": 0.5759999752044678,
+          "delta_progress": 0.0559999942779541
+        },
+        {
+          "step": 20000,
+          "flat_success": 0.0,
+          "rec_success": 0.0,
+          "delta_success": 0.0,
+          "flat_progress": 0.5199999809265137,
+          "rec_progress": 0.5759999752044678,
+          "delta_progress": 0.0559999942779541
+        }
+      ],
+      "verdict": "PARTIAL",
+      "competent": false,
+      "non_saturated": false,
+      "progress_separates": true,
+      "stable": false,
+      "separation_step": null,
+      "delta_success_final": 0.0,
+      "delta_progress_final": 0.0559999942779541,
+      "rank_key": [
+        0.0,
+        0.0,
+        0.0,
+        0.03999999910593033
+      ],
+      "level": "partial-progress",
+      "cache_ok": true
+    }
+  ],
+  "promoted": [
+    "cube-single-play"
+  ]
+}
