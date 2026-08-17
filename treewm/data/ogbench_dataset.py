@@ -146,18 +146,28 @@ class ChunkDataset(Dataset):
         max_anchors: int | None = None,
         seed: int = 0,
         cache_future_sets: bool = False,
+        shared: "SharedSplit | None" = None,
     ) -> None:
-        self.obs = np.ascontiguousarray(dataset["observations"], dtype=np.float32)
-        self.act = np.ascontiguousarray(dataset["actions"], dtype=np.float32)
-        self.index = TrajectoryIndex.from_terminals(dataset["terminals"])
+        if shared is not None:
+            # Bind the memory-mapped arrays directly. ascontiguousarray would COPY them,
+            # which is what silently defeated a previous caching attempt: the cache was
+            # read, then every process materialised its own multi-GB duplicate anyway.
+            self.obs, self.act = shared.obs, shared.act
+            self.obs_norm, self.act_norm = shared.obs_norm, shared.act_norm
+            self.index = TrajectoryIndex.from_terminals(shared.terminals)
+            self.cache_backend = "mmap"
+        else:
+            self.obs = np.ascontiguousarray(dataset["observations"], dtype=np.float32)
+            self.act = np.ascontiguousarray(dataset["actions"], dtype=np.float32)
+            self.index = TrajectoryIndex.from_terminals(dataset["terminals"])
+            self.obs_norm = normalizer.norm_obs(self.obs)
+            self.act_norm = normalizer.norm_act(self.act)
+            self.cache_backend = "in_process"
         self.normalizer = normalizer
         self.cfg = future_cfg
         self.xy_dims = tuple(xy_dims)
         self.obs_dim = self.obs.shape[1]
         self.act_dim = self.act.shape[1]
-
-        self.obs_norm = normalizer.norm_obs(self.obs)
-        self.act_norm = normalizer.norm_act(self.act)
 
         min_h = int(min(future_cfg.horizons))
         remaining = self.index.steps_remaining
@@ -221,8 +231,32 @@ def build_datasets(
     max_val_anchors: int | None = None,
     seed: int = 0,
     cache_future_sets: bool = False,
+    shared_cache: bool = False,
 ) -> tuple[Any, ChunkDataset, ChunkDataset, Normalizer]:
-    """Load ``dataset_name`` and build train/val :class:`ChunkDataset` objects."""
+    """Load ``dataset_name`` and build train/val :class:`ChunkDataset` objects.
+
+    With ``shared_cache`` the observation/action arrays and normalisation statistics come
+    from a memory-mapped on-disk cache built exactly once (see
+    :mod:`treewm.data.shared_cache`), so concurrent jobs share one physical copy.
+    """
+    if shared_cache:
+        from treewm.data.shared_cache import build_or_load
+
+        cache = build_or_load(dataset_name, dataset_dir=dataset_dir)
+        env = load_ogbench(dataset_name, dataset_dir=dataset_dir, env_only=True)
+        normalizer = Normalizer.from_state_dict(cache.norm_stats)
+        train_ds = ChunkDataset(
+            {}, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_train_anchors,
+            seed=seed, cache_future_sets=cache_future_sets, shared=cache.train,
+        )
+        val_ds = ChunkDataset(
+            {}, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors,
+            seed=seed + 1, shared=cache.val,
+        )
+        # Fails loudly if the arrays were copied rather than mapped.
+        train_ds.cache_metrics = cache.assert_consumed_by(train_ds, val_ds)
+        return env, train_ds, val_ds, normalizer
+
     env, train, val = load_ogbench(dataset_name, dataset_dir=dataset_dir)
     normalizer = Normalizer.fit(train["observations"], train["actions"])
     train_ds = ChunkDataset(

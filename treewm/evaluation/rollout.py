@@ -34,6 +34,7 @@ class EpisodeResult:
     path_length: float = 0.0
     action_magnitude: float = 0.0
     trajectory: list[np.ndarray] = field(default_factory=list)
+    progress: dict = field(default_factory=dict)
 
 
 def run_episode(
@@ -43,8 +44,14 @@ def run_episode(
     seed: int,
     max_steps: int = 500,
     record_trajectory: bool = False,
+    domain=None,
 ) -> EpisodeResult:
-    """One goal-reaching episode with replanning after each executed chunk."""
+    """One goal-reaching episode with replanning after each executed chunk.
+
+    ``domain`` supplies the environment's own goal semantics. Without it this falls back
+    to PointMaze's ``obs[:2]`` convention, which is correct only for the maze families --
+    for antsoccer the goal is the ball, for cube/scene/puzzle there is no meaningful xy.
+    """
     options: dict = {}
     if "task_id" in task:
         options["task_id"] = int(task["task_id"])
@@ -58,9 +65,17 @@ def run_episode(
         }
     ob, info = env.reset(options=options, seed=seed)
     goal = np.asarray(info["goal"], dtype=np.float32)
-    start_xy = np.asarray(ob, dtype=np.float32)[:2].copy()
-    initial_d = float(np.linalg.norm(start_xy - goal[:2]))
-    prev_xy = start_xy.copy()
+
+    if domain is None:
+        gv = lambda o: np.asarray(o, dtype=np.float32)[:2]
+        dist_of = lambda o: float(np.linalg.norm(gv(o) - gv(goal)))
+    else:
+        gv = domain.goal_vector
+        dist_of = lambda o: domain.distance(o, goal)
+
+    start_gv = gv(ob).copy()
+    initial_d = dist_of(ob)
+    prev_gv = start_gv.copy()
     path_len = 0.0
     act_mag: list[float] = []
 
@@ -70,6 +85,7 @@ def run_episode(
     chunks: list[int] = []
     depths: list[int] = []
     traj: list[np.ndarray] = [np.asarray(ob, dtype=np.float32)] if record_trajectory else []
+    best_progress = 0.0
 
     while steps < max_steps and not success:
         plan = planner.plan(np.asarray(ob, dtype=np.float32), goal)
@@ -83,20 +99,27 @@ def run_episode(
         for action in plan.actions:
             ob, _, terminated, truncated, info = env.step(action)
             steps += 1
-            cur_xy = np.asarray(ob, dtype=np.float32)[:2]
-            path_len += float(np.linalg.norm(cur_xy - prev_xy))
-            prev_xy = cur_xy.copy()
+            cur = gv(ob)
+            path_len += float(np.linalg.norm(cur - prev_gv))
+            prev_gv = cur.copy()
             act_mag.append(float(np.abs(action).mean()))
             if record_trajectory:
                 traj.append(np.asarray(ob, dtype=np.float32))
-            dist = float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - goal[:2]))
-            best_dist = min(best_dist, dist)
+            best_dist = min(best_dist, dist_of(ob))
+            if domain is not None and domain.subgoals:
+                best_progress = max(best_progress, domain.subgoal_fraction(ob, goal))
             if info.get("success", False):
                 success = True
             if success or terminated or truncated or steps >= max_steps:
                 break
 
-    final_dist = float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - goal[:2]))
+    final_dist = dist_of(ob)
+    extra = {}
+    if domain is not None:
+        from treewm.evaluation.domains import progress_metrics
+
+        extra = progress_metrics(env, domain, ob, goal, info)
+        extra["progress/best_subgoal_fraction"] = best_progress
     return EpisodeResult(
         success=success,
         steps=steps,
@@ -107,10 +130,11 @@ def run_episode(
         chunk_lengths=chunks,
         selected_depths=depths,
         initial_goal_distance=initial_d,
-        displacement=float(np.linalg.norm(np.asarray(ob, dtype=np.float32)[:2] - start_xy)),
+        displacement=float(np.linalg.norm(gv(ob) - start_gv)),
         path_length=path_len,
         action_magnitude=float(np.mean(act_mag)) if act_mag else 0.0,
         trajectory=traj,
+        progress=extra,
     )
 
 
@@ -121,6 +145,7 @@ def evaluate(
     episodes_per_task: int = 5,
     max_steps: int = 500,
     seed: int = 0,
+    domain=None,
 ) -> dict[str, float]:
     """Run the full task set and return the ``eval/*`` namespace."""
     results: list[EpisodeResult] = []
@@ -129,7 +154,8 @@ def evaluate(
         for e in range(episodes_per_task):
             # Seed derived from task/episode, not from a global counter, so arms are
             # compared on identical start states.
-            results.append(run_episode(env, planner, task, seed=seed + 1000 * t + e, max_steps=max_steps))
+            results.append(run_episode(env, planner, task, seed=seed + 1000 * t + e,
+                                       max_steps=max_steps, domain=domain))
     elapsed = time.perf_counter() - start
 
     successes = np.array([r.success for r in results], dtype=np.float32)
@@ -170,6 +196,11 @@ def evaluate(
         "eval/fraction_moving": float((disp > 1.0).mean()),
         "eval/planning_wall_clock_s": float(elapsed / max(len(results), 1)),
         "eval/num_episodes": float(len(results)),
+        # Domain-specific competence, averaged over episodes. These are what make a zero
+        # success rate interpretable -- the failure mode that made three AntMaze cycles
+        # uninformative was having only success to look at.
+        **{f"eval/{k}": float(np.mean([r.progress[k] for r in results if k in r.progress]))
+           for k in sorted({k for r in results for k in r.progress})},
     }
 
 

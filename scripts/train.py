@@ -84,6 +84,24 @@ def build_scheduler(optimizer, cfg):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+
+def resource_metrics() -> dict[str, float]:
+    """Peak VRAM / host RSS, emitted in a form scripts/fleet.py can parse from the log.
+
+    The fleet bin-packs jobs from these numbers, so they must come from the process
+    itself rather than from nvidia-smi, which cannot attribute memory per process when
+    eight jobs share a GPU.
+    """
+    import resource
+
+    out = {"host_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576.0}
+    if torch.cuda.is_available():
+        out["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1073741824.0
+        out["peak_allocated_gb"] = torch.cuda.max_memory_allocated() / 1073741824.0
+    print("  ".join(f"{k}={v:.3f}" for k, v in out.items()), flush=True)
+    return {f"resource/{k}": v for k, v in out.items()}
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="base")
 def main(cfg: DictConfig) -> None:
     dist_info = setup_distributed()
@@ -113,7 +131,12 @@ def main(cfg: DictConfig) -> None:
         max_val_anchors=int(cfg.train.max_val_anchors),
         seed=int(cfg.seed),
         cache_future_sets=bool(cfg.future_sets.get("cache", False)),
+        shared_cache=bool(cfg.future_sets.get("shared_cache", False)),
     )
+    # Prove the shared cache is actually backing the loader rather than merely present.
+    cache_metrics = getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
+    print(f"[treewm] dataset backend={getattr(train_ds, 'cache_backend', '?')} "
+          f"cache={cache_metrics}", flush=True)
     # AntMaze env configs leave obs/action dims null; fill them from the loaded data so
     # a new environment needs no hand-edited dimensions.
     if cfg.env.obs_dim is None or cfg.env.action_dim is None:
@@ -186,8 +209,12 @@ def main(cfg: DictConfig) -> None:
         cfg_utils.retrieval_config(cfg), device, seed=int(cfg.seed),
     )
 
-    maze_spec = MazeSpec.from_env(env)
-    anchors = tv.build_anchors(maze_spec, num=int(cfg.train.viz_anchors))
+    from treewm.evaluation.domains import get_domain
+    from treewm.evaluation.tasks import has_maze
+
+    domain = get_domain(cfg.env.name)
+    maze_spec = MazeSpec.from_env(env) if has_maze(env) else None
+    anchors = tv.build_anchors(maze_spec, num=int(cfg.train.viz_anchors)) if maze_spec else None
     tasks = build_tasks(
         env, str(cfg.eval.task_split), int(cfg.eval.num_hard_tasks),
         float(cfg.eval.hard_percentile), int(cfg.eval.seed),
@@ -367,11 +394,13 @@ def main(cfg: DictConfig) -> None:
         if step > 0 and step % int(cfg.train.eval_every) == 0 and dist_info.is_main:
             model.eval()
             planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, device,
-                                  generator=rng.reset("eval"))
+                                  generator=rng.reset("eval"), domain=domain)
             emetrics = evaluate(
                 env, planner, tasks, int(cfg.eval.episodes_per_task),
-                int(cfg.planner.max_env_steps), int(cfg.eval.seed),
+                int(cfg.planner.max_env_steps), int(cfg.eval.seed), domain=domain,
             )
+            emetrics.update(cache_metrics)
+            emetrics.update(resource_metrics())
             logger.scalars(emetrics, step)
             ckpt.maybe_save_success(
                 emetrics["eval/success_rate"], model=model, optimizer=optimizer,
@@ -382,7 +411,10 @@ def main(cfg: DictConfig) -> None:
             print(f"[treewm] step {step} success={emetrics['eval/success_rate']:.3f}")
 
         # ------------------------------------------------------ visualisations
-        if should_visualise(step, cfg) and dist_info.is_main:
+        # The xy tree renders are maze-specific. Non-spatial domains (cube, scene,
+        # puzzle) get their own diagnostics in treewm/evaluation/domain_viz.py instead of
+        # a meaningless projection onto the first two observation dims.
+        if should_visualise(step, cfg) and dist_info.is_main and maze_spec is not None:
             model.eval()
             try:
                 logger.figure(

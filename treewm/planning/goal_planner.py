@@ -68,12 +68,18 @@ class GoalPlanner:
     """Wraps a model + normaliser into a replanning controller."""
 
     def __init__(self, model, normalizer, tree_cfg: TreeConfig, cfg: PlannerConfig, device=None,
-                 generator: torch.Generator | None = None) -> None:
+                 generator: torch.Generator | None = None, domain=None) -> None:
         self.model = model
         self.normalizer = normalizer
         self.tree_cfg = tree_cfg
         self.cfg = cfg
         self.device = device or next(model.parameters()).device
+        # Restrict decoded scoring to the dims the task constrains (see plan()).
+        self.domain = domain
+        self.goal_dims = (
+            torch.tensor(domain.goal_dims, dtype=torch.long, device=self.device)
+            if domain is not None and len(domain.goal_dims) < model.cfg.obs_dim else None
+        )
         # Own stream: a diagnostic render must not change what the planner does.
         from treewm.utils.rng import make_generator
 
@@ -121,7 +127,14 @@ class GoalPlanner:
         if self.cfg.score_space == "decoded" and model.decoder is not None:
             # Compare in observation space, where the goal metric is meaningful.
             node_obs = model.decoder(tree.latent)  # [1, N, obs_dim]
-            score = torch.linalg.vector_norm(node_obs - goal_n.unsqueeze(1), dim=-1)
+            if self.goal_dims is not None:
+                # Score only the dims the task actually constrains. Using the full vector
+                # would let proprioception and velocities -- 19 of puzzle's 55 dims, none
+                # of them part of the goal -- dominate the distance to the target board.
+                d = self.goal_dims
+                score = torch.linalg.vector_norm(node_obs[..., d] - goal_n[..., d].unsqueeze(1), dim=-1)
+            else:
+                score = torch.linalg.vector_norm(node_obs - goal_n.unsqueeze(1), dim=-1)
         else:
             score = torch.linalg.vector_norm(tree.latent - z_goal.unsqueeze(1), dim=-1)  # [1, N]
 

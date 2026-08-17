@@ -69,6 +69,10 @@ future_sets:
   include_self: true
   horizons: [4, 8, 16, 32, 64]
   h_max: 64
+  # Memory-map the preprocessed arrays from a shared on-disk cache instead of each job
+  # loading and normalising its own copy (treewm/data/shared_cache.py). Essential when
+  # 16 jobs share one host: antsoccer alone is 4M x 42 per process otherwise.
+  shared_cache: false
   horizon_rule: displacement
   displacement_threshold: 0.25
   fixed_horizon: 32

@@ -222,16 +222,18 @@ def sample_goal_pairs_by_distance(
 
 
 def env_task_pairs(env) -> list[dict]:
-    """The environment's own built-in tasks, in OGBench's ordering (task_id 1..N)."""
-    infos = env.unwrapped.task_infos
-    return [
-        {
-            "task_id": k + 1,
-            "task_name": info["task_name"],
-            "init_ij": tuple(info["init_ij"]),
-            "goal_ij": tuple(info["goal_ij"]),
-            "init_xy": list(info["init_xy"]),
-            "goal_xy": list(info["goal_xy"]),
-        }
-        for k, info in enumerate(infos)
-    ]
+    """The environment's own built-in tasks, in OGBench's ordering (task_id 1..N).
+
+    Only ``task_id`` is load-bearing -- evaluation resets with it and reads the goal back
+    from ``info['goal']``. The maze cell/xy fields are recorded when present (locomotion)
+    and simply absent for manipulation, scene and puzzle, which have no such geometry.
+    """
+    tasks = []
+    for k, info in enumerate(env.unwrapped.task_infos):
+        task = {"task_id": k + 1, "task_name": info.get("task_name", f"task{k + 1}")}
+        for key, cast in (("init_ij", tuple), ("goal_ij", tuple),
+                          ("init_xy", list), ("goal_xy", list)):
+            if key in info:
+                task[key] = cast(info[key])
+        tasks.append(task)
+    return tasks

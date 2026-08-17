@@ -29,7 +29,9 @@ def to_container(cfg: Any) -> Any:
 def future_set_config(cfg: DictConfig) -> FutureSetConfig:
     raw = to_container(cfg.future_sets)
     raw["horizons"] = tuple(raw["horizons"])
-    raw.pop("cache", None)  # dataset-level, not part of the future-set definition
+    # Both are dataset-loading concerns, not part of the future-set definition itself.
+    raw.pop("cache", None)
+    raw.pop("shared_cache", None)
     return FutureSetConfig(**raw)
 
 
