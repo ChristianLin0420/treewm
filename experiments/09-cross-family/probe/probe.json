@@ -1,0 +1,52 @@
+{
+  "antmaze_large_navigate|flatkwm": {
+    "peak_vram_gb": 8.123,
+    "host_rss_gb": 2.261,
+    "steps_per_s": 4.63,
+    "data_wait_frac": 0.465,
+    "ok": true,
+    "gpu_util": 0.0,
+    "probe_s": 66.9,
+    "log": "/localhome/local-chrislin/treewm/experiments/09-cross-family/probe/probe_antmaze_large_navigate_flatkwm.log"
+  },
+  "antmaze_large_navigate|randomtreewm": {
+    "peak_vram_gb": 0.363,
+    "host_rss_gb": 2.26,
+    "steps_per_s": 4.63,
+    "data_wait_frac": 0.667,
+    "ok": true,
+    "gpu_util": 0.0,
+    "probe_s": 92.5,
+    "log": "/localhome/local-chrislin/treewm/experiments/09-cross-family/probe/probe_antmaze_large_navigate_randomtreewm.log"
+  },
+  "humanoidmaze_medium_navigate|flatkwm": {
+    "peak_vram_gb": 9.254,
+    "host_rss_gb": 2.729,
+    "steps_per_s": 1.31,
+    "data_wait_frac": 0.844,
+    "ok": true,
+    "gpu_util": 0.0,
+    "probe_s": 173.8,
+    "log": "/localhome/local-chrislin/treewm/experiments/09-cross-family/probe/probe_humanoidmaze_medium_navigate_flatkwm.log"
+  },
+  "humanoidmaze_medium_navigate|randomtreewm": {
+    "peak_vram_gb": 0.432,
+    "host_rss_gb": 2.724,
+    "steps_per_s": 1.26,
+    "data_wait_frac": 0.92,
+    "ok": true,
+    "gpu_util": 0.0,
+    "probe_s": 206.0,
+    "log": "/localhome/local-chrislin/treewm/experiments/09-cross-family/probe/probe_humanoidmaze_medium_navigate_randomtreewm.log"
+  },
+  "antsoccer_medium_navigate|flatkwm": {
+    "peak_vram_gb": 8.131,
+    "host_rss_gb": 2.906,
+    "steps_per_s": 3.25,
+    "data_wait_frac": 0.631,
+    "ok": false,
+    "gpu_util": 0.0,
+    "probe_s": 66.6,
+    "log": "/localhome/local-chrislin/treewm/experiments/09-cross-family/probe/probe_antsoccer_medium_navigate_flatkwm.log"
+  }
+}

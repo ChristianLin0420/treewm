@@ -12,21 +12,39 @@ from treewm.data.maze_utils import (MazeSpec, env_task_pairs, sample_goal_pairs_
 
 
 def has_maze(env) -> bool:
-    """Whether a geodesic hard split is even definable for this environment."""
+    """Whether the environment has a maze topology at all (used for xy visualisation)."""
     return hasattr(getattr(env, "unwrapped", env), "maze_map")
+
+
+def supports_hard_split(env) -> bool:
+    """Whether we can *synthesise* start/goal pairs for this environment.
+
+    Having a maze is not sufficient. The hard split builds a task_info containing
+    ``init_ij``/``goal_ij``, which places a single body. antsoccer places two -- it
+    expects ``agent_init_ij`` and ``ball_init_ij`` -- so feeding it a navigate-shaped
+    task_info raises KeyError deep inside reset(). Rather than invent a ball placement
+    (where should the ball start relative to the agent? any answer is a guess that
+    changes the task), such environments fall back to their own built-in tasks.
+    """
+    if not has_maze(env):
+        return False
+    infos = getattr(getattr(env, "unwrapped", env), "task_infos", None)
+    return bool(infos) and "init_ij" in infos[0] and "goal_ij" in infos[0]
 
 
 def build_tasks(env, split: str = "hard", num_hard: int = 10, percentile: float = 75.0, seed: int = 0) -> list[dict]:
     if split == "auto":
         # Manipulation, scene and puzzle have no maze topology, so "top geodesic
         # percentile" is undefined there; their own five tasks are the correct split.
-        split = "hard" if has_maze(env) else "standard"
+        # antsoccer has a maze but a two-body task schema we cannot synthesise.
+        split = "hard" if supports_hard_split(env) else "standard"
     if split == "standard":
         return env_task_pairs(env)
     if split == "hard":
-        if not has_maze(env):
+        if not supports_hard_split(env):
             raise ValueError(
-                "the 'hard' split needs a maze topology; this environment has none. "
+                "the 'hard' split needs a maze topology and a single-body "
+                "init_ij/goal_ij task schema; this environment has neither. "
                 "Use split='auto' or 'standard' rather than inventing a geometric "
                 "difficulty measure for a non-spatial domain."
             )
