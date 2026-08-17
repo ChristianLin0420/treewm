@@ -473,6 +473,49 @@ def main(cfg: DictConfig) -> None:
             except Exception as exc:  # visualisation must never kill a run
                 print(f"[treewm] visualisation skipped at step {step}: {exc}")
 
+        # ---------------------------------------- non-spatial domain diagnostics
+        # Cube/scene/puzzle have no maze floor to draw on, and projecting their
+        # observations onto obs[:2] would render the robot's joint angles -- visually
+        # plausible, completely uninformative. Instead render the quantity the task
+        # actually constrains, plus a scalar test of whether the K branches are
+        # genuinely different futures or have collapsed onto one continuation.
+        if should_visualise(step, cfg) and dist_info.is_main and maze_spec is None:
+            model.eval()
+            try:
+                from treewm.evaluation import domain_viz as dvz
+
+                for ti, task in enumerate(tasks[:int(cfg.train.viz_anchors)]):
+                    ob0, info0 = env.reset(options={"task_id": int(task["task_id"])},
+                                           seed=int(cfg.eval.seed) + ti)
+                    goal0 = np.asarray(info0["goal"], dtype=np.float32)
+                    obs_a = torch.from_numpy(
+                        normalizer.norm_obs(np.asarray(ob0, dtype=np.float32)[None])).to(device)
+                    goal_a = torch.from_numpy(normalizer.norm_obs(goal0[None])).to(device)
+                    tree, _ = model.generate(model.encode(obs_a), tree_cfg, generator=rng.viz)
+                    node_obs = model.decoder(tree.latent)
+                    gd = torch.linalg.vector_norm(
+                        node_obs[..., domain.goal_dims] - goal_a[..., domain.goal_dims].unsqueeze(1),
+                        dim=-1)
+                    gd = gd.masked_fill(~tree.valid, float("inf")); gd[:, 0] = float("inf")
+                    sel = int(gd.argmin(dim=1).item())
+                    nm = task.get("task_name", f"task{ti}")
+
+                    if domain.goal_metric == "onehot":
+                        logger.figure(f"viz/board_by_depth/{nm}",
+                                      dvz.view_board_by_depth(model, tree, normalizer, domain,
+                                                              goal0, title=nm), step)
+                    else:
+                        logger.figure(f"viz/object_tree/{nm}",
+                                      dvz.view_object_tree(model, tree, normalizer, domain,
+                                                           goal0, title=nm, selected=sel), step)
+                    if ti == 0:
+                        logger.scalars(dvz.branch_divergence(model, tree, normalizer, domain), step)
+                        logger.scalars(tstats.structural_summary(tree, model, normalizer), step)
+                        logger.histogram("tree/horizon_hist",
+                                         tree.action_mask.sum(-1)[tree.valid].float(), step)
+            except Exception as exc:
+                print(f"[treewm] domain visualisation skipped at step {step}: {exc}")
+
     # ------------------------------------------------------------ final eval
     if dist_info.is_main:
         model.eval()
