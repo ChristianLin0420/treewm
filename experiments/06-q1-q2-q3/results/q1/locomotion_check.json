@@ -1,0 +1,54 @@
+{
+  "provenance": {
+    "git_commit": "c922426",
+    "hostname": "4u4g-0018",
+    "timestamp": "2026-08-14T21:35:22",
+    "checkpoint": "/localhome/local-chrislin/treewm/runs_q1/antmaze-teleport/flatkwm/Q1_flat_s0/checkpoints/latest.pt",
+    "checkpoint_sha256_head": "fb53ca23f2e25cf4",
+    "budget": 64
+  },
+  "rows": [
+    {
+      "recipe": "Q1_flat_s0",
+      "step": 50000,
+      "success": 0.0,
+      "displacement": 5.182247161865234,
+      "path_length": 41.23745346069336,
+      "action_magnitude": 0.4172102212905884,
+      "fraction_moving": 0.9444444444444444,
+      "goal_distance": 26.83868980407715
+    },
+    {
+      "recipe": "Q1_random_s0",
+      "step": 50000,
+      "success": 0.0,
+      "displacement": 6.2891082763671875,
+      "path_length": 50.220890045166016,
+      "action_magnitude": 0.4677117168903351,
+      "fraction_moving": 0.9444444444444444,
+      "goal_distance": 23.60776710510254
+    },
+    {
+      "recipe": "Q1_short_combo_s0",
+      "step": 50000,
+      "success": 0.0,
+      "displacement": 7.480863094329834,
+      "path_length": 49.97816467285156,
+      "action_magnitude": 0.5153956413269043,
+      "fraction_moving": 1.0,
+      "goal_distance": 26.470863342285156
+    },
+    {
+      "recipe": "Q1_short_s0",
+      "step": 50000,
+      "success": 0.0,
+      "displacement": 6.111025810241699,
+      "path_length": 45.96647644042969,
+      "action_magnitude": 0.5148117542266846,
+      "fraction_moving": 1.0,
+      "goal_distance": 25.53135108947754
+    }
+  ],
+  "healthy": 4,
+  "verdict": "CONTINUE"
+}

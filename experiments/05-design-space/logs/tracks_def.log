@@ -1,0 +1,40 @@
+[def] 3 checkpoints (randomtreewm) on pointmaze-medium-stitch
+  20260813_seed0 track D done
+  20260813_seed0 track E done
+  20260813_seed0 track F done
+  20260813_seed1 track D done
+  20260813_seed1 track E done
+  20260813_seed1 track F done
+  20260813_seed2 track D done
+  20260813_seed2 track E done
+  20260813_seed2 track F done
+
+=== Track D: expansion policy (pointmaze-medium-stitch) ===
+setting                        128          32          64   goal_dist  leaf_depth
+----------------------------------------------------------------------------------
+bfs                          0.312       0.333       0.292       6.129       2.619
+broad_to_focused             0.354       0.396       0.417       5.372       4.131
+depth_balanced               0.396       0.458       0.417       4.497       3.544
+diverse_goal                 0.229       0.375       0.333       6.037       4.107
+goal                         0.354       0.333       0.354       6.284       4.268
+random                       0.458       0.438       0.458       4.230       3.484
+root_quota                   0.375       0.458       0.500       4.178       3.492
+
+=== Track E: execution cadence (pointmaze-medium-stitch) ===
+setting                  env_steps    exec_len   goal_dist     replans     success
+----------------------------------------------------------------------------------
+clipped16                  360.792      14.500       4.070      25.458       0.479
+fixed1                     411.896       1.000       7.665     411.896       0.292
+fixed4                     401.958       4.000       6.738     100.646       0.333
+fixed8                     387.583       7.989       5.287      49.000       0.354
+full64                     406.417      24.839       5.002      17.875       0.333
+
+=== Track F: planner score (pointmaze-medium-stitch) ===
+setting                  goal_dist  leaf_depth     success
+----------------------------------------------------------
+ancestor_0.5                 4.294       3.452       0.438
+endpoint_0.0                 4.361       3.385       0.396
+path_aware_0.005             4.632       2.540       0.396
+path_aware_0.02              6.896       1.069       0.417
+
+wrote /localhome/local-chrislin/treewm/results_tracks/tracks_def_pointmaze-medium-stitch.json

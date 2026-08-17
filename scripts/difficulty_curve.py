@@ -56,13 +56,13 @@ def label_of(run_name: str) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", nargs="+", default=["runs_ant4"])
+    p.add_argument("--runs", nargs="+", default=["experiments/07-horizon-antmaze/runs/ant4"])
     p.add_argument("--bins", nargs="+", type=int, default=[1, 5, 10, 15, 20, 99])
     p.add_argument("--per-bin", type=int, default=10)
     p.add_argument("--episodes", type=int, default=2)
     p.add_argument("--budgets", nargs="+", type=int, default=[32, 64, 128])
     p.add_argument("--max-steps", type=int, default=500)
-    p.add_argument("--out", default="results_difficulty")
+    p.add_argument("--out", default="experiments/08-scaling/results/difficulty")
     p.add_argument("--tag", default="antmaze")
     p.add_argument("--include", nargs="+", default=None,
                    help="only evaluate these recipe labels (keeps the grid affordable)")

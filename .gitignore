@@ -216,24 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
 # TreeWM
-runs/
-runs_novelty/
-results/
-results_novelty/
 outputs/
 multirun/
 *.pt
-runs_*/
-results*/
 *.log
 
-# ...but the difficulty curves ARE the scientific record, not a bulky sweep artifact
-# (1.5 MB of JSON + figures), so they are versioned alongside the code that made them.
-!results_difficulty/
-!results_difficulty/**
-# the numeric tables behind the report, likewise small and worth freezing
-!diffcurve_*.log
-!hstar_model.log
-!scaling_report*.log
+# Experiment artifacts live in experiments/<cycle>/{runs,results,logs}.
+# Checkpoints are ~29 GB and stay local; metrics and driver logs total ~5 MB and ARE the
+# scientific record, so they are versioned alongside the code that produced them.
+# These negations must come AFTER the *.log rule above -- gitignore lets the LAST matching
+# pattern win, so putting them first would leave every cycle log ignored.
+experiments/*/runs/
+!experiments/*/results/
+!experiments/*/results/**
+!experiments/*/logs/
+!experiments/*/logs/**
+!experiments/**/*.md
+
+# Any stray runs_*/results_* at the repo root is un-filed work in progress; run
+# scripts/reorganize.sh to move it into a cycle.
+/runs_*/
+/results*/
+/runs/

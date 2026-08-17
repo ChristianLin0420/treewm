@@ -35,14 +35,14 @@ REPO = Path(__file__).resolve().parents[1]
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_novelty")
+    p.add_argument("--runs", default="experiments/02-novelty-target/runs/novelty")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--arms", nargs="+", default=["noveltyq", "randomtreewm"])
     p.add_argument("--depths", nargs="+", type=int, default=[3, 4, 5, 6, 8, 16])
     p.add_argument("--penalties", nargs="+", type=float, default=[0.0, 0.05, 0.1, 0.2])
     p.add_argument("--budgets", nargs="+", type=int, default=[64, 256])
     p.add_argument("--episodes", type=int, default=3)
-    p.add_argument("--out", default="results_novelty")
+    p.add_argument("--out", default="experiments/02-novelty-target/results/novelty")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -1,0 +1,13 @@
+[overnight 01:10:11] v2 driver start (Phase-1 screening already complete: 18/18)
+[overnight 01:10:22] screening analysed -> analyze_screen.log
+[overnight 01:10:22] Phase 2 recipes: A0_random A0_bfs G3_z256 B1_k8 B3_k8_short C1_short P_k8_short_ms
+[overnight 04:10:22] Phase 2 training done
+[overnight 04:33:23] Phase 2 budget sweep done
+[overnight 04:33:30] Phase 2 coverage sweep done
+[overnight 04:58:24] tracks D/E/F done
+[overnight 05:02:09] Phase 2 visualisations done
+[overnight 05:04:54] Phase 1 visualisations done (same fixed anchors, retroactive)
+Terminated
+[overnight 05:08:12] AntMaze training done
+[overnight 05:08:13] AntMaze sweep done
+[overnight 05:08:13] OVERNIGHT PIPELINE COMPLETE

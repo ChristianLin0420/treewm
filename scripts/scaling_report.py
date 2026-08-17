@@ -103,7 +103,7 @@ def rho(x, y) -> float:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--budgets", nargs="+", type=int, default=[64, 128])
-    p.add_argument("--out", default="results_difficulty")
+    p.add_argument("--out", default="experiments/08-scaling/results/difficulty")
     args = p.parse_args()
 
     data = {n: r for n, t, e in ENVS if (r := collect(n, t, e, args.budgets, args.out))}

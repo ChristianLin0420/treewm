@@ -1,0 +1,42 @@
+  grounded h=12 H12_s0
+  grounded h=12 H12_s1
+  grounded h=12 H12_s2
+  grounded h=16 H16_s0
+  grounded h=16 H16_s1
+  grounded h=16 H16_s2
+  grounded h=20 H20_s0
+  grounded h=20 H20_s1
+  grounded h=20 H20_s2
+  grounded h=24 H24_s0
+  grounded h=24 H24_s1
+  grounded h=24 H24_s2
+  grounded h=32 H32_s0
+  grounded h=32 H32_s1
+  grounded h=32 H32_s2
+  grounded h=8 H8_s0
+  grounded h=8 H8_s1
+  grounded h=8 H8_s2
+
+=== fixed-horizon sweep: control vs prediction error ===
+   h        success AUC  succ@64  val_loss  state_mse  action_mse  grounded_err  mean_depth  leaf_depth  reach(steps)
+---------------------------------------------------------------------------------------------------------------------
+   8     0.264+/-0.018     0.273     1.025    0.00030      0.5253         0.485        2.91        3.22          25.7
+  12     0.363+/-0.065     0.360     0.999    0.00042      0.5412         0.557        2.91        3.12          37.4
+  16     0.457+/-0.058     0.473     0.987    0.00065      0.5519         0.913        2.91        2.80          44.8
+  20     0.465+/-0.036     0.460     0.992    0.00127      0.5643         1.001        2.91        3.01          60.2
+  24     0.420+/-0.046     0.460     0.975    0.00143      0.5755         1.135        2.90        3.12          74.8
+  32     0.313+/-0.077     0.347     1.003    0.00162      0.5905         3.157        2.92        2.69          86.1
+
+  best h = 20 (AUC 0.465)
+  inverted-U (optimum strictly interior)? YES
+  wrote /localhome/local-chrislin/treewm/results_h/horizon_tradeoff.png
+
+=== success vs node budget, per horizon ===
+   h      16      32      64     128     256
+--------------------------------------------
+   8   0.227   0.280   0.273   0.300   0.240
+  12   0.300   0.320   0.360   0.400   0.433
+  16   0.413   0.427   0.473   0.513   0.460
+  20   0.413   0.440   0.460   0.520   0.493
+  24   0.380   0.373   0.460   0.453   0.433
+  32   0.347   0.327   0.347   0.300   0.247

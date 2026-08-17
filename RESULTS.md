@@ -1,8 +1,8 @@
 # TreeWM — findings of record
 
 Frozen at tag `scaling-v1` (two layouts) and extended here to three. Every number below
-comes from an artifact in `results_difficulty/` produced by the script named beside it;
-nothing is quoted from memory.
+comes from an artifact under `experiments/08-scaling/` produced by the script named beside
+it; nothing is quoted from memory. See `experiments/README.md` for the cycle-by-cycle map.
 
 ## The falsifiable ladder, as it resolved
 
@@ -86,10 +86,12 @@ the nearest bin (11.6 world units), which falsified the earlier "goals are too f
 
 ```bash
 python scripts/run_screen.py --recipes H8 H16 H20 H32 H48 H64 Fh20 \
-    --dataset pointmaze_giant_stitch --seeds 0 1 2 --steps 20000 --run-root runs_giant
-python scripts/difficulty_curve.py --runs runs_giant --tag pointmaze_giant \
-    --bins 1 3 5 7 9 12 16 21 26 32 --per-bin 12 --episodes 2 --budgets 64 128
-python scripts/scaling_report.py     # the six panels
+    --dataset pointmaze_giant_stitch --seeds 0 1 2 --steps 20000 \
+    --run-root experiments/08-scaling/runs/giant
+python scripts/difficulty_curve.py --runs experiments/08-scaling/runs/giant \
+    --tag pointmaze_giant --bins 1 3 5 7 9 12 16 21 26 32 \
+    --per-bin 12 --episodes 2 --budgets 64 128
+python scripts/scaling_report.py     # the six panels (defaults now resolve to 08-scaling)
 python scripts/hstar_model.py        # the leave-one-layout-out fit
 ```
 

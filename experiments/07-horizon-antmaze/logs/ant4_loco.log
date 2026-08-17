@@ -1,0 +1,8 @@
+[loco] 2 checkpoints
+
+recipe                step   succ   displ     path    |a|  moving  goal_d  verdict
+--------------------------------------------------------------------------------------------
+A4_flat_s0          300000  0.000    3.16    28.37  0.307    0.94   26.13  locomoting (success 0 -- expected this early, not a reason to abort)
+A4_best_h_s0        300000  0.000    4.66    36.98  0.359    0.89   23.55  locomoting (success 0 -- expected this early, not a reason to abort)
+
+  2/2 runs locomoting -> CONTINUE

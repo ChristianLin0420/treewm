@@ -1,0 +1,10 @@
+[screen] 4 jobs, 4 slots (2/GPU), 50000 steps
+[screen] start gpu0 Q1_flat seed=0  (1 running)
+[screen] start gpu0 Q1_random seed=0  (2 running)
+[screen] start gpu1 Q1_short seed=0  (3 running)
+[screen] start gpu1 Q1_short_combo seed=0  (4 running)
+[screen] ok Q1_flat seed=0 (1/4, 804 min)
+[screen] ok Q1_short seed=0 (2/4, 804 min)
+[screen] ok Q1_random seed=0 (3/4, 805 min)
+[screen] ok Q1_short_combo seed=0 (4/4, 811 min)
+[screen] all done in 811 min

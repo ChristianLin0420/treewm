@@ -1,0 +1,74 @@
+[grid] 36 jobs over 4 GPUs, 20000 steps each
+[grid] start gpu0 navigate_noveltyq_s0
+[grid] start gpu0 navigate_learnedq_s0
+[grid] start gpu1 navigate_noveltyz_s0
+[grid] start gpu1 navigate_learnedz_s0
+[grid] ok navigate_noveltyz_s0 (1/36, 32 min elapsed)
+[grid] start gpu1 navigate_randomtreewm_s0
+[grid] ok navigate_learnedq_s0 (2/36, 32 min elapsed)
+[grid] ok navigate_learnedz_s0 (3/36, 32 min elapsed)
+[grid] start gpu0 navigate_fixedtreewm_s0
+[grid] start gpu1 navigate_noveltyq_s1
+[grid] ok navigate_noveltyq_s0 (4/36, 33 min elapsed)
+[grid] start gpu0 navigate_learnedq_s1
+[grid] ok navigate_randomtreewm_s0 (5/36, 64 min elapsed)
+[grid] ok navigate_learnedq_s1 (6/36, 64 min elapsed)
+[grid] start gpu1 navigate_noveltyz_s1
+[grid] start gpu0 navigate_learnedz_s1
+[grid] ok navigate_noveltyq_s1 (7/36, 65 min elapsed)
+[grid] start gpu1 navigate_randomtreewm_s1
+[grid] ok navigate_fixedtreewm_s0 (8/36, 65 min elapsed)
+[grid] start gpu0 navigate_fixedtreewm_s1
+[grid] ok navigate_learnedz_s1 (9/36, 96 min elapsed)
+[grid] start gpu0 navigate_noveltyq_s2
+[grid] ok navigate_fixedtreewm_s1 (10/36, 97 min elapsed)
+[grid] start gpu0 navigate_learnedq_s2
+[grid] ok navigate_noveltyz_s1 (11/36, 97 min elapsed)
+[grid] start gpu1 navigate_noveltyz_s2
+[grid] ok navigate_randomtreewm_s1 (12/36, 97 min elapsed)
+[grid] start gpu1 navigate_learnedz_s2
+[grid] ok navigate_noveltyq_s2 (13/36, 128 min elapsed)
+[grid] start gpu0 navigate_randomtreewm_s2
+[grid] ok navigate_learnedq_s2 (14/36, 129 min elapsed)
+[grid] start gpu0 navigate_fixedtreewm_s2
+[grid] ok navigate_noveltyz_s2 (15/36, 129 min elapsed)
+[grid] start gpu1 stitch_noveltyq_s0
+[grid] ok navigate_learnedz_s2 (16/36, 129 min elapsed)
+[grid] start gpu1 stitch_learnedq_s0
+[grid] ok navigate_randomtreewm_s2 (17/36, 161 min elapsed)
+[grid] start gpu0 stitch_noveltyz_s0
+[grid] ok navigate_fixedtreewm_s2 (18/36, 161 min elapsed)
+[grid] start gpu0 stitch_learnedz_s0
+[grid] ok stitch_noveltyq_s0 (19/36, 161 min elapsed)
+[grid] start gpu1 stitch_randomtreewm_s0
+[grid] ok stitch_learnedq_s0 (20/36, 161 min elapsed)
+[grid] start gpu1 stitch_fixedtreewm_s0
+[grid] ok stitch_noveltyz_s0 (21/36, 193 min elapsed)
+[grid] ok stitch_learnedz_s0 (22/36, 193 min elapsed)
+[grid] start gpu0 stitch_noveltyq_s1
+[grid] start gpu0 stitch_learnedq_s1
+[grid] ok stitch_fixedtreewm_s0 (23/36, 194 min elapsed)
+[grid] start gpu1 stitch_noveltyz_s1
+[grid] ok stitch_randomtreewm_s0 (24/36, 194 min elapsed)
+[grid] start gpu1 stitch_learnedz_s1
+[grid] ok stitch_noveltyz_s1 (25/36, 226 min elapsed)
+[grid] start gpu1 stitch_randomtreewm_s1
+[grid] ok stitch_learnedq_s1 (26/36, 226 min elapsed)
+[grid] ok stitch_learnedz_s1 (27/36, 226 min elapsed)
+[grid] start gpu0 stitch_fixedtreewm_s1
+[grid] start gpu1 stitch_noveltyq_s2
+[grid] ok stitch_noveltyq_s1 (28/36, 226 min elapsed)
+[grid] start gpu0 stitch_learnedq_s2
+[grid] ok stitch_randomtreewm_s1 (29/36, 259 min elapsed)
+[grid] start gpu1 stitch_noveltyz_s2
+[grid] ok stitch_fixedtreewm_s1 (30/36, 259 min elapsed)
+[grid] start gpu0 stitch_learnedz_s2
+[grid] ok stitch_noveltyq_s2 (31/36, 259 min elapsed)
+[grid] ok stitch_learnedq_s2 (32/36, 259 min elapsed)
+[grid] start gpu1 stitch_randomtreewm_s2
+[grid] start gpu0 stitch_fixedtreewm_s2
+[grid] ok stitch_randomtreewm_s2 (33/36, 292 min elapsed)
+[grid] ok stitch_noveltyz_s2 (34/36, 292 min elapsed)
+[grid] ok stitch_learnedz_s2 (35/36, 292 min elapsed)
+[grid] ok stitch_fixedtreewm_s2 (36/36, 292 min elapsed)
+[grid] all done in 292 min

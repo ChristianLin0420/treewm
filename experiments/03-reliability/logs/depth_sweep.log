@@ -1,0 +1,55 @@
+[depth] 6 checkpoints on pointmaze-medium-stitch
+  done noveltyq 20260813_seed0
+  done noveltyq 20260813_seed1
+  done noveltyq 20260813_seed2
+  done randomtreewm 20260813_seed0
+  done randomtreewm 20260813_seed1
+  done randomtreewm 20260813_seed2
+
+=== noveltyq|B256 (pointmaze-medium-stitch) ===
+setting                 success   sel_leaf_depth    goal_dist
+--------------------------------------------------------------
+depth16         0.178±0.057               9.91        11.95
+depth3          0.156±0.042               2.48        11.88
+depth4          0.167±0.047               3.72        10.95
+depth5          0.222±0.083               4.50        10.28
+depth6          0.167±0.072               5.29        11.56
+depth8          0.067±0.027               6.95        12.59
+penalty0.05     0.178±0.057               4.51         9.23
+penalty0.1      0.200±0.047               4.03         9.69
+penalty0.2      0.156±0.031               3.73        10.72
+
+=== noveltyq|B64 (pointmaze-medium-stitch) ===
+setting                 success   sel_leaf_depth    goal_dist
+--------------------------------------------------------------
+depth16         0.122±0.016               3.82        11.38
+depth3          0.178±0.031               2.53        11.55
+depth4          0.156±0.016               3.28        11.40
+depth5          0.189±0.057               3.77        10.72
+depth6          0.189±0.042               3.75        10.63
+depth8          0.233±0.072               3.78         9.75
+penalty0.05     0.233±0.000               2.75         9.65
+penalty0.1      0.200±0.047               2.65        11.41
+penalty0.2      0.189±0.042               2.52        11.25
+
+=== randomtreewm|B256 (pointmaze-medium-stitch) ===
+setting                 success   sel_leaf_depth    goal_dist
+--------------------------------------------------------------
+depth16         0.322±0.087               5.51         6.74
+depth3          0.211±0.083               2.56        10.05
+depth4          0.211±0.031               3.73         9.49
+depth5          0.289±0.126               4.48         7.54
+depth6          0.322±0.083               4.88         7.37
+depth8          0.333±0.072               5.38         6.64
+
+=== randomtreewm|B64 (pointmaze-medium-stitch) ===
+setting                 success   sel_leaf_depth    goal_dist
+--------------------------------------------------------------
+depth16         0.289±0.042               3.43         7.45
+depth3          0.222±0.063               2.53         9.01
+depth4          0.278±0.042               3.30         7.95
+depth5          0.300±0.027               3.54         7.87
+depth6          0.300±0.027               3.45         7.55
+depth8          0.300±0.000               3.47         7.68
+
+wrote /localhome/local-chrislin/treewm/results_novelty/depth_sweep_pointmaze-medium-stitch.json

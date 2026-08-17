@@ -96,7 +96,7 @@ def fit_predict(X_tr, y_tr, X_te):
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--budgets", nargs="+", type=int, default=[64, 128])
-    p.add_argument("--out", default="results_difficulty")
+    p.add_argument("--out", default="experiments/08-scaling/results/difficulty")
     args = p.parse_args()
 
     allrows = collect(args.budgets, args.out)

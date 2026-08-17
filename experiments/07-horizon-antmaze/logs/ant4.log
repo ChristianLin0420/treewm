@@ -1,0 +1,6 @@
+[screen] 2 jobs, 2 slots (1/GPU), 300000 steps
+[screen] start gpu0 A4_flat seed=0  (1 running)
+[screen] start gpu1 A4_best_h seed=0  (2 running)
+[screen] ok A4_best_h seed=0 (1/2, 366 min)
+[screen] ok A4_flat seed=0 (2/2, 604 min)
+[screen] all done in 604 min

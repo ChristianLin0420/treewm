@@ -1,0 +1,17 @@
+[q3] 3 C1_short checkpoints
+  C1_short_s0 done
+  C1_short_s1 done
+  C1_short_s2 done
+
+=== Q3 factorial on C1_short (3 seeds) ===
+cell                    32          64         128   goal_dist  leaf_depth      AUC
+-----------------------------------------------------------------------------------
+base                 0.533       0.633       0.589       3.827       3.144    0.585
+ancestor             0.500       0.578       0.622       4.048       3.081    0.567
+root_quota           0.589       0.578       0.578       4.040       3.095    0.581
+both                 0.456       0.633       0.622       3.688       3.172    0.570
+
+  ancestor alone   -0.019
+  root_quota alone -0.004
+  both             -0.015   (additive would be -0.022)
+  -> do NOT compose -- combined is no better than the best single effect

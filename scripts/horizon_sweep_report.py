@@ -112,8 +112,8 @@ def grounded_error(runs_root: Path, budget: int = 64, max_nodes: int = 10) -> di
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_h")
-    p.add_argument("--results", default="results_h")
+    p.add_argument("--runs", default="experiments/07-horizon-antmaze/runs/h")
+    p.add_argument("--results", default="experiments/07-horizon-antmaze/results/h")
     p.add_argument("--budgets", nargs="+", type=int, default=[16, 32, 64, 128, 256])
     p.add_argument("--skip-grounded", action="store_true")
     args = p.parse_args()

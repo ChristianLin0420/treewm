@@ -107,7 +107,7 @@ def analyse(model, normalizer, spec, tc, anchors, device) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_q2")
+    p.add_argument("--runs", default="experiments/06-q1-q2-q3/runs/q2")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--budget", type=int, default=64)
     p.add_argument("--anchors", type=int, default=8)

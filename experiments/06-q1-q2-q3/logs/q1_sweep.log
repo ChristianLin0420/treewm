@@ -1,0 +1,6 @@
+[sweep] 4 checkpoints, budgets [16, 32, 64, 128, 256]
+[sweep] ok flatkwm/Q1_flat_s0
+[sweep] ok randomtreewm/Q1_random_s0
+[sweep] ok randomtreewm/Q1_short_combo_s0
+[sweep] ok randomtreewm/Q1_short_s0
+[sweep] wrote /localhome/local-chrislin/treewm/results_q1/success_vs_budget_antmaze-teleport.png

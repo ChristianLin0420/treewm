@@ -1,0 +1,35 @@
+[horizon] 21 checkpoints
+  Q2_depthsched Q2_depthsched_s0
+  Q2_depthsched Q2_depthsched_s1
+  Q2_depthsched Q2_depthsched_s2
+  Q2_fixed16 Q2_fixed16_s0
+  Q2_fixed16 Q2_fixed16_s1
+  Q2_fixed16 Q2_fixed16_s2
+  Q2_fixed2 Q2_fixed2_s0
+  Q2_fixed2 Q2_fixed2_s1
+  Q2_fixed2 Q2_fixed2_s2
+  Q2_fixed4 Q2_fixed4_s0
+  Q2_fixed4 Q2_fixed4_s1
+  Q2_fixed4 Q2_fixed4_s2
+  Q2_fixed8 Q2_fixed8_s0
+  Q2_fixed8 Q2_fixed8_s1
+  Q2_fixed8 Q2_fixed8_s2
+  Q2_learned Q2_learned_s0
+  Q2_learned Q2_learned_s1
+  Q2_learned Q2_learned_s2
+  Q2_random_h Q2_random_h_s0
+  Q2_random_h Q2_random_h_s1
+  Q2_random_h Q2_random_h_s2
+
+=== horizon usage (budget 64) ===
+recipe                     mean            std   entropy_nats  mean_at_depth  mean_at_depth  subtree_mean_  corr_horizon_
+-------------------------------------------------------------------------------------------------------------------------
+Q2_depthsched             5.154          3.607          1.302         16.000          4.000          1.452          0.003
+Q2_fixed16               15.750          1.986          0.080         16.000         16.000          0.000         -0.011
+Q2_fixed2                 1.969          0.248          0.080          2.000          2.000          0.000         -0.007
+Q2_fixed4                 3.938          0.497          0.080          4.000          4.000          0.000         -0.004
+Q2_fixed8                 7.875          0.993          0.080          8.000          8.000          0.000         -0.013
+Q2_learned               14.865          3.154          0.428         13.917         14.400          0.854         -0.024
+Q2_random_h               7.191          5.332          1.442          7.667          7.530          1.399         -0.100
+
+wrote /localhome/local-chrislin/treewm/results_q2/horizon_analysis.json

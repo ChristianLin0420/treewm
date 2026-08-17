@@ -1,0 +1,42 @@
+=== Phase-1 screening (18 runs, baseline A0_random_s0) ===
+recipe                 steps     success   goal_dist   state_mse  rec_err_d3         EBF  branch_div  leaf_depth    val_loss  wins
+----------------------------------------------------------------------------------------------------------------------------------
+A0_bfs_s0              19950       0.440       4.232       0.001           -       1.766       2.303       2.466       1.399     0
+A0_random_s0           19950       0.520       4.319       0.001           -       1.764       2.318       3.430       1.417     0  <- baseline
+A1_multistep_s0        19950       0.400       5.845       0.001       0.000       1.759       2.101       3.032       1.385     1
+A2_ss25_s0             19950       0.320       6.956       0.001       0.000       1.760       2.428       3.540       1.406     0
+A2_ss50_s0             19950       0.520       5.015       0.001       0.001       1.775       2.456       3.736       1.405     2
+A4_noresidual_s0       19950       0.260       6.150       0.001           -       1.768       2.043       3.181       1.406     1
+B1_k8_s0               19950       0.540       3.478       0.001           -       2.750       1.954       2.285       1.421     3
+B2_k16_s0              19950       0.100      10.113       0.003           -       4.218       1.805       1.574       1.925     1
+B3_k8_short_s0         19950       0.460       5.558       0.000           -       2.701       1.674       2.365       1.277     3
+C1_short_s0            19950       0.560       4.498       0.001           -       1.770       2.038       2.911       1.258     3
+C2_medium_s0           19950       0.260       7.179       0.001           -       1.766       2.094       3.104       1.344     1
+C4_fixed8_s0           19950       0.340       7.196       0.000           -       1.795       1.678       3.509       1.040     2
+G1_wide_s0             19950       0.340       6.481       0.002           -       1.763       2.411       2.688       1.415     0
+G2_deep_s0             19950       0.340       5.607       0.001           -       1.766       2.483       2.430       1.405     1
+G3_z256_s0             19950       0.560       3.694       0.001           -       1.756       2.509       3.520       1.398     4
+H1_bind_s0             19950       0.380       4.749       0.001           -       1.768       2.035       3.301       1.404     1
+H2_depthw_s0           19950       0.380       5.348       0.002       0.000       1.759       2.443       2.983       1.436     1
+H3_noredundancy_s0     19950       0.460       5.569       0.001           -       1.796       2.288       3.247       1.416     0
+
+=== promotion (>= 2 criteria improved by >5%) ===
+  G3_z256_s0           criteria=4  -> PROMOTE
+  B1_k8_s0             criteria=3  -> PROMOTE
+  B3_k8_short_s0       criteria=3  -> PROMOTE
+  C1_short_s0          criteria=3  -> PROMOTE
+  A2_ss50_s0           criteria=2  -> PROMOTE
+  C4_fixed8_s0         criteria=2  -> PROMOTE
+  A1_multistep_s0      criteria=1  -> drop
+  A4_noresidual_s0     criteria=1  -> drop
+  B2_k16_s0            criteria=1  -> drop
+  C2_medium_s0         criteria=1  -> drop
+  G2_deep_s0           criteria=1  -> drop
+  H1_bind_s0           criteria=1  -> drop
+  H2_depthw_s0         criteria=1  -> drop
+  A0_bfs_s0            criteria=0  -> drop
+  A2_ss25_s0           criteria=0  -> drop
+  G1_wide_s0           criteria=0  -> drop
+  H3_noredundancy_s0   criteria=0  -> drop
+
+wrote /localhome/local-chrislin/treewm/results_screen/screen_summary.json

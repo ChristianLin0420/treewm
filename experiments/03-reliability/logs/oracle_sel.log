@@ -1,0 +1,23 @@
+[oracle] 2 checkpoints on pointmaze-medium-stitch
+  noveltyq B64 done
+  noveltyq B256 done
+  randomtreewm B64 done
+  randomtreewm B256 done
+
+=== leaf-selection mode vs success (pointmaze-medium-stitch) ===
+arm/budget                       latent        predicted           oracle
+--------------------------------------------------------------------------
+noveltyq|B256              0.000±0.000      0.100±0.000      0.100±0.000 
+noveltyq|B64               0.000±0.000      0.200±0.000      0.200±0.000 
+randomtreewm|B256          0.100±0.000      0.100±0.000      0.300±0.000 
+randomtreewm|B64           0.200±0.000      0.300±0.000      0.400±0.000 
+
+=== grounding diagnostics (pointmaze-medium-stitch) ===
+arm/budget              disagree  min_pred_d  min_act_d  realised   regret
+--------------------------------------------------------------------------
+noveltyq|B256              0.780     9.926    14.683    15.168     0.486
+noveltyq|B64               0.415    15.174    15.907    16.238     0.330
+randomtreewm|B256          0.867     9.595    11.687    12.479     0.793
+randomtreewm|B64           0.455    12.940    13.059    13.260     0.201
+
+wrote /localhome/local-chrislin/treewm/results_novelty/oracle_pointmaze-medium-stitch.json

@@ -1,0 +1,5 @@
+[ant4 05:38:33] AntMaze 300k: FlatKWM vs recursive h=20 (future-set cache ENABLED)
+[ant4 15:42:14] training done
+[ant4 15:47:08] sweep done
+[ant4 15:47:34] locomotion check done
+[ant4 15:47:36] ANTMAZE STAGE COMPLETE

@@ -52,11 +52,11 @@ def read_run(run_dir: Path) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_screen")
+    p.add_argument("--runs", default="experiments/05-design-space/runs/screen")
     p.add_argument("--baseline", default="A0_random_s0")
     p.add_argument("--min-criteria", type=int, default=2)
     p.add_argument("--rel-threshold", type=float, default=0.05)
-    p.add_argument("--out", default="results_screen")
+    p.add_argument("--out", default="experiments/05-design-space/results/screen")
     args = p.parse_args()
 
     runs: dict[str, dict] = {}

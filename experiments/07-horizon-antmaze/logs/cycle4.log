@@ -1,0 +1,5 @@
+[cycle4 04:43:24] horizon sweep training done
+[cycle4 05:11:34] horizon budget sweep done
+[cycle4 05:13:01] horizon report done
+[cycle4 05:16:03] horizon visualisations done
+[cycle4 05:16:03] best horizon = 20 -- launching AntMaze 300k (flat vs h=20)

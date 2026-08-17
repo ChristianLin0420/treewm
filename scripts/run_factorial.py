@@ -47,7 +47,7 @@ CELLS = [
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_phase2")
+    p.add_argument("--runs", default="experiments/05-design-space/runs/phase2")
     p.add_argument("--recipe", default="C1_short")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--budgets", nargs="+", type=int, default=[32, 64, 128])

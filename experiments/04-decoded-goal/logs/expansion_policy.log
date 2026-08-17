@@ -1,0 +1,46 @@
+[policy] 3 checkpoints (randomtreewm) on pointmaze-medium-stitch
+  20260813_seed0 random done
+  20260813_seed0 novelty_q done
+  20260813_seed0 goal done
+  20260813_seed0 goal+a0.1 done
+  20260813_seed0 goal+a0.25 done
+  20260813_seed0 goal+a0.5 done
+  20260813_seed0 goal+a1.0 done
+  20260813_seed1 random done
+  20260813_seed1 novelty_q done
+  20260813_seed1 goal done
+  20260813_seed1 goal+a0.1 done
+  20260813_seed1 goal+a0.25 done
+  20260813_seed1 goal+a0.5 done
+  20260813_seed1 goal+a1.0 done
+  20260813_seed2 random done
+  20260813_seed2 novelty_q done
+  20260813_seed2 goal done
+  20260813_seed2 goal+a0.1 done
+  20260813_seed2 goal+a0.25 done
+  20260813_seed2 goal+a0.5 done
+  20260813_seed2 goal+a1.0 done
+
+=== success vs node budget (pointmaze-medium-stitch, randomtreewm checkpoints) ===
+policy              16      32      64     128     256     AUC
+--------------------------------------------------------------
+random           0.417   0.417   0.417   0.450   0.500    0.440
+novelty_q        0.383   0.450   0.283   0.183   0.083    0.277
+goal             0.483   0.417   0.350   0.333   0.450    0.407
+goal+a0.1        0.467   0.417   0.400   0.433   0.383    0.420
+goal+a0.25       0.417   0.467   0.367   0.383   0.367    0.400
+goal+a0.5        0.417   0.433   0.467   0.450   0.350    0.423
+goal+a1.0        0.417   0.400   0.450   0.350   0.383    0.400
+
+=== tree quality at budget 64 (pointmaze-medium-stitch) ===
+policy           best_reach_d    best_pred_d         regret       coverage          depth  goal_prog/exp
+----------------------------------------------------------------------------------------------------
+random                 15.856         15.286          0.187         17.833          2.902            n/a
+novelty_q              16.037         15.098          0.240         17.307          3.121            n/a
+goal                   14.726         13.024          0.130         16.272          3.161          0.206
+goal+a0.1              15.447         13.508          0.130         16.114          3.169          0.205
+goal+a0.25             14.894         13.223          0.171         17.362          3.164          0.205
+goal+a0.5              15.072         13.413          0.139         16.455          3.172          0.203
+goal+a1.0              15.159         13.542          0.094         16.550          3.172          0.206
+
+wrote /localhome/local-chrislin/treewm/results_policy/policy_pointmaze-medium-stitch.json

@@ -44,7 +44,7 @@ MAX_STATE_MSE = 0.5        # decoded-state prediction should not be diverging
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_q1")
+    p.add_argument("--runs", default="experiments/06-q1-q2-q3/runs/q1")
     p.add_argument("--checkpoint-name", default="latest.pt")
     p.add_argument("--budget", type=int, default=64)
     p.add_argument("--episodes", type=int, default=2)

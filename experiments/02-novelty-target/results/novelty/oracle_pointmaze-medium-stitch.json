@@ -1,0 +1,106 @@
+{
+  "success": {
+    "noveltyq|B64|latent": [
+      [
+        0.0,
+        4.3149888629423385
+      ]
+    ],
+    "noveltyq|B64|predicted": [
+      [
+        0.2,
+        3.3812809412809415
+      ]
+    ],
+    "noveltyq|B64|oracle": [
+      [
+        0.2,
+        3.297370307343603
+      ]
+    ],
+    "noveltyq|B256|latent": [
+      [
+        0.0,
+        11.861
+      ]
+    ],
+    "noveltyq|B256|predicted": [
+      [
+        0.1,
+        8.968125570082092
+      ]
+    ],
+    "noveltyq|B256|oracle": [
+      [
+        0.1,
+        11.15188188976378
+      ]
+    ],
+    "randomtreewm|B64|latent": [
+      [
+        0.2,
+        4.016359715194877
+      ]
+    ],
+    "randomtreewm|B64|predicted": [
+      [
+        0.3,
+        3.4517461949814896
+      ]
+    ],
+    "randomtreewm|B64|oracle": [
+      [
+        0.4,
+        3.3799971573798615
+      ]
+    ],
+    "randomtreewm|B256|latent": [
+      [
+        0.1,
+        6.573846473029046
+      ]
+    ],
+    "randomtreewm|B256|predicted": [
+      [
+        0.1,
+        5.8742849903719465
+      ]
+    ],
+    "randomtreewm|B256|oracle": [
+      [
+        0.3,
+        5.531485943686912
+      ]
+    ]
+  },
+  "diagnostics": {
+    "noveltyq|B64": {
+      "disagree": 0.41493351517217864,
+      "min_predicted_goal_distance": 15.174176312370834,
+      "min_actual_goal_distance": 15.907448602462441,
+      "realised_goal_distance_of_predicted_choice": 16.237627942774267,
+      "regret": 0.33017934031182494
+    },
+    "noveltyq|B256": {
+      "disagree": 0.7796666666666666,
+      "min_predicted_goal_distance": 9.926080560783545,
+      "min_actual_goal_distance": 14.682721577644347,
+      "realised_goal_distance_of_predicted_choice": 15.16841503270467,
+      "regret": 0.4856934550603231
+    },
+    "randomtreewm|B64": {
+      "disagree": 0.45537918871252203,
+      "min_predicted_goal_distance": 12.939932401528225,
+      "min_actual_goal_distance": 13.059445270220543,
+      "realised_goal_distance_of_predicted_choice": 13.260433558448229,
+      "regret": 0.20098828822768555
+    },
+    "randomtreewm|B256": {
+      "disagree": 0.8673920435226113,
+      "min_predicted_goal_distance": 9.594821493514072,
+      "min_actual_goal_distance": 11.686889875383173,
+      "realised_goal_distance_of_predicted_choice": 12.479451333841107,
+      "regret": 0.7925614584579339
+    }
+  }
+}

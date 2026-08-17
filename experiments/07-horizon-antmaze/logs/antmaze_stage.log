@@ -1,0 +1,4 @@
+[antmaze 05:08:55] start (5k steps smoke test; retrieval pool 200k, query_multiplier 2)
+[antmaze 06:04:01] training done
+[antmaze 06:21:20] sweep done
+[antmaze 06:21:23] ANTMAZE STAGE COMPLETE

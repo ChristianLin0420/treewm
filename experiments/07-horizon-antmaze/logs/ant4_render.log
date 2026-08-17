@@ -1,0 +1,3 @@
+[viz] 2 checkpoints, budget 64
+  FAILED /localhome/local-chrislin/treewm/runs_ant4/antmaze-teleport/flatkwm/A4_flat_s0/checkpoints/latest.pt: operands could not be broadcast together with shapes (1,2) (29,) 
+  FAILED /localhome/local-chrislin/treewm/runs_ant4/antmaze-teleport/randomtreewm/A4_best_h_s0/checkpoints/latest.pt: operands could not be broadcast together with shapes (1,2) (29,) 

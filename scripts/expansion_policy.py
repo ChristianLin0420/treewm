@@ -130,7 +130,7 @@ def tree_quality(model, normalizer, env, tasks, tc, quantizer, device, episodes=
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_novelty")
+    p.add_argument("--runs", default="experiments/02-novelty-target/runs/novelty")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--arm", default="randomtreewm",
                    help="checkpoint to run every policy on; the world model is shared")

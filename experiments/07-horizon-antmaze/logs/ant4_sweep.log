@@ -1,0 +1,4 @@
+[sweep] 2 checkpoints, budgets [16, 32, 64, 128, 256]
+[sweep] ok flatkwm/A4_flat_s0
+[sweep] ok randomtreewm/A4_best_h_s0
+[sweep] wrote /localhome/local-chrislin/treewm/results_ant4/success_vs_budget_antmaze-teleport.png

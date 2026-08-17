@@ -130,7 +130,7 @@ def episode(env, model, normalizer, tree_cfg, task, goal_seed, mode, max_steps, 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_novelty")
+    p.add_argument("--runs", default="experiments/02-novelty-target/runs/novelty")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--arms", nargs="+", default=["noveltyq", "randomtreewm"])
     p.add_argument("--budgets", nargs="+", type=int, default=[64, 256])
@@ -140,7 +140,7 @@ def main() -> None:
     p.add_argument("--max-steps", type=int, default=300)
     p.add_argument("--modes", nargs="+", default=["latent", "predicted", "oracle"])
     p.add_argument("--seed-tags", nargs="+", default=None)
-    p.add_argument("--out", default="results_novelty")
+    p.add_argument("--out", default="experiments/02-novelty-target/results/novelty")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

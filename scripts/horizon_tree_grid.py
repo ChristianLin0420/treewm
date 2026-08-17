@@ -40,12 +40,12 @@ REPO = Path(__file__).resolve().parents[1]
 @torch.no_grad()
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_h")
+    p.add_argument("--runs", default="experiments/07-horizon-antmaze/runs/h")
     p.add_argument("--horizons", nargs="+", type=int, default=[8, 16, 24, 32])
     p.add_argument("--budget", type=int, default=64)
     p.add_argument("--seed-tag", default="s0")
     p.add_argument("--anchors", nargs="+", type=int, default=[0, 3])
-    p.add_argument("--out", default="results_h")
+    p.add_argument("--out", default="experiments/07-horizon-antmaze/results/h")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -61,7 +61,7 @@ def tree_shape(model, normalizer, env, tasks, tc, device, n=6):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_novelty")
+    p.add_argument("--runs", default="experiments/02-novelty-target/runs/novelty")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--arm", default="randomtreewm")
     p.add_argument("--budgets", nargs="+", type=int, default=[32, 64, 128])

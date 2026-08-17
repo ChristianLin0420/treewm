@@ -144,7 +144,7 @@ def main() -> None:
     p.add_argument("--min-per-gpu", type=int, default=2)
     p.add_argument("--degrade-factor", type=float, default=1.8)
     p.add_argument("--num-workers", type=int, default=4)
-    p.add_argument("--run-root", default="runs_screen")
+    p.add_argument("--run-root", default="experiments/05-design-space/runs/screen")
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--extra", nargs="*", default=[])
     p.add_argument("--list", action="store_true")

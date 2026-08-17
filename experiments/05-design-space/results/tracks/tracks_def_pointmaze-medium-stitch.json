@@ -1,0 +1,648 @@
+{
+  "provenance": {
+    "git_commit": "85ef172",
+    "hostname": "4u4g-0018",
+    "timestamp": "2026-08-14T04:58:23",
+    "checkpoint": "/localhome/local-chrislin/treewm/runs_novelty/pointmaze-medium-stitch/randomtreewm/20260813_seed0/checkpoints/latest.pt",
+    "checkpoint_sha256_head": "a649a151d75ece7b",
+    "arm": "randomtreewm",
+    "dataset": "pointmaze-medium-stitch",
+    "n_checkpoints": 3,
+    "tracks": [
+      "D",
+      "E",
+      "F"
+    ],
+    "episodes": 2,
+    "max_tasks": 8
+  },
+  "D|random": {
+    "32": [
+      0.4375,
+      0.375,
+      0.5
+    ],
+    "64": [
+      0.5625,
+      0.3125,
+      0.5
+    ],
+    "leaf_depth": [
+      3.379310369491577,
+      3.6902832984924316,
+      3.383333444595337
+    ],
+    "goal_dist": [
+      4.088041305541992,
+      5.025818347930908,
+      3.575176954269409
+    ],
+    "128": [
+      0.5,
+      0.5,
+      0.375
+    ]
+  },
+  "D|bfs": {
+    "32": [
+      0.375,
+      0.1875,
+      0.4375
+    ],
+    "64": [
+      0.4375,
+      0.0625,
+      0.375
+    ],
+    "leaf_depth": [
+      2.73421049118042,
+      2.8773584365844727,
+      2.2456140518188477
+    ],
+    "goal_dist": [
+      5.321005344390869,
+      6.891400337219238,
+      6.174654006958008
+    ],
+    "128": [
+      0.1875,
+      0.3125,
+      0.4375
+    ]
+  },
+  "D|depth_balanced": {
+    "32": [
+      0.5,
+      0.375,
+      0.5
+    ],
+    "64": [
+      0.5,
+      0.25,
+      0.5
+    ],
+    "leaf_depth": [
+      3.5416667461395264,
+      3.6422765254974365,
+      3.4478371143341064
+    ],
+    "goal_dist": [
+      4.830649375915527,
+      5.440192222595215,
+      3.2187647819519043
+    ],
+    "128": [
+      0.5,
+      0.25,
+      0.4375
+    ]
+  },
+  "D|root_quota": {
+    "32": [
+      0.5,
+      0.3125,
+      0.5625
+    ],
+    "64": [
+      0.625,
+      0.375,
+      0.5
+    ],
+    "leaf_depth": [
+      3.4626169204711914,
+      3.6681318283081055,
+      3.345268487930298
+    ],
+    "goal_dist": [
+      3.877423048019409,
+      4.324296951293945,
+      4.332697868347168
+    ],
+    "128": [
+      0.375,
+      0.375,
+      0.375
+    ]
+  },
+  "D|goal": {
+    "32": [
+      0.25,
+      0.25,
+      0.5
+    ],
+    "64": [
+      0.375,
+      0.25,
+      0.4375
+    ],
+    "leaf_depth": [
+      4.0559797286987305,
+      4.461717128753662,
+      4.287206172943115
+    ],
+    "goal_dist": [
+      6.104549884796143,
+      7.101665496826172,
+      5.645072937011719
+    ],
+    "128": [
+      0.375,
+      0.3125,
+      0.375
+    ]
+  },
+  "D|diverse_goal": {
+    "32": [
+      0.375,
+      0.3125,
+      0.4375
+    ],
+    "64": [
+      0.375,
+      0.25,
+      0.375
+    ],
+    "leaf_depth": [
+      3.9246230125427246,
+      4.402746200561523,
+      3.99493670463562
+    ],
+    "goal_dist": [
+      5.953317642211914,
+      6.18986701965332,
+      5.969268321990967
+    ],
+    "128": [
+      0.125,
+      0.25,
+      0.3125
+    ]
+  },
+  "D|broad_to_focused": {
+    "32": [
+      0.3125,
+      0.375,
+      0.5
+    ],
+    "64": [
+      0.375,
+      0.375,
+      0.5
+    ],
+    "leaf_depth": [
+      3.8873238563537598,
+      4.357466220855713,
+      4.148051738739014
+    ],
+    "goal_dist": [
+      5.908347129821777,
+      6.096413612365723,
+      4.1110734939575195
+    ],
+    "128": [
+      0.375,
+      0.25,
+      0.4375
+    ]
+  },
+  "E|fixed1": {
+    "success": [
+      0.3125,
+      0.25,
+      0.3125
+    ],
+    "replans": [
+      407.4375,
+      422.375,
+      405.875
+    ],
+    "exec_len": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "env_steps": [
+      407.4375,
+      422.375,
+      405.875
+    ],
+    "goal_dist": [
+      8.19632625579834,
+      7.640658378601074,
+      7.157761573791504
+    ]
+  },
+  "E|fixed4": {
+    "success": [
+      0.375,
+      0.4375,
+      0.1875
+    ],
+    "replans": [
+      98.5,
+      92.625,
+      110.8125
+    ],
+    "exec_len": [
+      4.0,
+      4.0,
+      4.0
+    ],
+    "env_steps": [
+      393.1875,
+      369.8125,
+      442.875
+    ],
+    "goal_dist": [
+      6.725261688232422,
+      5.87569522857666,
+      7.611754417419434
+    ]
+  },
+  "E|fixed8": {
+    "success": [
+      0.375,
+      0.25,
+      0.4375
+    ],
+    "replans": [
+      49.4375,
+      52.3125,
+      45.25
+    ],
+    "exec_len": [
+      8.0,
+      7.966547012329102,
+      8.0
+    ],
+    "env_steps": [
+      391.4375,
+      412.9375,
+      358.375
+    ],
+    "goal_dist": [
+      6.400022506713867,
+      5.363649368286133,
+      4.0970306396484375
+    ]
+  },
+  "E|clipped16": {
+    "success": [
+      0.375,
+      0.4375,
+      0.625
+    ],
+    "replans": [
+      26.25,
+      28.1875,
+      21.9375
+    ],
+    "exec_len": [
+      14.628571510314941,
+      14.101995468139648,
+      14.769230842590332
+    ],
+    "env_steps": [
+      377.875,
+      388.125,
+      316.375
+    ],
+    "goal_dist": [
+      5.328492641448975,
+      4.464608669281006,
+      2.416018486022949
+    ]
+  },
+  "E|full64": {
+    "success": [
+      0.375,
+      0.25,
+      0.375
+    ],
+    "replans": [
+      16.0625,
+      22.5625,
+      15.0
+    ],
+    "exec_len": [
+      26.770427703857422,
+      19.44598388671875,
+      28.299999237060547
+    ],
+    "env_steps": [
+      399.875,
+      420.125,
+      399.25
+    ],
+    "goal_dist": [
+      5.656756401062012,
+      4.419651031494141,
+      4.930733680725098
+    ]
+  },
+  "F|endpoint_0.0": {
+    "success": [
+      0.375,
+      0.4375,
+      0.375
+    ],
+    "leaf_depth": [
+      3.318681240081787,
+      3.5318682193756104,
+      3.304635763168335
+    ],
+    "goal_dist": [
+      4.351591110229492,
+      4.646091938018799,
+      4.086053848266602
+    ]
+  },
+  "F|path_aware_0.005": {
+    "success": [
+      0.5625,
+      0.25,
+      0.375
+    ],
+    "leaf_depth": [
+      3.214622735977173,
+      3.2621359825134277,
+      1.1425855159759521
+    ],
+    "goal_dist": [
+      4.122043609619141,
+      4.96457576751709,
+      4.809884071350098
+    ]
+  },
+  "F|path_aware_0.02": {
+    "success": [
+      0.4375,
+      0.5,
+      0.3125
+    ],
+    "leaf_depth": [
+      1.0201680660247803,
+      1.185686707496643,
+      1.0
+    ],
+    "goal_dist": [
+      7.497112274169922,
+      5.845591068267822,
+      7.34488582611084
+    ]
+  },
+  "F|ancestor_0.5": {
+    "success": [
+      0.4375,
+      0.3125,
+      0.5625
+    ],
+    "leaf_depth": [
+      3.457274913787842,
+      3.587878704071045,
+      3.3107049465179443
+    ],
+    "goal_dist": [
+      4.744508266448975,
+      4.167018413543701,
+      3.969574451446533
+    ]
+  },
+  "_shapes": {
+    "random": {
+      "tree/effective_branching_factor_d4": 0.2233799695968628,
+      "tree/horizon_d4": 20.844874382019043,
+      "tree/pairwise_endpoint_diversity_d2": 0.23830485426717338,
+      "tree/pairwise_action_diversity_d2": 0.2603772025969293,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 3.3888889948527017,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.3187035206291411,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 2.925347328186035,
+      "tree/pairwise_endpoint_diversity_d5": 0.29334171964890426,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.574613564544254,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 24.166666666666668,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.562939445177714,
+      "tree/effective_branching_factor_d2": 1.5104166666666667,
+      "tree/horizon_d3": 17.431772867838543,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 15.44444497426351,
+      "tree/top2_root_subtree_fraction": 0.6984127163887024,
+      "tree/horizon_d5": 16.591567993164062,
+      "tree/expansion_order_vs_depth": 0.9131450653076172,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.31490657147434026,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.6781800587972006,
+      "tree/pairwise_action_diversity_d4": 2.138407548268636,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    },
+    "bfs": {
+      "tree/pairwise_endpoint_diversity_d2": 0.23830485343933105,
+      "tree/pairwise_action_diversity_d2": 0.2603772092196676,
+      "tree/count_d2": 16.0,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 2.578125,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 43.0,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.5841340555085073,
+      "tree/effective_branching_factor_d2": 2.6875,
+      "tree/horizon_d3": 17.18863042195638,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/top2_root_subtree_fraction": 0.6666666865348816,
+      "tree/expansion_order_vs_depth": 0.8403247594833374,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.31487617641687393,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.0,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 3.0
+    },
+    "depth_balanced": {
+      "tree/effective_branching_factor_d4": 0.24523010353247324,
+      "tree/horizon_d4": 19.87334378560384,
+      "tree/pairwise_endpoint_diversity_d2": 0.2383048575785425,
+      "tree/pairwise_action_diversity_d2": 0.2603772034247716,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 4.00000015894572,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.3353017171223958,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 2.9756945768992105,
+      "tree/pairwise_endpoint_diversity_d5": 0.24764673188328742,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.3105985542138416,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 21.555556615193684,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.558845135900709,
+      "tree/effective_branching_factor_d2": 1.3472222884496052,
+      "tree/horizon_d3": 17.27644697825114,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 17.44444465637207,
+      "tree/top2_root_subtree_fraction": 0.7186949021286434,
+      "tree/horizon_d5": 19.527777353922527,
+      "tree/expansion_order_vs_depth": 0.9497439463933309,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.3233357419570287,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.8409722447395325,
+      "tree/pairwise_action_diversity_d4": 2.192540533012814,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    },
+    "root_quota": {
+      "tree/effective_branching_factor_d4": 0.22765922049681345,
+      "tree/horizon_d4": 20.855071703592937,
+      "tree/pairwise_endpoint_diversity_d2": 0.23830485178364647,
+      "tree/pairwise_action_diversity_d2": 0.2603772067361408,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 3.2222222884496055,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.31977339502837926,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 2.9166667461395264,
+      "tree/pairwise_endpoint_diversity_d5": 0.3537057293785943,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.6711960514386495,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 24.555556615193684,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.5609315567546425,
+      "tree/effective_branching_factor_d2": 1.5347222884496052,
+      "tree/horizon_d3": 17.33047866821289,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 15.222222646077475,
+      "tree/top2_root_subtree_fraction": 0.6701940231853061,
+      "tree/horizon_d5": 18.93148899078369,
+      "tree/expansion_order_vs_depth": 0.9162290096282959,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.3076001335349348,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.6437966823577881,
+      "tree/pairwise_action_diversity_d4": 2.1286362210909524,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    },
+    "goal": {
+      "tree/effective_branching_factor_d4": 0.6493055621782938,
+      "tree/horizon_d4": 18.93559233347575,
+      "tree/pairwise_endpoint_diversity_d2": 0.23830485343933105,
+      "tree/pairwise_action_diversity_d2": 0.2603772075639831,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 10.388888994852701,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.20993462825814882,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 3.1484375,
+      "tree/pairwise_endpoint_diversity_d5": 0.2803440007898543,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.4198616001341073,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 16.88888931274414,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.4477232893308005,
+      "tree/effective_branching_factor_d2": 1.0555555820465088,
+      "tree/horizon_d3": 18.6865078608195,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 15.722222328186035,
+      "tree/top2_root_subtree_fraction": 0.841269850730896,
+      "tree/horizon_d5": 16.202020327250164,
+      "tree/expansion_order_vs_depth": 0.9903384844462076,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.21702826850944093,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.9635416666666666,
+      "tree/pairwise_action_diversity_d4": 2.0920013354884257,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    },
+    "diverse_goal": {
+      "tree/effective_branching_factor_d4": 0.577423761288325,
+      "tree/horizon_d4": 19.049964269002277,
+      "tree/pairwise_endpoint_diversity_d2": 0.23830485343933105,
+      "tree/pairwise_action_diversity_d2": 0.2603772075639831,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 9.222222487131754,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.21159070680538816,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 3.098090410232544,
+      "tree/pairwise_endpoint_diversity_d5": 0.29240714261929196,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.4588336745897927,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 18.94444529215495,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.451046513186561,
+      "tree/effective_branching_factor_d2": 1.1840278307596843,
+      "tree/horizon_d3": 18.79317633310954,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 14.833333969116211,
+      "tree/top2_root_subtree_fraction": 0.8315696749422284,
+      "tree/horizon_d5": 15.883842468261719,
+      "tree/expansion_order_vs_depth": 0.9689142306645712,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.22366556814975205,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.8814709782600403,
+      "tree/pairwise_action_diversity_d4": 2.1131654169824388,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    },
+    "broad_to_focused": {
+      "tree/effective_branching_factor_d4": 0.6133207380771637,
+      "tree/horizon_d4": 20.387598037719727,
+      "tree/pairwise_endpoint_diversity_d2": 0.2383048559228579,
+      "tree/pairwise_action_diversity_d2": 0.2603772092196676,
+      "tree/count_d2": 16.0,
+      "tree/count_d5": 9.611111164093018,
+      "tree/effective_branching_factor_d5": 0.0,
+      "tree/pairwise_endpoint_diversity_d4": 0.2528169655965434,
+      "tree/count_d1": 4.0,
+      "tree/mean_depth": 3.10937507947286,
+      "tree/pairwise_endpoint_diversity_d5": 0.3401534855365753,
+      "tree/unique_root_subtrees_explored": 4.0,
+      "tree/pairwise_action_diversity_d5": 2.6012750764687858,
+      "tree/effective_branching_factor_d0": 4.0,
+      "tree/pairwise_action_diversity_d1": 3.469734880659315,
+      "tree/count_d3": 18.611111323038738,
+      "tree/horizon_d2": 29.333333333333332,
+      "tree/pairwise_action_diversity_d3": 2.5754162006907992,
+      "tree/effective_branching_factor_d2": 1.1631944576899211,
+      "tree/horizon_d3": 17.59791088104248,
+      "tree/effective_branching_factor_d1": 4.0,
+      "tree/count_d4": 14.777777989705404,
+      "tree/top2_root_subtree_fraction": 0.7495590978198581,
+      "tree/horizon_d5": 15.47474733988444,
+      "tree/expansion_order_vs_depth": 0.9757278561592102,
+      "tree/count_d0": 1.0,
+      "tree/pairwise_endpoint_diversity_d3": 0.3186105688412984,
+      "tree/horizon_d1": 27.222222010294598,
+      "tree/pairwise_endpoint_diversity_d1": 0.24423314299848342,
+      "tree/effective_branching_factor_d3": 0.8835915327072144,
+      "tree/pairwise_action_diversity_d4": 2.1258576843473644,
+      "tree/horizon_d0": 0.0,
+      "tree/max_depth": 5.0
+    }
+  }
+}

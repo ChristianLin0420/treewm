@@ -1,0 +1,14 @@
+[screen] 6 jobs, 6 slots (3/GPU), 20000 steps
+[screen] start gpu0 H48 seed=0  (1 running)
+[screen] start gpu0 H64 seed=0  (2 running)
+[screen] start gpu0 H48 seed=1  (3 running)
+[screen] start gpu1 H64 seed=1  (4 running)
+[screen] start gpu1 H48 seed=2  (5 running)
+[screen] start gpu1 H64 seed=2  (6 running)
+[screen] ok H48 seed=0 (1/6, 49 min)
+[screen] ok H64 seed=0 (2/6, 49 min)
+[screen] ok H48 seed=1 (3/6, 49 min)
+[screen] ok H48 seed=2 (4/6, 50 min)
+[screen] ok H64 seed=1 (5/6, 50 min)
+[screen] ok H64 seed=2 (6/6, 50 min)
+[screen] all done in 50 min

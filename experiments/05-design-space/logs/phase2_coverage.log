@@ -1,0 +1,29 @@
+[coverage] 21 checkpoints
+  pointmaze-medium-stitch/fixedtreewm/A0_bfs_s0
+  pointmaze-medium-stitch/fixedtreewm/A0_bfs_s1
+  pointmaze-medium-stitch/fixedtreewm/A0_bfs_s2
+  pointmaze-medium-stitch/randomtreewm/A0_random_s0
+  pointmaze-medium-stitch/randomtreewm/A0_random_s1
+  pointmaze-medium-stitch/randomtreewm/A0_random_s2
+  pointmaze-medium-stitch/randomtreewm/B1_k8_s0
+  pointmaze-medium-stitch/randomtreewm/B1_k8_s1
+  pointmaze-medium-stitch/randomtreewm/B1_k8_s2
+  pointmaze-medium-stitch/randomtreewm/B3_k8_short_s0
+  pointmaze-medium-stitch/randomtreewm/B3_k8_short_s1
+  pointmaze-medium-stitch/randomtreewm/B3_k8_short_s2
+  pointmaze-medium-stitch/randomtreewm/C1_short_s0
+  pointmaze-medium-stitch/randomtreewm/C1_short_s1
+  pointmaze-medium-stitch/randomtreewm/C1_short_s2
+  pointmaze-medium-stitch/randomtreewm/G3_z256_s0
+  pointmaze-medium-stitch/randomtreewm/G3_z256_s1
+  pointmaze-medium-stitch/randomtreewm/G3_z256_s2
+  pointmaze-medium-stitch/randomtreewm/P_k8_short_ms_s0
+  pointmaze-medium-stitch/randomtreewm/P_k8_short_ms_s1
+  pointmaze-medium-stitch/randomtreewm/P_k8_short_ms_s2
+
+=== controllability coverage (distinct regions) vs budget — pointmaze-medium-stitch ===
+arm                       16      32      64     128     256
+----------------------------------------------------------------------
+fixedtreewm             6.41    9.23   14.62   21.26   29.09
+randomtreewm            7.82   10.81   18.18   28.90   43.59
+[coverage] wrote /localhome/local-chrislin/treewm/results_phase2/coverage_vs_budget_pointmaze-medium-stitch.png

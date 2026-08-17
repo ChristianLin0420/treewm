@@ -130,7 +130,7 @@ def render_checkpoint(ck: Path, scorer: str | None, budget: int, num_anchors: in
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", default=None)
-    p.add_argument("--runs", default="runs_screen")
+    p.add_argument("--runs", default="experiments/05-design-space/runs/screen")
     p.add_argument("--all", action="store_true")
     p.add_argument("--scorer", default=None)
     p.add_argument("--budget", type=int, default=64)

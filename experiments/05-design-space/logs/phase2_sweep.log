@@ -1,0 +1,23 @@
+[sweep] 21 checkpoints, budgets [16, 32, 64, 128, 256]
+[sweep] ok fixedtreewm/A0_bfs_s1
+[sweep] ok randomtreewm/A0_random_s0
+[sweep] ok fixedtreewm/A0_bfs_s0
+[sweep] ok fixedtreewm/A0_bfs_s2
+[sweep] ok randomtreewm/B1_k8_s0
+[sweep] ok randomtreewm/B1_k8_s1
+[sweep] ok randomtreewm/A0_random_s2
+[sweep] ok randomtreewm/A0_random_s1
+[sweep] ok randomtreewm/B3_k8_short_s0
+[sweep] ok randomtreewm/B1_k8_s2
+[sweep] ok randomtreewm/B3_k8_short_s1
+[sweep] ok randomtreewm/B3_k8_short_s2
+[sweep] ok randomtreewm/C1_short_s0
+[sweep] ok randomtreewm/C1_short_s1
+[sweep] ok randomtreewm/C1_short_s2
+[sweep] ok randomtreewm/G3_z256_s0
+[sweep] ok randomtreewm/P_k8_short_ms_s0
+[sweep] ok randomtreewm/G3_z256_s2
+[sweep] ok randomtreewm/P_k8_short_ms_s1
+[sweep] ok randomtreewm/G3_z256_s1
+[sweep] ok randomtreewm/P_k8_short_ms_s2
+[sweep] wrote /localhome/local-chrislin/treewm/results_phase2/success_vs_budget_pointmaze-medium-stitch.png

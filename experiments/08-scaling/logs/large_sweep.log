@@ -1,0 +1,17 @@
+[sweep] 15 checkpoints, budgets [16, 32, 64, 128, 256]
+[sweep] ok flatkwm/Fh20_s2
+[sweep] ok flatkwm/Fh20_s0
+[sweep] ok flatkwm/Fh20_s1
+[sweep] ok randomtreewm/H16_s0
+[sweep] ok randomtreewm/H16_s1
+[sweep] ok randomtreewm/H16_s2
+[sweep] ok randomtreewm/H20_s0
+[sweep] ok randomtreewm/H20_s1
+[sweep] ok randomtreewm/H32_s0
+[sweep] ok randomtreewm/H32_s1
+[sweep] ok randomtreewm/H20_s2
+[sweep] ok randomtreewm/H32_s2
+[sweep] ok randomtreewm/H8_s2
+[sweep] ok randomtreewm/H8_s0
+[sweep] ok randomtreewm/H8_s1
+[sweep] wrote /localhome/local-chrislin/treewm/results_large/success_vs_budget_pointmaze-large-stitch.png

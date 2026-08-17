@@ -100,13 +100,13 @@ def analyse(model, normalizer, env, spec, tree_cfg, starts, quantizer, max_nodes
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--runs", default="runs_novelty")
+    p.add_argument("--runs", default="experiments/02-novelty-target/runs/novelty")
     p.add_argument("--dataset", default="pointmaze-medium-stitch")
     p.add_argument("--budget", type=int, default=256)
     p.add_argument("--seed-tag", default="seed0")
     p.add_argument("--num-starts", type=int, default=8)
     p.add_argument("--max-nodes", type=int, default=12)
-    p.add_argument("--out", default="results_novelty")
+    p.add_argument("--out", default="experiments/02-novelty-target/results/novelty")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
