@@ -40,6 +40,8 @@ LADDER = [8, 6, 4, 3, 2, 1]
 VRAM_HEADROOM = 0.12
 THROUGHPUT_DEGRADE = 1.8
 MAX_OOM_RETRIES = 2
+# Steps before a job's rate is comparable to its probed solo rate (cache warm-up).
+WARMUP_STEPS = 600
 OOM_PAT = re.compile(r"CUDA out of memory|CUBLAS_STATUS_ALLOC_FAILED|torch\.OutOfMemoryError", re.I)
 
 
@@ -109,11 +111,18 @@ def probe(jobs: list[Job], python: str, steps: int, gpu: int = 0) -> dict[str, d
     seen: dict[str, Job] = {}
     for j in jobs:
         seen.setdefault(f"{j.env}|{j.arm}", j)
-    out: dict[str, dict] = {}
     probe_dir = REPO / "experiments/09-cross-family/probe"
     probe_dir.mkdir(parents=True, exist_ok=True)
+    cache = probe_dir / "probe.json"
+    # Saved after every configuration, so an interrupted probe resumes instead of
+    # re-measuring everything from scratch.
+    out: dict[str, dict] = json.loads(cache.read_text()) if cache.exists() else {}
 
     for k, j in seen.items():
+        if out.get(k, {}).get("ok"):
+            print(f"[probe] {k:52s} cached: vram={out[k]['peak_vram_gb']:.2f}GB "
+                  f"{out[k]['steps_per_s']:.2f} it/s", flush=True)
+            continue
         log = probe_dir / f"probe_{j.env}_{j.arm}.log"
         pj = Job(**{**asdict(j), "steps": steps, "run_root": "experiments/09-cross-family/probe/runs"})
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), TREEWM_PROBE="1")
@@ -133,7 +142,7 @@ def probe(jobs: list[Job], python: str, steps: int, gpu: int = 0) -> dict[str, d
         print(f"[probe] {k:52s} vram={vram:5.2f}GB rss={rss:5.2f}GB "
               f"{rate:6.2f} it/s dl_wait={dl:.2f} {'ok' if p.returncode == 0 else 'FAILED'}",
               flush=True)
-    (probe_dir / "probe.json").write_text(json.dumps(out, indent=2))
+        cache.write_text(json.dumps(out, indent=2))
     return out
 
 
@@ -145,8 +154,10 @@ def plan_slots(profiles: dict[str, dict], gpus: list[int], want: int) -> dict[in
     for g in gpus:
         total = nvml_free_gb(g)
         fit = int((total * (1.0 - VRAM_HEADROOM)) // worst)
-        chosen = min(want, max(1, fit))
-        chosen = min(LADDER, key=lambda x: (abs(x - chosen), -x)) if chosen < want else want
+        # Round DOWN to a ladder rung. Rounding to the nearest would pick 8 when only 7
+        # fit, immediately exceeding the headroom it was supposed to protect.
+        rungs = [v for v in LADDER if v <= min(want, max(1, fit))]
+        chosen = max(rungs) if rungs else 1
         slots[g] = chosen
         print(f"[plan] gpu{g}: {total:.1f}GB free, worst-case job {worst:.2f}GB, "
               f"headroom {VRAM_HEADROOM:.0%} -> {chosen} slots", flush=True)
@@ -265,22 +276,35 @@ class Fleet:
         print(f"[fleet] FAILED {job.job_id} rc={proc.returncode}\n  {tail}", flush=True)
 
     def check_throughput(self) -> None:
-        """Reduce slots if oversubscription has made each job pathologically slow."""
+        """Reduce slots if oversubscription has made each job pathologically slow.
+
+        Each job is compared against *its own* probed solo rate. Comparing against a
+        single global baseline would be meaningless here: humanoidmaze runs at 1.3 it/s
+        and antmaze at 4.7 by nature, so a global max would read humanoidmaze as 3.5x
+        degraded the moment it started and ratchet the fleet down to one slot -- a
+        permanent cut, since the ladder only descends.
+
+        Jobs below WARMUP_STEPS are excluded. The future-set cache needs roughly one pass
+        over the anchors (~390 steps at batch 256) before it is warm, and the probe only
+        runs 200 steps, so early rates are cold for both and not comparable.
+        """
         for g in list(self.slots):
-            rates = [j.steps_per_s for j, _, gg in self.running.values()
-                     if gg == g and j.steps_per_s > 0]
-            if len(rates) < max(2, self.slots[g] // 2):
+            ratios = []
+            for j, _, gg in self.running.values():
+                if gg != g or j.steps_per_s <= 0 or j.step < WARMUP_STEPS:
+                    continue
+                solo = self.baseline.get(f"{j.env}|{j.arm}", 0.0)
+                if solo > 0:
+                    ratios.append(solo / j.steps_per_s)
+            if len(ratios) < max(2, self.slots[g] // 2):
                 continue
-            rates.sort()
-            med = rates[len(rates) // 2]
-            key_base = max(self.baseline.values()) if self.baseline else 0.0
-            if key_base <= 0 or med <= 0:
-                continue
-            if key_base / med > THROUGHPUT_DEGRADE and self.slots[g] > 1:
+            ratios.sort()
+            med = ratios[len(ratios) // 2]
+            if med > THROUGHPUT_DEGRADE and self.slots[g] > 1:
                 old = self.slots[g]
                 self.slots[g] = lower(old)
-                print(f"[fleet] throughput {med:.2f} it/s vs baseline {key_base:.2f} "
-                      f"(>{THROUGHPUT_DEGRADE}x slower); gpu{g} slots {old} -> {self.slots[g]}",
+                print(f"[fleet] median job {med:.2f}x slower than its own solo rate "
+                      f"(>{THROUGHPUT_DEGRADE}x); gpu{g} slots {old} -> {self.slots[g]}",
                       flush=True)
 
     def run(self) -> None:
