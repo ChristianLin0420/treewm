@@ -325,7 +325,24 @@ WAVE1_ENVS = [
 H16 = ("future_sets.horizons=[16] future_sets.h_max=16 future_sets.horizon_rule=fixed "
        "future_sets.fixed_horizon=16 model.horizon_mode=fixed model.fixed_horizon_index=0 "
        "model.branch_factor=4")
-ARMS = {"flatkwm": f"arm=flatkwm {H16}", "randomtreewm": f"arm=randomtreewm {H16}"}
+
+# Screen-scale resource settings, applied identically to both arms so they cannot become
+# a confound. These are NOT the global defaults -- changing those would silently alter the
+# reproducibility of the earlier PointMaze cycles.
+#
+# retrieval_pool: the default 0 means "whole dataset", which is free in PointMaze's 2-D
+# observations and catastrophic here -- a measured 90 ms/anchor on cube-double's 1M x 37,
+# i.e. ~23 s per batch. kd-tree query cost grows superlinearly with pool size and
+# dimension (50k: 1.7 ms, 400k: 36 ms at D=37), so the pool is capped. With the future-set
+# cache on, each anchor is built once and reused ~100x, so this cost is paid once.
+#
+# num_workers: 32 cores shared by up to 16 jobs is 2 cores each. Requesting 12 would
+# oversubscribe 6x and make every job slower than running alone.
+RESOURCE = ("future_sets.retrieval_pool=50000 train.max_train_anchors=100000 "
+            "train.max_val_anchors=10000 train.num_workers=2")
+
+ARMS = {"flatkwm": f"arm=flatkwm {H16} {RESOURCE}",
+        "randomtreewm": f"arm=randomtreewm {H16} {RESOURCE}"}
 
 
 def wave1_jobs(seeds: list[int], steps: int) -> list[Job]:
