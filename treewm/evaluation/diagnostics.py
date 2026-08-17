@@ -249,3 +249,41 @@ def geometry_sanity(model, batch, maze_spec, normalizer, keep_threshold: float =
     ij = maze_spec.xy_to_ij(xy)
     degree = maze_spec.junction_degree()[ij[:, 0], ij[:, 1]]
     return {"control/branching_junction_degree_corr": rank_correlation(ebf, degree)}
+
+def interaction_sanity(model, batch, domain, normalizer, keep_threshold: float = 0.5) -> dict[str, float]:
+    """Non-maze counterpart of :func:`geometry_sanity`.
+
+    ``branching_diversity_correlation`` is the primary check, but it compares the model
+    against ``future_diversity`` produced by the *same* retrieval machinery that built its
+    training targets. If retrieval is broken, both go wrong together and agree -- so a
+    cross-check that does not touch that pipeline is needed. In a maze that role is played
+    by junction degree, which is ground truth from the map.
+
+    The manipulation analogue of a junction is proximity to something you can act on:
+    futures genuinely diverge when the gripper can grasp a cube (push, lift, rotate,
+    ignore), and collapse to "move somewhere" in free space. So branching should
+    anti-correlate with effector-to-nearest-object distance, giving a *positive*
+    correlation with proximity.
+
+    Like the maze version this is a weak secondary signal -- geometry only partly
+    determines future diversity -- so a small value is expected and is not on its own
+    evidence against the hypothesis. A strongly negative value would be, since it would
+    mean the model opens branches precisely where nothing can be done.
+
+    Returns ``{}`` where the observation exposes no actionable object position (puzzle
+    reports button press depth, not button location; the two mazes use geometry_sanity).
+    """
+    if not domain.effector_dims or not domain.object_dims:
+        return {}
+    z = model.encode(batch["obs"])
+    ebf = (model.branch(z).keep > keep_threshold).float().sum(-1).cpu().numpy()
+    obs = normalizer.denorm_obs(batch["obs"].float().cpu().numpy())
+
+    eff = obs[:, list(domain.effector_dims)]
+    dists = np.stack([np.linalg.norm(obs[:, list(od)] - eff, axis=1)
+                      for od in domain.object_dims], axis=1)
+    nearest = dists.min(axis=1)
+    return {
+        "control/branching_object_proximity_corr": rank_correlation(ebf, -nearest),
+        "control/effector_object_distance_mean": float(nearest.mean()),
+    }

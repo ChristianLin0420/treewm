@@ -35,6 +35,7 @@ from typing import Callable
 import numpy as np
 
 PROPRIO = 19          # manipspace proprioceptive prefix, identical across cube/scene/puzzle
+EFFECTOR = (12, 13, 14)   # effector_pos, after joint_pos(6) + joint_vel(6)
 CUBE_STRIDE = 9       # pos 3 + quat 4 + cos_yaw + sin_yaw
 BUTTON_STRIDE = 4     # state one-hot 2 + pos + vel
 XYZ_CENTER = np.array([0.425, 0.0, 0.0])
@@ -55,6 +56,13 @@ class Domain:
     subgoals: tuple[tuple[int, int], ...] = ()
     difficulty_fn: Callable | None = field(default=None, compare=False)
     max_episode_steps: int = 1000
+    # For the retrieval-independent branching cross-check (interaction_sanity): the
+    # actuator's position and the positions of things it can act on. Futures genuinely
+    # diverge near a manipulable object and collapse to "move somewhere" in free space,
+    # so this is the manipulation analogue of a maze junction. Empty where no such
+    # position exists in the observation.
+    effector_dims: tuple[int, ...] = ()
+    object_dims: tuple[tuple[int, ...], ...] = ()
 
     # ---- goal scoring -------------------------------------------------------------
     def goal_vector(self, ob: np.ndarray) -> np.ndarray:
@@ -160,13 +168,19 @@ def _build_registry() -> dict[str, Domain]:
     # ---- antsoccer: goal constrains the BALL, not the agent -------------------------
     reg["antsoccer-medium-navigate-v0"] = Domain(
         "antsoccer-medium-navigate-v0", "locomotion", (15, 16), "l2", 42, 8,
-        subgoals=((0, 2),), difficulty_fn=_maze_difficulty)
+        subgoals=((0, 2),), difficulty_fn=_maze_difficulty,
+        # The ant is the actuator, the ball is the only thing it can act on.
+        effector_dims=(0, 1), object_dims=((15, 16),))
 
     # ---- manipulation: goal constrains cube positions -------------------------------
     for name, n, obs_dim in [("cube-single-play-v0", 1, 28), ("cube-double-play-v0", 2, 37)]:
         dims, subs = _cube_dims(n)
         reg[name] = Domain(name, "manipulation", dims, "l2", obs_dim, 5,
-                           subgoals=subs, difficulty_fn=_cube_difficulty)
+                           subgoals=subs, difficulty_fn=_cube_difficulty,
+                           effector_dims=EFFECTOR,
+                           object_dims=tuple(tuple(range(PROPRIO + CUBE_STRIDE * i,
+                                                         PROPRIO + CUBE_STRIDE * i + 3))
+                                             for i in range(n)))
 
     # ---- scene: one cube + two buttons + drawer + window ----------------------------
     cube_dims, cube_subs = _cube_dims(1)
@@ -178,7 +192,11 @@ def _build_registry() -> dict[str, Domain]:
     subs = cube_subs + tuple((off + lo, off + hi) for lo, hi in btn_subs)
     subs = subs + ((len(dims) - 2, len(dims) - 1), (len(dims) - 1, len(dims)))
     reg["scene-play-v0"] = Domain("scene-play-v0", "manipulation", dims, "l2", 40, 5,
-                                  subgoals=subs, difficulty_fn=_cube_difficulty)
+                                  subgoals=subs, difficulty_fn=_cube_difficulty,
+                                  # Only the cube has a 3-D position in the observation;
+                                  # buttons/drawer/window expose press depth, not location.
+                                  effector_dims=EFFECTOR,
+                                  object_dims=(tuple(range(PROPRIO, PROPRIO + 3)),))
 
     # ---- puzzle: nine binary buttons, Hamming distance ------------------------------
     dims, subs = _button_dims(9)

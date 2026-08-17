@@ -374,6 +374,9 @@ def main(cfg: DictConfig) -> None:
                 # guarded in the visualisation block -- it leaks in more than one place.
                 if maze_spec is not None:
                     dmetrics.update(diag.geometry_sanity(model, dbatch, maze_spec, normalizer))
+                # Retrieval-independent cross-check for the non-maze families; returns {}
+                # where no actionable object position exists in the observation.
+                dmetrics.update(diag.interaction_sanity(model, dbatch, domain, normalizer))
             logger.scalars({k: all_reduce_mean(v, device) for k, v in dmetrics.items()}, step)
 
         # --------------------------------------------------------- validation
