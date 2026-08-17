@@ -380,7 +380,32 @@ def wave1_jobs(seeds: list[int], steps: int) -> list[Job]:
     return jobs
 
 
+def assert_no_other_fleet() -> None:
+    """Refuse to start if another fleet is already running.
+
+    Two fleets write the same run directories and checkpoints, so the second silently
+    corrupts the first's results while doubling GPU load. This happened once: a relaunch
+    that forgot to kill its predecessor left 14 jobs on 8 slots, half of them running
+    pre-fix code into the same TensorBoard files.
+    """
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid,cmd"], text=True)
+    except Exception:
+        return
+    me = os.getpid()
+    others = [ln.split(None, 1)[0] for ln in out.splitlines()
+              if "fleet.py" in ln and "grep" not in ln
+              and int(ln.split(None, 1)[0]) not in (me, os.getppid())]
+    if others:
+        raise SystemExit(
+            f"another fleet is already running (pid {', '.join(others)}). Stop it first:\n"
+            f"    kill -9 {' '.join(others)}\n"
+            "Two fleets share run directories and would corrupt each other's results."
+        )
+
+
 def main() -> None:
+    assert_no_other_fleet()
     p = argparse.ArgumentParser()
     p.add_argument("--wave", type=int, default=1)
     p.add_argument("--seeds", nargs="+", type=int, default=[0])
