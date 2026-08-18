@@ -405,6 +405,36 @@ def wave1b_jobs(seeds: list[int], steps: int) -> list[Job]:
     return jobs
 
 
+# ---- Wave 3: the formal run -------------------------------------------------------
+# All seven environments, both arms, 1M steps.
+#
+# Launched with the redundancy penalty annealed out by step 50k. That fix is UNTESTED --
+# the A/B that would have validated it was skipped by choice -- so if results come back
+# null it will not be possible to separate "the fix was insufficient" from "the thesis
+# fails at scale". effective_branching_factor is logged throughout precisely so the first
+# of those remains checkable after the fact.
+#
+# Anchors 300k (30% data coverage) and 100 evaluation episodes per arm, evaluated every
+# 50k so the staged curve is dense enough to locate a peak. Measured peaks on three
+# environments sat at or before 25k, so the early checkpoints matter most.
+FORMAL_RESOURCE = ("future_sets.retrieval_pool=50000 train.max_train_anchors=300000 "
+                   "train.max_val_anchors=30000 train.num_workers=2 "
+                   "eval.episodes_per_task=20 train.eval_every=50000 "
+                   "losses.decay.redundancy=50000")
+
+
+def wave3_jobs(seeds: list[int], steps: int) -> list[Job]:
+    jobs = []
+    for cfg, env_name in WAVE1_ENVS:
+        for arm in ("flatkwm", "randomtreewm"):
+            for s in seeds:
+                jobs.append(Job(job_id=f"{cfg}|{arm}|s{s}", env=cfg, env_name=env_name,
+                                arm=arm, seed=s, steps=steps,
+                                run_root="experiments/09-cross-family/runs/formal",
+                                overrides=" ".join(f"{H16} {FORMAL_RESOURCE}".split())))
+    return jobs
+
+
 def wave1_jobs(seeds: list[int], steps: int) -> list[Job]:
     jobs = []
     for cfg, env_name in WAVE1_ENVS:
@@ -456,7 +486,8 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    jobs = (wave1b_jobs if args.wave == 2 else wave1_jobs)(args.seeds, args.steps)
+    builder = {1: wave1_jobs, 2: wave1b_jobs, 3: wave3_jobs}[args.wave]
+    jobs = builder(args.seeds, args.steps)
     print(f"[fleet] wave {'1b' if args.wave == 2 else args.wave}: {len(jobs)} jobs "
           f"x {len(args.seeds)} seed(s), {args.steps:,} steps")
     if args.dry_run:

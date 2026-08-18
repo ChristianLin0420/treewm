@@ -127,6 +127,12 @@ losses:
     redundancy: 5000
     expand: 2000
     mass: 1000
+  # Anneal the redundancy penalty out after it has separated the branch heads. Left on,
+  # it is minimised by collapsing branches rather than diversifying them: measured
+  # effective branching factor 1.7 -> 1.06 over 200k steps on three environments, with
+  # success falling ~10x alongside it. 0 = no decay.
+  decay:
+    redundancy: 0
   future_scale: 1.0
   # Anchors per step for the controllability objective; the future-set Chamfer
   # distance is O(B^2 * M^2) and dominates the step at the full batch size.

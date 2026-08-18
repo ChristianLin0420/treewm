@@ -90,16 +90,37 @@ class LossConfig:
     warmup: dict[str, int] = field(
         default_factory=lambda: {"redundancy": 5000, "expand": 2000, "mass": 1000}
     )
+    # Step by which a term's weight has decayed linearly back to zero (0 = never).
+    #
+    # The warm-up above guards only the first 5000 steps, but the pressure never stops,
+    # and over a long run the optimiser satisfies the redundancy penalty the easy way --
+    # by killing branches rather than diversifying them. Measured on three environments
+    # at 200k steps: effective branching factor 1.7 -> 1.06 (a tree with one branch per
+    # node is a SingleWM, which scores 0.000 everywhere) with success falling ~10x in
+    # lockstep, spearman(success, keep_rate) = +0.70 on scene.
+    #
+    # So the term is annealed out once it has done its job of separating the branch
+    # heads. This is an untested fix applied directly to the formal run at the user's
+    # direction; effective_branching_factor is logged every diagnostic step so collapse
+    # remains visible if it recurs.
+    decay: dict[str, int] = field(default_factory=dict)
 
     def on(self, name: str) -> bool:
         return bool(self.enabled.get(name, True)) and getattr(self.weights, name, 0.0) != 0.0
 
     def scale(self, name: str, step: int) -> float:
-        """Ramp multiplier for ``name`` at ``step``."""
+        """Ramp multiplier for ``name`` at ``step``: warm up, then optionally anneal out."""
         warm = int(self.warmup.get(name, 0))
-        if warm <= 0:
-            return 1.0
-        return min(1.0, step / warm)
+        up = min(1.0, step / warm) if warm > 0 else 1.0
+        dec = int(self.decay.get(name, 0))
+        if dec <= 0:
+            return up
+        if step >= dec:
+            return 0.0
+        # Decay measured from the end of warm-up so the two schedules do not overlap.
+        start = warm
+        down = 1.0 - max(0.0, (step - start) / max(dec - start, 1))
+        return up * max(0.0, min(1.0, down))
 
 
 def compute_branch_losses(
