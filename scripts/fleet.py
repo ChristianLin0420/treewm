@@ -435,6 +435,34 @@ def wave3_jobs(seeds: list[int], steps: int) -> list[Job]:
     return jobs
 
 
+# ---- Wave 4: final allocation under a hard deadline --------------------------------
+# The server closes in four days, so the remaining GPU is spent on the one question still
+# open: is flat's late crossover general, or specific to cube-single?
+#
+# Locomotion is dropped. antmaze, antsoccer and humanoidmaze read 0/100 for BOTH arms at
+# 300-450k here, and AntMaze was already null at 5k, 50k and 300k in cycle 07. A fifth
+# null at 1M adds nothing, and those six jobs were occupying 6 of 8 slots.
+#
+# cube-single continues to 1M (resuming from checkpoint) because it is the environment
+# that produced the crossover: flat 0/100 at 20k rising to 30/100 by 150k, while
+# recursive peaked at 23/100 and fell to 8/100.
+#
+# scene and cube-double run to 300k -- comfortably past cube-single's ~100k crossover and
+# finishable inside the deadline, which 1M is not.
+def wave4_jobs(seeds: list[int], steps: int) -> list[Job]:
+    jobs = []
+    for cfg, env_name, n_steps in [("cube_single_play", "cube-single-play-v0", 1_000_000),
+                                   ("scene_play", "scene-play-v0", 300_000),
+                                   ("cube_double_play", "cube-double-play-v0", 300_000)]:
+        for arm in ("flatkwm", "randomtreewm"):
+            for s in seeds:
+                jobs.append(Job(job_id=f"{cfg}|{arm}|s{s}", env=cfg, env_name=env_name,
+                                arm=arm, seed=s, steps=n_steps,
+                                run_root="experiments/09-cross-family/runs/formal",
+                                overrides=" ".join(f"{H16} {FORMAL_RESOURCE}".split())))
+    return jobs
+
+
 def wave1_jobs(seeds: list[int], steps: int) -> list[Job]:
     jobs = []
     for cfg, env_name in WAVE1_ENVS:
@@ -486,7 +514,7 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    builder = {1: wave1_jobs, 2: wave1b_jobs, 3: wave3_jobs}[args.wave]
+    builder = {1: wave1_jobs, 2: wave1b_jobs, 3: wave3_jobs, 4: wave4_jobs}[args.wave]
     jobs = builder(args.seeds, args.steps)
     print(f"[fleet] wave {'1b' if args.wave == 2 else args.wave}: {len(jobs)} jobs "
           f"x {len(args.seeds)} seed(s), {args.steps:,} steps")
