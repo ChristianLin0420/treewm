@@ -206,6 +206,7 @@ def test_slurm_wrapper_uses_absolute_cm_client_and_only_maps_work():
     text = path.read_text(encoding="utf-8")
     assert 'SLURM_SRUN="/cm/shared/apps/slurm/current/bin/srun"' in text
     assert "#SBATCH --array=0-39%40" in text
+    assert text.splitlines().count("#SBATCH --mem=64G") == 1
     assert '--work-index "$SLURM_ARRAY_TASK_ID"' in text
     assert "scripts/rescore_checkpoint.py" in text
     assert 'SOURCE_ROOT="${TREEWM_SOURCE_ROOT' in text

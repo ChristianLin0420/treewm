@@ -31,6 +31,7 @@ REQUIRED_SLURM_LINES = (
     "#SBATCH --requeue",
     "#SBATCH --signal=B:USR1@420",
     "#SBATCH --gpus-per-node=1",
+    "#SBATCH --mem=64G",
     "#SBATCH --array=0-31%32",
 )
 REQUIRED_SNIPPETS = (

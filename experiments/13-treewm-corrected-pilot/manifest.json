@@ -173,6 +173,7 @@
     "mapping": "global_index=((setting_index*4)+arm_index)*2+seed_index",
     "gpus_per_task": 1,
     "cpus_per_task": 12,
+    "memory_per_task": "64G",
     "walltime": "04:00:00",
     "signal_seconds_before_end": 420,
     "sbatch": "/usr/local/bin/sbatch",
@@ -184,7 +185,7 @@
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-v2-corrected-factorial-pilot-v1"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-v2-corrected-factorial-pilot-v1-launch2"
   },
   "logging": {
     "wandb_project": "treewm-v2-corrected-pilot",

@@ -107,6 +107,7 @@ def test_slurm_wrapper_separates_immutable_source_from_live_artifacts():
         / "experiments/12-treewm-formal-v2/checkpoint_ablation.slurm"
     )
     text = path.read_text(encoding="utf-8")
+    assert text.splitlines().count("#SBATCH --mem=64G") == 1
     assert 'SOURCE_ROOT="${TREEWM_SOURCE_ROOT' in text
     assert 'PROJECT_ROOT="${TREEWM_PROJECT_ROOT' in text
     assert 'cd "$SOURCE_ROOT"' in text

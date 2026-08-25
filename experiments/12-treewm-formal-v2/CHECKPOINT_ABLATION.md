@@ -16,7 +16,8 @@ The four preregistered settings cover the observed failure families:
 
 The compact grid has nine arms and is paired on checkpoint, task ID, episode index,
 environment seed, and 64-node budget. The Slurm wrapper therefore launches 36
-independent work items by default:
+independent work items by default. Each item requests one GPU and 64 GiB of memory so
+multiple diagnostics can share a multi-GPU node:
 
 ```bash
 sbatch experiments/12-treewm-formal-v2/checkpoint_ablation.slurm

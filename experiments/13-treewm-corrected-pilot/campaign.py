@@ -210,6 +210,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     execution = manifest.get("execution") or {}
     require(execution.get("array") == "0-31%32", "Slurm array drifted")
     require(execution.get("gpus_per_task") == 1, "pilot must use one GPU per task")
+    require(execution.get("memory_per_task") == "64G", "pilot memory per task drifted")
     require(execution.get("walltime") == "04:00:00", "walltime drifted")
     require(execution.get("sbatch") == "/usr/local/bin/sbatch", "sbatch is not pinned")
     require(execution.get("srun") == "/cm/shared/apps/slurm/current/bin/srun", "srun is not pinned")

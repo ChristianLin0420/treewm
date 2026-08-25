@@ -13,6 +13,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --array=0-35%36
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --open-mode=append

@@ -10,6 +10,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=12
+#SBATCH --mem=64G
 #SBATCH --array=0-31%32
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --open-mode=append
@@ -35,7 +36,7 @@ if [[ ! -x "$PYTHON_EXECUTABLE" || ! -x "$SRUN" || ! -x "$SCONTROL" ]]; then
 fi
 
 REQUEUE_TARGET="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
-RUN_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-v2-corrected-factorial-pilot-v1
+RUN_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-v2-corrected-factorial-pilot-v1-launch2
 TASK_STATE="$RUN_ROOT/state/arrays/array-job-$REQUEUE_TARGET/task-$(printf '%02d' "$SLURM_ARRAY_TASK_ID")"
 GENERATION_DIR="$TASK_STATE/requeue/${SLURM_RESTART_COUNT:-0}"
 CANCEL_LATCH="$TASK_STATE/CANCEL_REQUESTED"

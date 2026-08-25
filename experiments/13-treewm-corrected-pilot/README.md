@@ -61,11 +61,17 @@ Only an explicit `--submit` calls `sbatch`:
 $PY experiments/13-treewm-corrected-pilot/submit.py --submit
 ```
 
-The Slurm array is `0-31%32`, four hours maximum, one GPU/task. USR1 is forwarded to
-the trainer; exit 75 is requeued only after `latest.pt` is loaded and its optimizer,
-scheduler, RNG streams, config, and provenance are verified. The script uses absolute
-`/cm/shared/apps/slurm/current/bin/srun` and `scontrol` paths and requeues only the exact
-`${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}` element.
+The Slurm array is `0-31%32`, four hours maximum, one GPU/task, and exactly `64G` of
+memory/task. The explicit memory request prevents Slurm's site default from assigning
+an entire node's memory to every one-GPU element, so independent elements can share a
+node. USR1 is forwarded to the trainer; exit 75 is requeued only after `latest.pt` is
+loaded and its optimizer, scheduler, RNG streams, config, and provenance are verified.
+The script uses absolute `/cm/shared/apps/slurm/current/bin/srun` and `scontrol` paths
+and requeues only the exact `${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}` element.
+
+This launch uses the isolated run root
+`outputs/treewm-v2-corrected-factorial-pilot-v1-launch2`; the first launch root and its
+cancelled-before-start submission receipt remain immutable audit records.
 
 Cancellation has permanent precedence over requeue. To stop a live element safely,
 create its persistent latch before signalling it:

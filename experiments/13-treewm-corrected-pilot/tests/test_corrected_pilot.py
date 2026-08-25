@@ -112,6 +112,10 @@ def test_current_trainer_and_recipe_producer_identities_are_separate(manifest):
 
 def test_protocol_and_slurm_lifecycle_are_locked(manifest):
     assert campaign.verify_protocol_lock(CAMPAIGN_DIR) == (CAMPAIGN_DIR / "protocol.sha256").read_text().strip()
+    assert manifest["execution"]["memory_per_task"] == "64G"
+    assert manifest["paths"]["run_root"].endswith(
+        "/outputs/treewm-v2-corrected-factorial-pilot-v1-launch2"
+    )
     submit.validate_slurm(CAMPAIGN_DIR / "pilot.slurm")
     text = (CAMPAIGN_DIR / "pilot.slurm").read_text()
     assert "/cm/shared/apps/slurm/current/bin/srun" in text
@@ -121,6 +125,8 @@ def test_protocol_and_slurm_lifecycle_are_locked(manifest):
     assert "while true; do" in text and 'kill -0 "$step_pid"' in text
     assert "#SBATCH --array=0-31%32" in text
     assert "#SBATCH --gpus-per-node=1" in text
+    assert text.splitlines().count("#SBATCH --mem=64G") == 1
+    assert text.splitlines().count(f'RUN_ROOT={manifest["paths"]["run_root"]}') == 1
     assert 'f"--output={run_root}/logs/%x_%A_%a.out"' in (CAMPAIGN_DIR / "submit.py").read_text()
     submit_text = (CAMPAIGN_DIR / "submit.py").read_text()
     assert '"--parsable"' in submit_text
@@ -185,6 +191,7 @@ def test_submit_path_is_single_array_and_persists_job_receipt(
         lambda value: value["factorial"]["arms"][3].update(dropout=0.2),
         lambda value: value["compatible_v2_recipe_input"].update(read_only=False),
         lambda value: value["execution"].update(array="0-31%1"),
+        lambda value: value["execution"].update(memory_per_task="1878738M"),
     ],
 )
 def test_manifest_rejects_scientific_or_execution_drift(manifest, mutation):
