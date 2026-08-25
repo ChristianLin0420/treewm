@@ -26,7 +26,15 @@ def _reset(name):
     return env, np.asarray(ob, dtype=np.float64), info
 
 
-@pytest.mark.parametrize("name,n_cubes", [("cube-single-play-v0", 1), ("cube-double-play-v0", 2)])
+@pytest.mark.parametrize(
+    "name,n_cubes",
+    [
+        ("cube-single-play-v0", 1),
+        ("cube-double-play-v0", 2),
+        ("cube-triple-play-v0", 3),
+        ("cube-quadruple-play-v0", 4),
+    ],
+)
 def test_cube_position_dims(name, n_cubes):
     env, ob, info = _reset(name)
     d = get_domain(name)
@@ -37,10 +45,15 @@ def test_cube_position_dims(name, n_cubes):
         np.testing.assert_allclose(gv[lo:hi], expect, atol=1e-4)
 
 
-def test_puzzle_button_states():
-    env, ob, info = _reset("puzzle-3x3-play-v0")
-    d = get_domain("puzzle-3x3-play-v0")
+@pytest.mark.parametrize(
+    "name,n_buttons",
+    [("puzzle-3x3-play-v0", 9), ("puzzle-4x4-play-v0", 16)],
+)
+def test_puzzle_button_states(name, n_buttons):
+    env, ob, info = _reset(name)
+    d = get_domain(name)
     gv = d.goal_vector(ob)
+    assert len(d.subgoals) == n_buttons
     for i, (lo, hi) in enumerate(d.subgoals):
         expect = int(info[f"privileged/button_{i}_state"])
         assert int(np.argmax(gv[lo:hi])) == expect, f"button {i} one-hot misaligned"
@@ -69,16 +82,37 @@ def test_scene_button_and_cube_dims():
         assert int(np.argmax(gv[lo:lo + 2])) == int(info[f"privileged/button_{i}_state"])
 
 
-@pytest.mark.parametrize("name", ["antmaze-large-navigate-v0", "humanoidmaze-medium-navigate-v0"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "antmaze-large-navigate-v0",
+        "antmaze-giant-navigate-v0",
+        "humanoidmaze-medium-navigate-v0",
+        "humanoidmaze-large-navigate-v0",
+    ],
+)
 def test_locomotion_xy(name):
     env, ob, info = _reset(name)
     d = get_domain(name)
     np.testing.assert_allclose(d.goal_vector(ob), np.asarray(ob)[:2], atol=1e-6)
 
 
-@pytest.mark.parametrize("name", ["antmaze-large-navigate-v0", "cube-double-play-v0",
-                                  "scene-play-v0", "puzzle-3x3-play-v0",
-                                  "antsoccer-medium-navigate-v0"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "antmaze-large-navigate-v0",
+        "antmaze-giant-navigate-v0",
+        "humanoidmaze-medium-navigate-v0",
+        "humanoidmaze-large-navigate-v0",
+        "cube-double-play-v0",
+        "cube-triple-play-v0",
+        "cube-quadruple-play-v0",
+        "scene-play-v0",
+        "puzzle-3x3-play-v0",
+        "puzzle-4x4-play-v0",
+        "antsoccer-medium-navigate-v0",
+    ],
+)
 def test_goal_is_same_shape_as_obs(name):
     """Planner scoring relies on info['goal'] being a full goal observation."""
     env, ob, info = _reset(name)

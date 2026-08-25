@@ -27,6 +27,38 @@ from typing import Any
 import numpy as np
 
 
+def bounded_uniform_indices(population: int, size: int, seed: int = 0) -> np.ndarray:
+    """Uniform sample without replacement using memory proportional to ``size``.
+
+    NumPy is free to allocate work proportional to ``population`` for
+    ``choice(population, replace=False)``.  That is unacceptable when the retrieval
+    source contains 100M transitions and the desired fixed pool contains only 50k.
+    Rejection sampling is symmetric and has negligible collision overhead at that
+    sampling ratio.
+    """
+    population = int(population)
+    size = int(size)
+    if not 0 <= size <= population:
+        raise ValueError(f"cannot sample {size} indices from population {population}")
+    if size == 0:
+        return np.empty(0, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    if population <= 10_000_000:
+        return np.sort(rng.choice(population, size=size, replace=False)).astype(
+            np.int64, copy=False
+        )
+    selected = np.empty(0, dtype=np.int64)
+    while len(selected) < size:
+        needed = size - len(selected)
+        draws = rng.integers(
+            0, population, size=max(needed * 2, 1024), dtype=np.int64
+        )
+        selected = np.unique(np.concatenate((selected, draws)))
+    if len(selected) > size:
+        selected = rng.choice(selected, size=size, replace=False)
+    return np.sort(selected).astype(np.int64, copy=False)
+
+
 @dataclass
 class FutureSetConfig:
     """All retrieval/clustering knobs. Every one is exposed in ``configs/base.yaml``."""
@@ -36,6 +68,12 @@ class FutureSetConfig:
     time_exclusion: int = 50
     retrieval_radius: float = 1.0
     include_self: bool = True
+    # ``rms_v2`` makes every Euclidean threshold independent of the number of
+    # coordinates used by dividing distances by sqrt(dimension).  ``legacy_l2`` is
+    # retained only so old experiment snapshots can still be inspected explicitly.
+    # Legacy remains the library default so historical configs do not silently change
+    # units. Formal v2 must pin ``rms_v2`` explicitly in its immutable protocol.
+    metric_mode: str = "legacy_l2"  # rms_v2 | legacy_l2
 
     horizons: tuple[int, ...] = (4, 8, 16, 32, 64)
     h_max: int = 64
@@ -63,6 +101,15 @@ class FutureSetConfig:
         assert self.h_max >= max(self.horizons), "h_max must cover the largest candidate horizon"
         assert self.horizon_rule in {"displacement", "fixed", "random"}
         assert self.max_modes >= 1
+        assert self.num_neighbors >= 1
+        assert self.query_multiplier >= 1
+        assert self.metric_mode in {"rms_v2", "legacy_l2"}
+        if not np.isfinite(self.retrieval_radius) or self.retrieval_radius < 0:
+            raise ValueError("retrieval_radius must be finite and non-negative")
+        if not np.isfinite(self.displacement_threshold) or self.displacement_threshold < 0:
+            raise ValueError("displacement_threshold must be finite and non-negative")
+        if not np.isfinite(self.cluster_threshold) or self.cluster_threshold <= 0:
+            raise ValueError("cluster_threshold must be finite and positive")
 
     @property
     def num_horizons(self) -> int:
@@ -79,6 +126,7 @@ class FutureSetBuilder:
         index: Any,
         cfg: FutureSetConfig,
         xy_dims: tuple[int, ...] = (0, 1),
+        task_metric_dims: tuple[int, ...] | None = None,
     ) -> None:
         self.obs_norm = obs_norm
         self.act_norm = act_norm
@@ -87,9 +135,38 @@ class FutureSetBuilder:
         self.xy_dims = np.asarray(xy_dims, dtype=np.int64)
         self.obs_dim = obs_norm.shape[1]
         self.act_dim = act_norm.shape[1]
+        metric_dims = xy_dims if task_metric_dims is None else task_metric_dims
+        self.task_metric_dims = np.asarray(metric_dims, dtype=np.int64)
+        if self.task_metric_dims.ndim != 1 or len(self.task_metric_dims) == 0:
+            raise ValueError("task_metric_dims must contain at least one observation coordinate")
+        if len(np.unique(self.task_metric_dims)) != len(self.task_metric_dims):
+            raise ValueError("task_metric_dims must not contain duplicate coordinates")
+        if self.task_metric_dims.min() < 0 or self.task_metric_dims.max() >= self.obs_dim:
+            raise ValueError(
+                f"task_metric_dims {tuple(metric_dims)} are outside observation width {self.obs_dim}"
+            )
+        if self.xy_dims.ndim != 1 or (
+            len(self.xy_dims) and (self.xy_dims.min() < 0 or self.xy_dims.max() >= self.obs_dim)
+        ):
+            raise ValueError(f"xy_dims {tuple(xy_dims)} are outside observation width {self.obs_dim}")
         self.horizons = np.asarray(cfg.horizons, dtype=np.int64)
         self._remaining = index.steps_remaining
         self._tree = None  # built lazily: one per worker process
+
+    def _distance_scale(self, dimension: int) -> float:
+        """Denominator that converts L2 into the configured metric units."""
+        if self.cfg.metric_mode == "rms_v2":
+            return float(np.sqrt(dimension))
+        return 1.0
+
+    def _metric_coordinates(self, observations: np.ndarray) -> np.ndarray:
+        """Standardized task coordinates used for horizons, modes and diversity."""
+        return observations[..., self.task_metric_dims]
+
+    def _metric_distance(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        """L2/RMS-L2 over task coordinates, preserving all leading dimensions."""
+        delta = np.asarray(left) - np.asarray(right)
+        return np.linalg.norm(delta, axis=-1) / self._distance_scale(delta.shape[-1])
 
     # ------------------------------------------------------------------- lookup
 
@@ -98,13 +175,20 @@ class FutureSetBuilder:
         if self._tree is None:
             from scipy.spatial import cKDTree
 
-            # Retrieval uses normalised *raw* state, which is stable from step 0
-            # (spec section 11 recommends this over a moving learned latent).
+            # Retrieval uses the full standardized raw state, which is stable from
+            # step 0 (spec section 11 recommends this over a moving learned latent).
+            # Dividing returned distances by sqrt(D) below gives RMS-L2 without
+            # materializing a scaled copy of a potentially multi-million-row corpus;
+            # uniform scalar scaling does not change nearest-neighbour ordering.
             pool = int(self.cfg.retrieval_pool)
             if pool and pool < len(self.obs_norm):
-                rng = np.random.default_rng(0)  # fixed: the pool must not vary by worker
-                self._pool_idx = np.sort(rng.choice(len(self.obs_norm), size=pool, replace=False))
-                self._tree = cKDTree(self.obs_norm[self._pool_idx])
+                # Fixed and bounded-memory: the pool must not vary by worker, and a
+                # 50k selection must not allocate an O(100M) permutation per process.
+                self._pool_idx = bounded_uniform_indices(len(self.obs_norm), pool, seed=0)
+                # Index the memmap before constructing the tree. A 50k pool must never
+                # materialize or permute the full 100M-row source in every worker.
+                retrieval_obs = np.asarray(self.obs_norm[self._pool_idx])
+                self._tree = cKDTree(retrieval_obs)
             else:
                 self._pool_idx = None
                 self._tree = cKDTree(self.obs_norm)
@@ -115,7 +199,7 @@ class FutureSetBuilder:
         k = min(cfg.num_neighbors * cfg.query_multiplier + 1, len(self.obs_norm))
         dists, idxs = self.tree.query(self.obs_norm[t], k=k)
         idxs = np.atleast_1d(idxs)
-        dists = np.atleast_1d(dists)
+        dists = np.atleast_1d(dists) / self._distance_scale(self.obs_dim)
         if getattr(self, "_pool_idx", None) is not None:
             idxs = self._pool_idx[idxs]  # map pool positions back to dataset indices
 
@@ -131,11 +215,24 @@ class FutureSetBuilder:
         too_close = np.abs(idxs.astype(np.int64) - t) < cfg.time_exclusion
         keep &= ~(same_traj & too_close)
 
-        selected = idxs[keep][: cfg.num_neighbors - (1 if cfg.include_self else 0)]
+        # Deliberately return every eligible result in the queried pool. ``build`` caps
+        # the materialized tensor only after recording the raw candidate count.
+        selected = idxs[keep]
+        selected_distances = dists[keep].astype(np.float32, copy=False)
         if cfg.include_self:
             # The anchor's own continuation is a genuine supported future and anchors
             # the set; it is always slot 0.
             selected = np.concatenate([[t], selected])
+            selected_distances = np.concatenate(
+                [np.zeros(1, dtype=np.float32), selected_distances]
+            )
+        # A saturated query means there may be additional in-radius candidates beyond
+        # query_multiplier's bounded search. This is reported separately rather than
+        # being silently presented as an exact exhaustive count.
+        self._last_retrieval_distances = selected_distances
+        self._last_retrieval_query_saturated = bool(
+            k < len(self.obs_norm) and len(dists) == k and float(dists[-1]) <= cfg.retrieval_radius
+        )
         return selected.astype(np.int64)
 
     # ------------------------------------------------------------------ horizon
@@ -156,28 +253,45 @@ class FutureSetBuilder:
         # "displacement": the duration of a transition mode is how long it takes the
         # state to actually move somewhere, which makes the horizon head predict
         # something meaningful instead of a constant.
-        base = self.obs_norm[c]
+        base = self._metric_coordinates(self.obs_norm[c])
         for h in feasible:
-            disp = np.linalg.norm(self.obs_norm[c + int(h)] - base)
+            endpoint = self._metric_coordinates(self.obs_norm[c + int(h)])
+            disp = float(self._metric_distance(endpoint, base))
             if disp > cfg.displacement_threshold:
                 return int(h)
         return int(feasible.max())
 
     # ---------------------------------------------------------------- clustering
 
-    def _cluster(self, endpoints: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _cluster(
+        self,
+        endpoints: np.ndarray,
+        rng: np.random.Generator,
+        *,
+        return_raw_count: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         """Cluster endpoints into modes.
 
         Returns ``(labels [M], rep_idx [C], mass [C])`` with labels in ``[0, C)``.
         """
         m = len(endpoints)
+        if m == 0:
+            empty_i = np.empty(0, dtype=np.int64)
+            empty_f = np.empty(0, dtype=np.float32)
+            result = (empty_i, empty_i.copy(), empty_f)
+            return (*result, 0) if return_raw_count else result
         if m == 1:
-            return np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64), np.ones(1, dtype=np.float32)
+            result = (
+                np.zeros(1, dtype=np.int64),
+                np.zeros(1, dtype=np.int64),
+                np.ones(1, dtype=np.float32),
+            )
+            return (*result, 1) if return_raw_count else result
 
         from scipy.cluster.hierarchy import fcluster, linkage
         from scipy.spatial.distance import pdist
 
-        d = pdist(endpoints)
+        d = pdist(endpoints) / self._distance_scale(endpoints.shape[-1])
         if not np.isfinite(d).all() or d.size == 0:
             labels = np.zeros(m, dtype=np.int64)
         else:
@@ -185,12 +299,15 @@ class FutureSetBuilder:
             labels = fcluster(z, t=self.cfg.cluster_threshold, criterion="distance").astype(np.int64) - 1
 
         num = int(labels.max()) + 1
+        raw_num = num
         reps = np.zeros(num, dtype=np.int64)
         mass = np.zeros(num, dtype=np.float32)
         for c in range(num):
             members = np.flatnonzero(labels == c)
             centroid = endpoints[members].mean(0)
-            reps[c] = members[np.argmin(np.linalg.norm(endpoints[members] - centroid, axis=1))]
+            reps[c] = members[
+                np.argmin(self._metric_distance(endpoints[members], centroid))
+            ]
             mass[c] = len(members) / m
 
         if num > self.cfg.max_modes:
@@ -202,20 +319,32 @@ class FutureSetBuilder:
             labels = remap[labels]
             reps, mass = reps[chosen], mass[chosen]
             mass = mass / max(mass.sum(), 1e-8)
-        return labels, reps, mass
+        result = (labels, reps, mass)
+        return (*result, raw_num) if return_raw_count else result
 
     # ---------------------------------------------------------------------- api
 
     def build(self, t: int) -> dict[str, np.ndarray]:
         cfg = self.cfg
         rng = np.random.default_rng(t)  # deterministic per anchor -> reproducible eval
-        neighbors = self._neighbors(t)
+        # `_neighbors` intentionally returns its uncapped eligible set so truncation is
+        # visible. Keep calling the public-ish method here because several dataset tests
+        # and adapters replace it with a deterministic retrieval fixture.
+        self._last_retrieval_distances = np.empty(0, dtype=np.float32)
+        self._last_retrieval_query_saturated = False
+        neighbors_raw = np.asarray(self._neighbors(t), dtype=np.int64)
+        retrieval_num_candidates = len(neighbors_raw)
+        neighbors = neighbors_raw[: cfg.num_neighbors]
         m_used = len(neighbors)
+        distances = np.asarray(self._last_retrieval_distances, dtype=np.float32)[:m_used]
 
         m = cfg.num_neighbors
         fut_actions = np.zeros((m, cfg.h_max, self.act_dim), dtype=np.float32)
         fut_mask = np.zeros((m, cfg.h_max), dtype=np.float32)
         fut_endpoint = np.zeros((m, self.obs_dim), dtype=np.float32)
+        fut_metric_endpoint = np.zeros(
+            (m, len(self.task_metric_dims)), dtype=np.float32
+        )
         fut_h_idx = np.zeros(m, dtype=np.int64)
         fut_h_len = np.zeros(m, dtype=np.float32)
         fut_valid = np.zeros(m, dtype=np.float32)
@@ -236,13 +365,16 @@ class FutureSetBuilder:
             else:
                 ep = end.copy()
             fut_endpoint[slot] = ep
+            fut_metric_endpoint[slot] = self._metric_coordinates(ep)
             fut_actions[slot, :h] = self.act_norm[c : c + h]
             fut_mask[slot, :h] = 1.0
             fut_h_idx[slot] = h_lookup[h]
             fut_h_len[slot] = float(h)
             fut_valid[slot] = 1.0
 
-        labels_used, reps_used, mass_used = self._cluster(fut_endpoint[:m_used], rng)
+        labels_used, reps_used, mass_used, num_modes_raw = self._cluster(
+            fut_metric_endpoint[:m_used], rng, return_raw_count=True
+        )
 
         cluster = -np.ones(m, dtype=np.int64)
         cluster[:m_used] = labels_used
@@ -259,11 +391,27 @@ class FutureSetBuilder:
         mode_mass[:num_modes] = mass_used[:num_modes]
         mode_valid[:num_modes] = 1.0
 
-        valid_eps = fut_endpoint[fut_valid > 0]
-        if len(valid_eps) > 1:
-            spread = float(np.linalg.norm(valid_eps[:, None] - valid_eps[None], axis=-1).mean())
+        # Diversity describes the raw retrieved support before max_modes truncation.
+        # The task-coordinate RMS metric is the same one used by clustering/horizons.
+        raw_metric_eps = fut_metric_endpoint[:m_used]
+        if len(raw_metric_eps) > 1:
+            spread = float(
+                self._metric_distance(
+                    raw_metric_eps[:, None, :], raw_metric_eps[None, :, :]
+                ).mean()
+            )
         else:
             spread = 0.0
+
+        nonself_distances = distances[distances > 0]
+        retrieval_mean_distance = (
+            float(nonself_distances.mean()) if len(nonself_distances) else 0.0
+        )
+        query_saturated = bool(self._last_retrieval_query_saturated)
+        retrieval_truncated = retrieval_num_candidates > m_used or query_saturated
+        retrieval_fallback = int(
+            sum(int(idx) != int(t) for idx in neighbors) == 0
+        )
 
         # ---- multi-step chain along the anchor's own trajectory (Track A) ----
         d_max = cfg.multi_step_depth
@@ -288,6 +436,9 @@ class FutureSetBuilder:
 
         return {
             "anchor_index": np.int64(t),
+            # Repeated per item so a collated batch is self-describing to loss and
+            # diagnostic code; every item in one dataset has the same index vector.
+            "task_metric_dims": self.task_metric_dims.astype(np.int64, copy=True),
             "ms_actions": ms_actions,
             "ms_action_mask": ms_mask,
             "ms_obs": ms_obs,
@@ -297,6 +448,7 @@ class FutureSetBuilder:
             "fut_actions": fut_actions,
             "fut_action_mask": fut_mask,
             "fut_endpoint": fut_endpoint,
+            "fut_metric_endpoint": fut_metric_endpoint,
             "fut_horizon_idx": fut_h_idx,
             "fut_horizon_len": fut_h_len,
             "fut_valid": fut_valid,
@@ -309,6 +461,18 @@ class FutureSetBuilder:
             # `control/branching_future_diversity_corr` correlates against.
             "future_diversity": np.float32(spread),
             "num_retrieved": np.int64(m_used),
+            # V2 retrieval/mode telemetry. Counts are recorded both before and after
+            # materialization/mode caps; query saturation says when the raw candidate
+            # count is only a lower bound because query_multiplier bounded the search.
+            "retrieval_num_candidates": np.int64(retrieval_num_candidates),
+            "retrieval_num_valid": np.int64(m_used),
+            "retrieval_mean_distance": np.float32(retrieval_mean_distance),
+            "retrieval_fallback": np.float32(retrieval_fallback),
+            "retrieval_truncated": np.float32(retrieval_truncated),
+            "retrieval_query_saturated": np.float32(query_saturated),
+            "modes_raw": np.int64(num_modes_raw),
+            "modes_retained": np.int64(num_modes),
+            "modes_truncated": np.int64(max(num_modes_raw - num_modes, 0)),
         }
 
 
@@ -328,7 +492,7 @@ def gather_mode_targets(batch: dict[str, Any]) -> dict[str, Any]:
         idx = rep.view(b, c, *([1] * (x.dim() - 2))).expand(b, c, *x.shape[2:])
         return torch.gather(x, 1, idx)
 
-    return {
+    out = {
         "actions": _gather(batch["fut_actions"]),
         "action_mask": _gather(batch["fut_action_mask"]),
         "endpoint": _gather(batch["fut_endpoint"]),
@@ -337,3 +501,6 @@ def gather_mode_targets(batch: dict[str, Any]) -> dict[str, Any]:
         "mass": batch["mode_mass"],
         "valid": batch["mode_valid"],
     }
+    if "fut_metric_endpoint" in batch:
+        out["metric_endpoint"] = _gather(batch["fut_metric_endpoint"])
+    return out

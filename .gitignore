@@ -152,6 +152,8 @@ activemq-data/
 .envrc
 .venv
 env/
+!configs/env/
+!configs/env/*.yaml
 venv/
 ENV/
 env.bak/
@@ -219,6 +221,7 @@ __marimo__/
 # TreeWM
 outputs/
 multirun/
+/logs/
 *.pt
 *.log
 

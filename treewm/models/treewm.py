@@ -152,6 +152,10 @@ class TreeWM(nn.Module):
     def q_cdist(self, qa: torch.Tensor, qb: torch.Tensor) -> torch.Tensor:
         return self.controllability.cdist(qa, qb)
 
+    def set_gradient_checkpointing(self, enabled: bool = True) -> None:
+        """Enable activation rematerialisation for the transformer trunk."""
+        self.branch_transformer.set_gradient_checkpointing(enabled)
+
     # -------------------------------------------------------------------- branch
 
     def branch(self, z: torch.Tensor, depth: torch.Tensor | None = None) -> BranchOutputs:

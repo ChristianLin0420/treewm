@@ -9,6 +9,7 @@ defaults:
 seed: 0
 arm: treewm            # singlewm | flatkwm | fixedtreewm | randomtreewm |
                        # uncertaintytreewm | heuristictreewm | treewm
+objective_version: treewm_v1
 device: cuda
 run_root: runs
 run_name: null         # defaults to <date>_seed<seed>
@@ -21,13 +22,21 @@ budgets: null
 # ------------------------------------------------------------------- training
 train:
   steps: 50000
+  # Optional fixed cosine horizon. Null preserves historical behaviour (use `steps`).
+  # Short formal-v2 pilots pin this to 1M so their first 5k updates are an exact
+  # optimizer/scheduler prefix of the million-update campaign.
+  scheduler_total_steps: null
   batch_size: 256
   lr: 3.0e-4
   weight_decay: 1.0e-4
   warmup_steps: 1000
   min_lr_scale: 0.1
   grad_clip: 1.0
+  separate_gain_grad_clip: false
+  world_grad_clip: 1.0
+  gain_grad_clip: 1.0
   grad_accum: 1
+  gradient_checkpointing: true  # required activation rematerialisation for formal runs
   bf16: true                 # A100 default (spec section 24)
   num_workers: 12
   max_train_anchors: 200000
@@ -59,6 +68,7 @@ tree:
   branch_factor: 4
   context_pooling: mean      # none | mean | max  (ablation axis)
   scorer: null               # null -> use the arm's default scorer
+  keep_threshold: null       # v2 pins a calibrated KEEP admission threshold
 
 # ------------------------------------------------------- future sets / modes
 future_sets:
@@ -67,6 +77,7 @@ future_sets:
   time_exclusion: 50
   retrieval_radius: 1.0
   include_self: true
+  metric_mode: legacy_l2     # legacy_l2 | rms_v2
   horizons: [4, 8, 16, 32, 64]
   h_max: 64
   # Memory-map the preprocessed arrays from a shared on-disk cache instead of each job
@@ -104,6 +115,8 @@ matching:
   lambda_action: 0.5
   lambda_horizon: 0.1
   method: hungarian          # hungarian | greedy
+  normalization_version: legacy  # legacy | rms_v2
+  num_horizons: 5
 
 # --------------------------------------------------------------------- losses
 losses:
@@ -134,6 +147,21 @@ losses:
   decay:
     redundancy: 0
   future_scale: 1.0
+  # V2 objective switches. Historical defaults remain explicit so old runs never
+  # acquire new semantics merely by importing a newer library.
+  control_target_transform: linear  # linear | rms_tanh
+  control_endpoint_key: fut_endpoint
+  control_allow_endpoint_fallback: true
+  control_require_single_scale: false
+  control_metric_weight: 1.0
+  control_rank_weight: 0.0
+  control_rank_temperature: 0.1
+  detach_world_targets: false
+  bind_negative_margin: 0.0
+  gain_set_context: false
+  gain_rank_weight: 0.0
+  gain_calibration_weight: 1.0
+  gain_branch_prior_weight: 0.0
   # Anchors per step for the controllability objective; the future-set Chamfer
   # distance is O(B^2 * M^2) and dominates the step at the full batch size.
   control_batch: 64
@@ -188,6 +216,7 @@ planner:
 eval:
   budgets: [16, 32, 64, 128, 256]
   episodes_per_task: 5
+  final_episodes_per_task: 50
   # "hard" is the primary split: geodesically distant start/goal pairs.
   # "standard" is the environment's own five tasks.
   task_split: hard

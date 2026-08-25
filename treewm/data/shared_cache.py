@@ -34,7 +34,7 @@ from typing import Any
 
 import numpy as np
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 DEFAULT_ROOT = Path(os.environ.get("TREEWM_CACHE", Path.home() / ".cache" / "treewm"))
 LOCK_STALE_S = 3600.0
 
@@ -119,6 +119,9 @@ class SharedCache:
     val: SharedSplit
     norm_stats: dict[str, np.ndarray]
     was_hit: bool
+    source_manifest_sha256: str = ""
+    source_files: list[dict[str, Any]] | None = None
+    dataset_kind: str = "standard"
 
     def assert_consumed_by(self, train_ds, val_ds) -> dict[str, float]:
         """Prove the datasets really hold the mapped arrays, then report it as metrics."""
@@ -152,6 +155,60 @@ def _load_split(dst: Path, name: str) -> SharedSplit:
                        obs_norm=m("obs_norm"), act_norm=m("act_norm"), path=dst)
 
 
+def _canonical_hash(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def standard_source_inventory(
+    dataset_name: str,
+    dataset_dir: str | Path,
+    *,
+    include_digests: bool,
+) -> list[dict[str, Any]]:
+    """Describe the exact standard train/validation pair in stable order."""
+    root = Path(dataset_dir).expanduser().resolve()
+    paths = (
+        ("train", root / f"{dataset_name}.npz"),
+        ("val", root / f"{dataset_name}-val.npz"),
+    )
+    out: list[dict[str, Any]] = []
+    for split, path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"missing standard OGBench {split} file: {path}")
+        stat = path.stat()
+        entry: dict[str, Any] = {
+            "split": split,
+            "path": path.name,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+        if include_digests:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                while block := handle.read(16 * 1024 * 1024):
+                    digest.update(block)
+            entry["sha256"] = digest.hexdigest()
+        out.append(entry)
+    return out
+
+
+def _cache_from_manifest(dst: Path, manifest: dict[str, Any], was_hit: bool) -> SharedCache:
+    return SharedCache(
+        key=str(manifest["key"]),
+        path=dst,
+        train=_load_split(dst, "train"),
+        val=_load_split(dst, "val"),
+        norm_stats={
+            key: np.asarray(value, dtype=np.float32)
+            for key, value in manifest["norm_stats"].items()
+        },
+        was_hit=was_hit,
+        source_manifest_sha256=str(manifest["source_manifest_sha256"]),
+        source_files=list(manifest["source_files"]),
+    )
+
+
 def build_or_load(
     dataset_name: str,
     dataset_dir: str | None = None,
@@ -162,7 +219,17 @@ def build_or_load(
     """Return memory-mapped arrays for ``dataset_name``, building them if absent."""
     from treewm.data.ogbench_dataset import Normalizer, load_ogbench
 
-    recipe = {"norm": "mean_std", "eps": eps, "dtype": "float32"}
+    if dataset_dir is None:
+        raise ValueError("shared standard cache requires an explicit dataset_dir")
+    stat_inventory = standard_source_inventory(
+        dataset_name, dataset_dir, include_digests=False
+    )
+    recipe = {
+        "norm": "mean_std",
+        "eps": eps,
+        "dtype": "float32",
+        "source_stat_sha256": _canonical_hash(stat_inventory),
+    }
     key = cache_key(dataset_name, recipe)
     root = Path(root or DEFAULT_ROOT)
     dst = root / f"{dataset_name}__{key}"
@@ -172,10 +239,8 @@ def build_or_load(
         STATS["hit"] += 1
         if verbose:
             print(f"[cache] HIT  {dataset_name} key={key} path={dst}", flush=True)
-        stats = json.loads(manifest.read_text())["norm_stats"]
-        return SharedCache(key, dst, _load_split(dst, "train"), _load_split(dst, "val"),
-                           {k: np.asarray(v, dtype=np.float32) for k, v in stats.items()},
-                           was_hit=True)
+        payload = json.loads(manifest.read_text())
+        return _cache_from_manifest(dst, payload, was_hit=True)
 
     dst.mkdir(parents=True, exist_ok=True)
     with _Lock(root / f"{dataset_name}__{key}.lock"):
@@ -184,10 +249,8 @@ def build_or_load(
             STATS["hit"] += 1
             if verbose:
                 print(f"[cache] HIT (after wait) {dataset_name} key={key}", flush=True)
-            stats = json.loads(manifest.read_text())["norm_stats"]
-            return SharedCache(key, dst, _load_split(dst, "train"), _load_split(dst, "val"),
-                               {k: np.asarray(v, dtype=np.float32) for k, v in stats.items()},
-                               was_hit=True)
+            payload = json.loads(manifest.read_text())
+            return _cache_from_manifest(dst, payload, was_hit=True)
 
         STATS["miss"] += 1
         if verbose:
@@ -208,21 +271,31 @@ def build_or_load(
 
         stats = {k: np.asarray(v).tolist() for k, v in normalizer.state_dict().items()}
         tmp = dst / ".manifest.tmp"
-        tmp.write_text(json.dumps({
+        source_files = standard_source_inventory(
+            dataset_name, dataset_dir, include_digests=True
+        )
+        final_stats = [
+            {key: value for key, value in entry.items() if key != "sha256"}
+            for entry in source_files
+        ]
+        if final_stats != stat_inventory:
+            raise RuntimeError(
+                f"standard OGBench source changed while cache was built: {dataset_name}"
+            )
+        source_manifest_sha256 = _canonical_hash(source_files)
+        payload = {
             "version": CACHE_VERSION, "dataset": dataset_name, "key": key, "recipe": recipe,
             "built_s": round(time.time() - t0, 1), "norm_stats": stats,
             "shapes": {"train_obs": list(np.shape(train["observations"])),
                        "val_obs": list(np.shape(val["observations"]))},
-        }, indent=2))
+            "source_files": source_files,
+            "source_manifest_sha256": source_manifest_sha256,
+        }
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp.replace(manifest)  # atomic: manifest presence is the "ready" flag
         if verbose:
             print(f"[cache] built {dataset_name} in {time.time() - t0:.0f}s", flush=True)
-
-    return SharedCache(key, dst, _load_split(dst, "train"), _load_split(dst, "val"),
-                       {k: np.asarray(v, dtype=np.float32) for k, v in
-                        json.loads(manifest.read_text())["norm_stats"].items()},
-                       was_hit=False)
-
+        return _cache_from_manifest(dst, payload, was_hit=False)
 
 def prebuild(datasets: list[str], dataset_dir: str | None = None,
              root: Path | None = None) -> dict[str, str]:

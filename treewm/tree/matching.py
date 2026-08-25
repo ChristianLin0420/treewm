@@ -30,6 +30,43 @@ class MatchingConfig:
     lambda_action: float = 0.5
     lambda_horizon: float = 0.1
     method: str = "hungarian"  # hungarian | greedy
+    # ``rms_v2`` puts every component in dimensionless, dimension-invariant units.
+    # ``legacy`` is retained so old checkpoints/ablations can reproduce their original
+    # assignment exactly.
+    # Historical callers remain legacy unless the v2 protocol opts in explicitly.
+    normalization_version: str = "legacy"  # rms_v2 | legacy
+    num_horizons: int = 5
+
+    def __post_init__(self) -> None:
+        if self.normalization_version not in {"rms_v2", "legacy"}:
+            raise ValueError(
+                "normalization_version must be 'rms_v2' or 'legacy', got "
+                f"{self.normalization_version!r}"
+            )
+        if self.num_horizons < 1:
+            raise ValueError("num_horizons must be at least 1")
+
+
+def _target_centered_rms(
+    target: torch.Tensor,
+    valid: torch.Tensor,
+    floor: float = 1e-3,
+) -> torch.Tensor:
+    """Detached batch-global centred RMS of the valid target vectors.
+
+    Centring makes the matching units invariant to a global latent translation, while
+    RMS normalisation makes them invariant to a global latent rescaling.  A scalar is
+    deliberately shared by the whole batch: per-mode scales would change the relative
+    assignment costs rather than merely choosing their units.
+    """
+    with torch.no_grad():
+        selected = target.detach().float()[valid.detach() > 0]
+        if selected.numel() == 0:
+            rms = target.detach().float().sum() * 0.0
+        else:
+            centered = selected - selected.mean(dim=0, keepdim=True)
+            rms = centered.square().mean().sqrt()
+        return rms.clamp_min(floor)
 
 
 def branch_mode_cost(
@@ -45,7 +82,8 @@ def branch_mode_cost(
     tgt_valid: torch.Tensor,
     cfg: MatchingConfig,
     q_cdist=None,
-) -> torch.Tensor:
+    return_components: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Full cost matrix ``[B, K, C]``.
 
     Action distance is masked to each *target's* horizon: comparing predicted actions
@@ -54,23 +92,129 @@ def branch_mode_cost(
     b, k = pred_z.shape[:2]
     c = tgt_z.shape[1]
 
-    d_z = torch.cdist(pred_z.float(), tgt_z.float())  # [B, K, C]
+    pred_z_f, tgt_z_f = pred_z.float(), tgt_z.float()
+    pred_q_f, tgt_q_f = pred_q.float(), tgt_q.float()
+    pred_action_f, tgt_action_f = pred_action.float(), tgt_action.float()
 
-    if q_cdist is not None:
-        d_q = q_cdist(pred_q.float(), tgt_q.float())
+    if cfg.normalization_version == "legacy":
+        d_z = torch.cdist(pred_z_f, tgt_z_f)  # [B, K, C]
+        latent_scale = tgt_z_f.detach().new_tensor(1.0)
+        if q_cdist is not None:
+            d_q = q_cdist(pred_q_f, tgt_q_f)
+        else:
+            d_q = torch.cdist(pred_q_f.flatten(2), tgt_q_f.flatten(2))
+
+        # Historical action cost: mean over timesteps but sum over action dimensions.
+        diff = pred_action_f.unsqueeze(2) - tgt_action_f.unsqueeze(1)
+        mask = tgt_action_mask.float().unsqueeze(1).unsqueeze(-1)
+        d_a = ((diff**2) * mask).sum((-1, -2)) / mask.sum((-1, -2)).clamp_min(1.0)
+        d_h = (
+            pred_horizon_idx.float().unsqueeze(2) - tgt_horizon_idx.float().unsqueeze(1)
+        ).abs()
     else:
-        d_q = torch.cdist(pred_q.float().flatten(2), tgt_q.float().flatten(2))
+        # RMS L2 (rather than Euclidean L2) removes latent-dimension dependence.  The
+        # detached target scale then gives globally scale/translation-invariant units.
+        latent_scale = _target_centered_rms(tgt_z_f, tgt_valid)
+        z_diff = pred_z_f.unsqueeze(2) - tgt_z_f.unsqueeze(1)
+        d_z = (z_diff.square().mean(-1) + 1e-12).sqrt() / latent_scale
 
-    # [B, K, 1, H, A] vs [B, 1, C, H, A]
-    diff = pred_action.float().unsqueeze(2) - tgt_action.float().unsqueeze(1)
-    mask = tgt_action_mask.float().unsqueeze(1).unsqueeze(-1)  # [B, 1, C, H, 1]
-    d_a = ((diff**2) * mask).sum((-1, -2)) / mask.sum((-1, -2)).clamp_min(1.0)
+        if q_cdist is not None:
+            d_q = q_cdist(pred_q_f, tgt_q_f) / 2.0
+        else:
+            d_q = torch.cdist(pred_q_f.flatten(2), tgt_q_f.flatten(2)) / 2.0
 
-    d_h = (pred_horizon_idx.float().unsqueeze(2) - tgt_horizon_idx.float().unsqueeze(1)).abs()
+        # The target mask defines the executable prefix. Divide by both valid time and
+        # action dimension, then take RMS, so padding and action width cannot alter the
+        # component's units.
+        diff = pred_action_f.unsqueeze(2) - tgt_action_f.unsqueeze(1)
+        mask = tgt_action_mask.float().unsqueeze(1).unsqueeze(-1)
+        action_dim = max(int(pred_action.shape[-1]), 1)
+        denom = mask.sum((-1, -2)).clamp_min(1.0) * action_dim
+        d_a = (((diff**2) * mask).sum((-1, -2)) / denom + 1e-12).sqrt()
 
-    cost = cfg.lambda_z * d_z + cfg.lambda_q * d_q + cfg.lambda_action * d_a + cfg.lambda_horizon * d_h
+        horizon_denom = max(int(cfg.num_horizons) - 1, 1)
+        d_h = (
+            pred_horizon_idx.float().unsqueeze(2) - tgt_horizon_idx.float().unsqueeze(1)
+        ).abs() / horizon_denom
+
+    components = {
+        "z": d_z,
+        "q": d_q,
+        "action": d_a,
+        "horizon": d_h,
+        "latent_target_centered_rms": latent_scale,
+    }
+    cost = (
+        cfg.lambda_z * d_z
+        + cfg.lambda_q * d_q
+        + cfg.lambda_action * d_a
+        + cfg.lambda_horizon * d_h
+    )
     invalid = (tgt_valid <= 0).view(b, 1, c).expand(b, k, c)
-    return cost.masked_fill(invalid, LARGE_COST)
+    cost = cost.masked_fill(invalid, LARGE_COST)
+    if not return_components:
+        return cost
+    # Returned components follow the same validity contract as the total cost.  The
+    # scalar scale is telemetry, not a pairwise component, and remains unmasked.
+    components = {
+        name: value.masked_fill(invalid, LARGE_COST) if value.ndim == 3 else value
+        for name, value in components.items()
+    }
+    return cost, components
+
+
+@torch.no_grad()
+def assigned_cost_metrics(
+    components: dict[str, torch.Tensor],
+    branch_to_mode: torch.Tensor,
+    matched: torch.Tensor,
+    cfg: MatchingConfig,
+) -> dict[str, float]:
+    """Summarise component costs on the assignment actually used for supervision.
+
+    Pairwise matrix averages are misleading because most entries were never assigned.
+    This gathers one target per matched branch, reports raw component units, weighted
+    contributions, their shares of the assigned total, and the latent unit scale.
+    """
+    idx = branch_to_mode.long().clamp_min(0).unsqueeze(-1)
+    weight = (matched.detach() > 0).float()
+    denom = weight.sum()
+
+    def assigned_mean(value: torch.Tensor) -> torch.Tensor:
+        if value.ndim != 3:
+            raise ValueError("assigned matching components must have shape [B, K, C]")
+        selected = torch.gather(value.detach().float(), 2, idx).squeeze(-1)
+        if float(denom) == 0.0:
+            return selected.sum() * 0.0
+        return (selected * weight).sum() / denom
+
+    names = ("z", "q", "action", "horizon")
+    lambdas = {
+        "z": float(cfg.lambda_z),
+        "q": float(cfg.lambda_q),
+        "action": float(cfg.lambda_action),
+        "horizon": float(cfg.lambda_horizon),
+    }
+    raw = {name: assigned_mean(components[name]) for name in names}
+    weighted = {name: raw[name] * lambdas[name] for name in names}
+    total = sum(weighted.values())
+    total_value = float(total.item())
+
+    out: dict[str, float] = {}
+    for name in names:
+        raw_value = float(raw[name].item())
+        weighted_value = float(weighted[name].item())
+        out[f"matching/assigned_{name}_cost"] = raw_value
+        out[f"matching/assigned_{name}_weighted_cost"] = weighted_value
+        out[f"matching/assigned_{name}_weighted_share"] = (
+            weighted_value / total_value if total_value > 0.0 else 0.0
+        )
+    out["matching/assigned_total_cost"] = total_value
+    scale = components.get("latent_target_centered_rms")
+    out["matching/latent_target_centered_rms"] = (
+        float(scale.detach().float().item()) if scale is not None else 1.0
+    )
+    return out
 
 
 def hungarian_match(cost: torch.Tensor, tgt_valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

@@ -188,6 +188,7 @@ class BatchedTree:
         step: int,
         child_valid: torch.Tensor | None = None,
         parent_valid: torch.Tensor | None = None,
+        keep_threshold: float | None = None,
     ) -> torch.Tensor:
         """Append children, truncating so no tree ever exceeds ``budget`` nodes.
 
@@ -200,6 +201,9 @@ class BatchedTree:
                 Needed because a tree whose frontier is smaller than the expansion batch
                 produces padded selections that must not turn into real nodes.
             parent_valid: ``[B, E]`` mask; only these parents are flagged expanded.
+            keep_threshold: optional KEEP admission threshold. A child is eligible iff
+                ``keep_score >= threshold``. If a valid expanded parent has no eligible
+                child, its highest-KEEP valid child is restored as a top-1 fallback.
 
         Returns:
             ``[B, E*K]`` bool mask of children that were actually inserted.
@@ -208,10 +212,35 @@ class BatchedTree:
         k = child["latent"].shape[2]
         flat = e * k
 
+        # Admission is decided per parent before global budget packing.  The fallback is
+        # also per parent: a confident parent may not donate its surplus children to a
+        # different parent whose entire branch set was below threshold.
+        candidate = (
+            torch.ones((b, e, k), device=parent_idx.device, dtype=torch.bool)
+            if child_valid is None
+            else (child_valid > 0)
+        )
+        if parent_valid is not None:
+            candidate = candidate & (parent_valid > 0).unsqueeze(-1)
+        if keep_threshold is not None:
+            keep_by_parent = child["keep_score"].detach().float()
+            admitted_by_keep = candidate & (keep_by_parent >= float(keep_threshold))
+            needs_fallback = candidate.any(-1) & ~admitted_by_keep.any(-1)
+            # NaN cannot win the fallback. If all candidate scores are non-finite,
+            # argmax deterministically selects the first valid candidate.
+            finite_min = torch.finfo(keep_by_parent.dtype).min
+            ranked_keep = torch.nan_to_num(
+                keep_by_parent, nan=finite_min, neginf=finite_min
+            ).masked_fill(~candidate, float("-inf"))
+            fallback_idx = ranked_keep.argmax(-1, keepdim=True)
+            fallback = torch.zeros_like(candidate)
+            fallback.scatter_(2, fallback_idx, needs_fallback.unsqueeze(-1))
+            candidate = admitted_by_keep | fallback
+        child_valid = candidate
+
         parent_flat = parent_idx.unsqueeze(-1).expand(b, e, k).reshape(b, flat)
         keep = child["keep_score"].reshape(b, flat).float()
-        if child_valid is not None:
-            keep = keep.masked_fill(child_valid.reshape(b, flat) <= 0, float("-inf"))
+        keep = keep.masked_fill(~child_valid.reshape(b, flat), float("-inf"))
 
         # Rank children by support so that, when the last batch overflows the budget,
         # the branches dropped are the ones the model considers least supported --
@@ -222,8 +251,7 @@ class BatchedTree:
 
         room = (budget - self.num_nodes).clamp_min(0)  # [B]
         admitted = inv_rank < room.unsqueeze(1)  # [B, flat]
-        if child_valid is not None:
-            admitted = admitted & (child_valid.reshape(b, flat) > 0)
+        admitted = admitted & child_valid.reshape(b, flat)
 
         # Destination slot = num_nodes + position among admitted children.
         pos = (admitted.long().cumsum(1) - 1).clamp_min(0)

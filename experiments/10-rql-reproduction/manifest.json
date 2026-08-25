@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "campaign_id": "rql-50task-1m-array-v2",
+  "description": "RQL formal protocol: 10 settings x 5 single-task goals x 4 seeds x exactly 1M updates",
+  "expected_run_count": 200,
+  "axes": {
+    "task_ids": [1, 2, 3, 4, 5],
+    "seeds": [0, 1, 2, 3]
+  },
+  "execution": {
+    "workers": 16,
+    "allocation_shards": 13,
+    "gpus_per_worker": 1,
+    "assignment": "manifest_index_equals_allocation_shard_times_workers_plus_rank"
+  },
+  "training": {
+    "offline_steps": 1000000,
+    "online_steps": 0,
+    "eval_episodes": 50,
+    "final_eval_episodes": 50,
+    "eval_interval": 100000,
+    "log_interval": 5000,
+    "save_interval": 1000000,
+    "checkpoint_interval": 50000,
+    "walltime_seconds": 13800,
+    "gradient_checkpointing": true
+  },
+  "logging": {
+    "wandb_project": "rql-reproduction",
+    "wandb_group": "rql-50task-1m-array",
+    "resume": "allow"
+  },
+  "data": {
+    "base_url": "https://rail.eecs.berkeley.edu/datasets/ogbench",
+    "standard_subdir": "standard",
+    "large_subdir": "100m"
+  },
+  "upstream": {
+    "repository": "https://github.com/aoberai/rql",
+    "commit": "229c956efb4494c2b9bb0bbddbd67b761c93f1cc"
+  },
+  "settings": [
+    {
+      "id": "scene",
+      "env_template": "scene-play-singletask-task{task_id}-v0",
+      "sparse": true,
+      "dataset": {"kind": "standard", "name": "scene-play-v0"},
+      "agent": {"alpha": 3.0, "expectile": 0.7, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "puzzle-3x3",
+      "env_template": "puzzle-3x3-play-singletask-task{task_id}-v0",
+      "sparse": true,
+      "dataset": {"kind": "standard", "name": "puzzle-3x3-play-v0"},
+      "agent": {"alpha": 1.0, "expectile": 0.7, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "puzzle-4x4-100m",
+      "env_template": "puzzle-4x4-play-singletask-task{task_id}-v0",
+      "sparse": true,
+      "dataset": {
+        "kind": "sharded_100m",
+        "name": "puzzle-4x4-play-100m-v0",
+        "file_stem": "puzzle-4x4-play-v0",
+        "directory": "puzzle-4x4-play-100m-v0",
+        "expected_train_shards": 100,
+        "expected_validation_shards": 100,
+        "replace_interval": 1000
+      },
+      "agent": {"alpha": 1.0, "expectile": 0.9, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "cube-double",
+      "env_template": "cube-double-play-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "cube-double-play-v0"},
+      "agent": {"alpha": 10.0, "expectile": 0.9, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "cube-triple",
+      "env_template": "cube-triple-play-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "cube-triple-play-v0"},
+      "agent": {"alpha": 1.0, "expectile": 0.9, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "cube-quadruple-100m",
+      "env_template": "cube-quadruple-play-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {
+        "kind": "sharded_100m",
+        "name": "cube-quadruple-play-100m-v0",
+        "file_stem": "cube-quadruple-play-v0",
+        "directory": "cube-quadruple-play-100m-v0",
+        "expected_train_shards": 100,
+        "expected_validation_shards": 100,
+        "replace_interval": 1000
+      },
+      "agent": {"alpha": 1.0, "expectile": 0.7, "ensemble_ct": 10, "rho": 0.5, "h": 5, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "antmaze-large",
+      "env_template": "antmaze-large-navigate-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "antmaze-large-navigate-v0"},
+      "agent": {"alpha": 0.1, "expectile": 0.5, "ensemble_ct": 10, "rho": 0.5, "h": 1, "discount": 0.99, "batch_size": 256}
+    },
+    {
+      "id": "antmaze-giant",
+      "env_template": "antmaze-giant-navigate-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "antmaze-giant-navigate-v0"},
+      "agent": {"alpha": 0.1, "expectile": 0.5, "ensemble_ct": 10, "rho": 0.5, "h": 1, "discount": 0.995, "batch_size": 256}
+    },
+    {
+      "id": "humanoidmaze-medium",
+      "env_template": "humanoidmaze-medium-navigate-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "humanoidmaze-medium-navigate-v0"},
+      "agent": {"alpha": 0.3, "expectile": 0.5, "ensemble_ct": 10, "rho": 0.0, "h": 1, "discount": 0.995, "batch_size": 256}
+    },
+    {
+      "id": "humanoidmaze-large",
+      "env_template": "humanoidmaze-large-navigate-singletask-task{task_id}-v0",
+      "sparse": false,
+      "dataset": {"kind": "standard", "name": "humanoidmaze-large-navigate-v0"},
+      "agent": {"alpha": 0.3, "expectile": 0.5, "ensemble_ct": 10, "rho": 0.0, "h": 1, "discount": 0.995, "batch_size": 256}
+    }
+  ]
+}

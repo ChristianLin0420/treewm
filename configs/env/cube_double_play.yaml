@@ -1,0 +1,11 @@
+# @package env
+short_name: cube-double
+name: cube-double-play-v0
+source_name: cube-double-play-v0
+dataset_kind: standard
+dataset_dir: ${oc.env:TREEWM_DATA_ROOT,/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task}/standard
+obs_dim: 37
+action_dim: 5
+xy_dims: [19, 20, 21, 28, 29, 30]
+max_episode_steps: 500
+relative_endpoints: true

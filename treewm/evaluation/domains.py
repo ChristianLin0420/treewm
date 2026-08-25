@@ -160,10 +160,15 @@ def _build_registry() -> dict[str, Domain]:
     reg: dict[str, Domain] = {}
 
     # ---- locomotion: goal constrains the agent's xy ---------------------------------
-    for name, obs_dim, act_dim in [("antmaze-large-navigate-v0", 29, 8),
-                                   ("humanoidmaze-medium-navigate-v0", 69, 21)]:
+    for name, obs_dim, act_dim, max_steps in [
+        ("antmaze-large-navigate-v0", 29, 8, 1000),
+        ("antmaze-giant-navigate-v0", 29, 8, 1000),
+        ("humanoidmaze-medium-navigate-v0", 69, 21, 2000),
+        ("humanoidmaze-large-navigate-v0", 69, 21, 2000),
+    ]:
         reg[name] = Domain(name, "locomotion", (0, 1), "l2", obs_dim, act_dim,
-                           subgoals=((0, 2),), difficulty_fn=_maze_difficulty)
+                           subgoals=((0, 2),), difficulty_fn=_maze_difficulty,
+                           max_episode_steps=max_steps)
 
     # ---- antsoccer: goal constrains the BALL, not the agent -------------------------
     reg["antsoccer-medium-navigate-v0"] = Domain(
@@ -173,10 +178,16 @@ def _build_registry() -> dict[str, Domain]:
         effector_dims=(0, 1), object_dims=((15, 16),))
 
     # ---- manipulation: goal constrains cube positions -------------------------------
-    for name, n, obs_dim in [("cube-single-play-v0", 1, 28), ("cube-double-play-v0", 2, 37)]:
+    for name, n, obs_dim, max_steps in [
+        ("cube-single-play-v0", 1, 28, 200),
+        ("cube-double-play-v0", 2, 37, 500),
+        ("cube-triple-play-v0", 3, 46, 1000),
+        ("cube-quadruple-play-v0", 4, 55, 1000),
+    ]:
         dims, subs = _cube_dims(n)
         reg[name] = Domain(name, "manipulation", dims, "l2", obs_dim, 5,
                            subgoals=subs, difficulty_fn=_cube_difficulty,
+                           max_episode_steps=max_steps,
                            effector_dims=EFFECTOR,
                            object_dims=tuple(tuple(range(PROPRIO + CUBE_STRIDE * i,
                                                          PROPRIO + CUBE_STRIDE * i + 3))
@@ -193,15 +204,21 @@ def _build_registry() -> dict[str, Domain]:
     subs = subs + ((len(dims) - 2, len(dims) - 1), (len(dims) - 1, len(dims)))
     reg["scene-play-v0"] = Domain("scene-play-v0", "manipulation", dims, "l2", 40, 5,
                                   subgoals=subs, difficulty_fn=_cube_difficulty,
+                                  max_episode_steps=750,
                                   # Only the cube has a 3-D position in the observation;
                                   # buttons/drawer/window expose press depth, not location.
                                   effector_dims=EFFECTOR,
                                   object_dims=(tuple(range(PROPRIO, PROPRIO + 3)),))
 
-    # ---- puzzle: nine binary buttons, Hamming distance ------------------------------
-    dims, subs = _button_dims(9)
-    reg["puzzle-3x3-play-v0"] = Domain("puzzle-3x3-play-v0", "puzzle", dims, "onehot", 55, 5,
-                                       subgoals=subs, difficulty_fn=_discrete_difficulty)
+    # ---- puzzle: binary buttons, Hamming distance -----------------------------------
+    for name, n_buttons, obs_dim in [
+        ("puzzle-3x3-play-v0", 9, 55),
+        ("puzzle-4x4-play-v0", 16, 83),
+    ]:
+        dims, subs = _button_dims(n_buttons)
+        reg[name] = Domain(name, "puzzle", dims, "onehot", obs_dim, 5,
+                           subgoals=subs, difficulty_fn=_discrete_difficulty,
+                           max_episode_steps=500)
 
     # PointMaze keeps its original semantics so existing cycles stay reproducible.
     for name in ("pointmaze-medium-stitch-v0", "pointmaze-large-stitch-v0",

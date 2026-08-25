@@ -16,30 +16,92 @@ import torch
 
 
 class TreeWMLogger:
-    def __init__(self, run_dir: str | Path, is_main: bool = True, flush_secs: int = 30) -> None:
+    def __init__(
+        self,
+        run_dir: str | Path,
+        is_main: bool = True,
+        flush_secs: int = 30,
+        *,
+        wandb_project: str | None = None,
+        wandb_id: str | None = None,
+        wandb_name: str | None = None,
+        wandb_group: str | None = None,
+        wandb_config: dict[str, Any] | None = None,
+    ) -> None:
         self.run_dir = Path(run_dir)
         self.is_main = is_main
         self._writer = None
         self._hparam_writer = None
+        self._wandb_run = None
+        self._wandb_error_reported = False
         if self.is_main:
             from torch.utils.tensorboard import SummaryWriter
 
             self.run_dir.mkdir(parents=True, exist_ok=True)
             self._writer = SummaryWriter(log_dir=str(self.run_dir), flush_secs=flush_secs)
+            if wandb_project is not None:
+                try:
+                    import os
+                    import wandb
+
+                    # Let W&B resolve authentication from its normal sources (including
+                    # a mode-600 ~/.netrc). Only an explicit WANDB_MODE may change online
+                    # behaviour; the trainer never reads or persists credentials.
+                    mode = os.environ.get("WANDB_MODE")
+                    self._wandb_run = wandb.init(
+                        project=wandb_project,
+                        entity=os.environ.get("WANDB_ENTITY") or None,
+                        id=wandb_id,
+                        name=wandb_name,
+                        group=wandb_group,
+                        resume="allow",
+                        dir=str(self.run_dir),
+                        config=wandb_config,
+                        mode=mode,
+                        reinit=True,
+                    )
+                    self._wandb_run.define_metric("global_step")
+                    self._wandb_run.define_metric("*", step_metric="global_step")
+                except Exception as exc:
+                    # A service-side throttle/outage must not discard an allocation's
+                    # scientific updates. TensorBoard remains durable locally and the
+                    # next requeue retries the same stable W&B id.
+                    self._wandb_run = None
+                    print(f"[treewm] W&B initialization failed; local logging continues: {exc}")
 
     # ------------------------------------------------------------------ scalars
 
     def scalar(self, tag: str, value: float, step: int) -> None:
-        if self._writer is None:
-            return
         value = float(value)
         if not np.isfinite(value):
             return
-        self._writer.add_scalar(tag, value, step)
+        if self._writer is not None:
+            self._writer.add_scalar(tag, value, step)
+        if self._wandb_run is not None:
+            self._wandb_log({"global_step": int(step), tag: value})
 
     def scalars(self, values: dict[str, float], step: int, prefix: str = "") -> None:
+        clean: dict[str, float] = {}
         for tag, value in values.items():
-            self.scalar(f"{prefix}{tag}" if prefix else tag, value, step)
+            name = f"{prefix}{tag}" if prefix else tag
+            value = float(value)
+            if not np.isfinite(value):
+                continue
+            clean[name] = value
+            if self._writer is not None:
+                self._writer.add_scalar(name, value, step)
+        if self._wandb_run is not None and clean:
+            self._wandb_log({"global_step": int(step), **clean})
+
+    def _wandb_log(self, payload: dict[str, Any]) -> None:
+        try:
+            self._wandb_run.log(payload)
+        except Exception as exc:
+            # A transient tracking outage must not invalidate a scientific update or
+            # prevent the durable local checkpoint from being written.
+            if not self._wandb_error_reported:
+                print(f"[treewm] W&B logging failed; local training continues: {exc}")
+                self._wandb_error_reported = True
 
     # --------------------------------------------------------------- histograms
 
@@ -101,11 +163,24 @@ class TreeWMLogger:
         if self._writer is not None:
             self._writer.flush()
 
-    def close(self) -> None:
+    def mark_preempting(self) -> None:
+        if self._wandb_run is None:
+            return
+        import wandb
+
+        wandb.mark_preempting()
+
+    def close(self, exit_code: int = 0) -> None:
         if self._writer is not None:
             self._writer.close()
         if self._hparam_writer is not None:
             self._hparam_writer.close()
+        if self._wandb_run is not None:
+            try:
+                self._wandb_run.finish(exit_code=exit_code)
+            except Exception as exc:
+                print(f"[treewm] W&B finish failed after local flush: {exc}")
+            self._wandb_run = None
 
     def __enter__(self) -> "TreeWMLogger":
         return self

@@ -1,0 +1,12 @@
+# @package env
+short_name: cube-quadruple-100m
+name: cube-quadruple-play-v0
+source_name: cube-quadruple-play-100m-v0
+dataset_kind: sharded_100m_full
+dataset_dir: ${oc.env:TREEWM_DATA_ROOT,/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task}/100m/cube-quadruple-play-100m-v0
+obs_dim: 55
+action_dim: 5
+xy_dims: [19, 20, 21, 28, 29, 30, 37, 38, 39, 46, 47, 48]
+max_episode_steps: 1000
+relative_endpoints: true
+expected_shards: 100

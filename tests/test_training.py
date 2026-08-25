@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+import json
+from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from treewm.logging.metrics import MetricTracker, rank_correlation
+from treewm.evaluation import rollout
 from treewm.losses.support_losses import keep_loss, mass_loss, redundancy_loss, support_metrics
 from treewm.losses.total import LossConfig
 from treewm.losses.world_losses import action_loss, horizon_loss, uncertainty_loss
 from treewm.models.baselines import build_model
 from treewm.models.treewm import TreeWMConfig, horizon_mask
+from treewm.tree.expansion import TreeConfig
 from treewm.utils.checkpoint import load_checkpoint, save_checkpoint
+from treewm.utils.provenance import trainer_code_fingerprint
+from treewm.utils.rng import make_generator
 
 SMALL = TreeWMConfig(obs_dim=1, action_dim=1, z_dim=32, q_dim=16, hidden_dim=64, num_layers=2, branch_factor=2)
+
+
+def test_formal_requirements_are_explicit_in_base_config():
+    cfg = OmegaConf.load(Path(__file__).parents[1] / "configs" / "base.yaml")
+    assert cfg.train.gradient_checkpointing is True
+    assert cfg.eval.final_episodes_per_task == 50
 
 
 def test_horizon_mask_matches_horizons():
@@ -143,21 +158,198 @@ def test_checkpoint_save_and_exact_resume(tmp_path):
     model.encode(x).sum().backward()
     opt.step()
 
-    path = save_checkpoint(tmp_path / "latest.pt", model=model, optimizer=opt, step=7, epoch=2, config={"a": 1})
+    identity = {"run": "tiny", "total_steps": 1_000_000}
+    torch.manual_seed(1234)
+    path = save_checkpoint(
+        tmp_path / "latest.pt",
+        model=model,
+        optimizer=opt,
+        step=7,
+        epoch=2,
+        config={"a": 1},
+        extra={"run_identity": identity, "completed_updates": 7, "next_step": 7},
+    )
     assert path.exists()
+    expected_draw = torch.randn(3)
 
     restored = build_model("treewm", SMALL)
     restored_opt = torch.optim.AdamW(restored.parameters(), lr=1e-3)
-    payload = load_checkpoint(path, restored, restored_opt)
+    payload = load_checkpoint(path, restored, restored_opt, expected_identity=identity)
 
     assert payload["step"] == 7 and payload["epoch"] == 2 and payload["config"] == {"a": 1}
     for (n1, p1), (n2, p2) in zip(model.named_parameters(), restored.named_parameters()):
         assert n1 == n2 and torch.allclose(p1, p2), f"parameter {n1} did not round-trip"
-    # RNG state restored -> the next random draw matches.
-    torch.manual_seed(0)
-    expected = torch.randn(3)
-    load_checkpoint(path, restored, restored_opt)
-    assert torch.randn(3).shape == expected.shape
+    assert payload["completed_updates"] == 7 and payload["next_step"] == 7
+    assert torch.equal(torch.randn(3), expected_draw)
+    assert not list(tmp_path.glob(".*.tmp"))
+    with pytest.raises(ValueError, match="identity"):
+        load_checkpoint(path, expected_identity={**identity, "total_steps": 999_999})
+
+
+def test_checkpoint_resume_matches_next_stochastic_optimizer_update(tmp_path):
+    """The checkpoint boundary means next update, including global/explicit RNG."""
+    cfg = replace(SMALL, dropout=0.1, horizon_mode="random")
+    torch.manual_seed(23)
+    uninterrupted = build_model("treewm", cfg).train()
+    uninterrupted.set_gradient_checkpointing(True)
+    uninterrupted._horizon_gen = make_generator(23, "train")
+    optimizer = torch.optim.AdamW(uninterrupted.parameters(), lr=1e-3)
+
+    def update(model, opt, observations):
+        opt.zero_grad(set_to_none=True)
+        child = model.predict_children(model.encode(observations))
+        loss = (
+            child["latent"].square().mean()
+            + child["q"].square().mean()
+            + child["branch"].keep_logit.square().mean()
+        )
+        loss.backward()
+        opt.step()
+        return loss.detach(), child["horizon_idx"].detach()
+
+    update(uninterrupted, optimizer, torch.randn(4, cfg.obs_dim))
+    identity = {"run": "stochastic", "total_steps": 1_000_000}
+    path = save_checkpoint(
+        tmp_path / "latest.pt",
+        model=uninterrupted,
+        optimizer=optimizer,
+        step=1,
+        extra={
+            "run_identity": identity,
+            "horizon_generator": uninterrupted._horizon_gen.get_state().clone(),
+        },
+    )
+
+    expected_batch = torch.randn(4, cfg.obs_dim)
+    expected_loss, expected_horizon = update(uninterrupted, optimizer, expected_batch)
+
+    resumed = build_model("treewm", cfg).train()
+    resumed.set_gradient_checkpointing(True)
+    resumed._horizon_gen = make_generator(23, "train")
+    resumed_optimizer = torch.optim.AdamW(resumed.parameters(), lr=1e-3)
+    payload = load_checkpoint(
+        path, resumed, resumed_optimizer, expected_identity=identity
+    )
+    resumed._horizon_gen.set_state(payload["horizon_generator"])
+    resumed_batch = torch.randn(4, cfg.obs_dim)
+    resumed_loss, resumed_horizon = update(resumed, resumed_optimizer, resumed_batch)
+
+    torch.testing.assert_close(resumed_batch, expected_batch, rtol=0, atol=0)
+    torch.testing.assert_close(resumed_horizon, expected_horizon, rtol=0, atol=0)
+    torch.testing.assert_close(resumed_loss, expected_loss)
+    for expected, actual in zip(uninterrupted.parameters(), resumed.parameters(), strict=True):
+        torch.testing.assert_close(actual, expected)
+
+
+def test_trainer_fingerprint_includes_hydra_configs(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "treewm").mkdir()
+    (tmp_path / "configs" / "model").mkdir(parents=True)
+    (tmp_path / "scripts" / "train.py").write_text("# trainer\n")
+    (tmp_path / "treewm" / "model.py").write_text("# model\n")
+    config = tmp_path / "configs" / "model" / "treewm.yaml"
+    config.write_text("hidden_dim: 256\n")
+
+    before = trainer_code_fingerprint(tmp_path)
+    assert "configs/model/treewm.yaml" in before["files"]
+    config.write_text("hidden_dim: 512\n")
+    after = trainer_code_fingerprint(tmp_path)
+    assert after["manifest_sha256"] != before["manifest_sha256"]
+
+
+def test_gradient_checkpointing_preserves_forward_and_gradients():
+    torch.manual_seed(7)
+    ordinary = build_model("treewm", SMALL).train()
+    rematerialized = copy.deepcopy(ordinary).train()
+    rematerialized.set_gradient_checkpointing(True)
+    obs = torch.randn(5, SMALL.obs_dim)
+
+    def loss_of(model):
+        branch = model.branch(model.encode(obs))
+        return branch.action.square().mean() + branch.keep_logit.square().mean()
+
+    loss_a = loss_of(ordinary)
+    loss_b = loss_of(rematerialized)
+    loss_a.backward()
+    loss_b.backward()
+    torch.testing.assert_close(loss_a, loss_b)
+    for (name_a, param_a), (name_b, param_b) in zip(
+        ordinary.named_parameters(), rematerialized.named_parameters()
+    ):
+        assert name_a == name_b
+        if param_a.grad is None or param_b.grad is None:
+            assert param_a.grad is None and param_b.grad is None
+        else:
+            torch.testing.assert_close(param_a.grad, param_b.grad)
+
+
+def test_evaluation_emits_per_task_metrics_and_resumes_prefix(monkeypatch):
+    calls = []
+
+    def fake_episode(_env, _planner, task, seed, **_kwargs):
+        calls.append((task["task_id"], seed))
+        return rollout.EpisodeResult(
+            success=bool(seed % 2),
+            steps=1,
+            replans=1,
+            nodes=4,
+            final_goal_distance=0.5,
+            best_goal_distance=0.25,
+            progress={"fraction": np.float32(0.5)},
+        )
+
+    monkeypatch.setattr(rollout, "run_episode", fake_episode)
+    tasks = [{"task_id": 1}, {"task_id": 2}]
+    persisted = []
+    metrics = rollout.evaluate(
+        object(), object(), tasks, episodes_per_task=3, episode_callback=persisted.append
+    )
+    assert metrics["eval/num_episodes"] == 6
+    assert metrics["eval/task1/num_episodes"] == 3
+    assert metrics["eval/task2/num_episodes"] == 3
+    assert "eval/task1/success_rate" in metrics and "eval/task2/success_rate" in metrics
+    json.dumps(persisted)  # progress artifacts must contain only JSON-native values
+
+    calls.clear()
+    resumed = rollout.evaluate(
+        object(), object(), tasks, episodes_per_task=3, completed_results=persisted[:4]
+    )
+    assert len(calls) == 2
+    assert resumed["eval/num_episodes"] == 6
+
+
+def test_budget_sweep_propagates_domain_to_planner_and_evaluator(monkeypatch):
+    domain = object()
+    seen = {"planner": [], "evaluate": []}
+
+    class FakePlanner:
+        def __init__(self, *_args, domain=None, **_kwargs):
+            seen["planner"].append(domain)
+
+    def fake_evaluate(*_args, domain=None, **_kwargs):
+        seen["evaluate"].append(domain)
+        return {"eval/world_model_nodes_per_replan": 4.0}
+
+    monkeypatch.setattr(rollout, "GoalPlanner", FakePlanner)
+    monkeypatch.setattr(rollout, "evaluate", fake_evaluate)
+    import treewm.models.baselines as baselines
+
+    monkeypatch.setattr(
+        baselines,
+        "tree_config_for",
+        lambda _arm, cfg, _model: cfg,
+    )
+    rollout.sweep_budgets(
+        object(),
+        object(),
+        object(),
+        [],
+        [4],
+        TreeConfig(node_budget=4),
+        object(),
+        domain=domain,
+    )
+    assert seen == {"planner": [domain], "evaluate": [domain]}
 
 
 def test_loss_warmup_ramps_redundancy():

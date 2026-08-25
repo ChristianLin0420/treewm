@@ -11,12 +11,17 @@ so that two arms see the same start states.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable
 
 import numpy as np
 import torch
 
 from treewm.planning.goal_planner import GoalPlanner
+
+
+class EvaluationInterrupted(RuntimeError):
+    """A deferred lifecycle request interrupted evaluation at a safe boundary."""
 
 
 @dataclass
@@ -35,6 +40,32 @@ class EpisodeResult:
     action_magnitude: float = 0.0
     trajectory: list[np.ndarray] = field(default_factory=list)
     progress: dict = field(default_factory=dict)
+    task_index: int = -1
+    task_id: int = -1
+    episode_index: int = -1
+    planning_wall_clock_s: float = 0.0
+
+
+def episode_result_to_dict(result: EpisodeResult) -> dict[str, Any]:
+    """JSON-safe representation used by resumable terminal evaluation."""
+    def convert(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(key): convert(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [convert(item) for item in value]
+        return value
+
+    return convert(asdict(result))
+
+
+def episode_result_from_dict(value: dict[str, Any]) -> EpisodeResult:
+    restored = dict(value)
+    restored["trajectory"] = [np.asarray(x, dtype=np.float32) for x in restored.get("trajectory", [])]
+    return EpisodeResult(**restored)
 
 
 def run_episode(
@@ -45,6 +76,7 @@ def run_episode(
     max_steps: int = 500,
     record_trajectory: bool = False,
     domain=None,
+    stop_callback: Callable[[], bool] | None = None,
 ) -> EpisodeResult:
     """One goal-reaching episode with replanning after each executed chunk.
 
@@ -94,6 +126,8 @@ def run_episode(
 
     done = False
     while steps < max_steps and not success and not done:
+        if stop_callback is not None and stop_callback():
+            raise EvaluationInterrupted("evaluation interrupted before planning")
         plan = planner.plan(np.asarray(ob, dtype=np.float32), goal)
         replans += 1
         nodes += plan.num_nodes
@@ -103,6 +137,8 @@ def run_episode(
         depths.append(plan.selected_depth)
 
         for action in plan.actions:
+            if stop_callback is not None and stop_callback():
+                raise EvaluationInterrupted("evaluation interrupted before environment step")
             ob, _, terminated, truncated, info = env.step(action)
             steps += 1
             cur = gv(ob)
@@ -169,18 +205,46 @@ def evaluate(
     max_steps: int = 500,
     seed: int = 0,
     domain=None,
+    stop_callback: Callable[[], bool] | None = None,
+    completed_results: list[dict[str, Any]] | None = None,
+    episode_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, float]:
     """Run the full task set and return the ``eval/*`` namespace."""
-    results: list[EpisodeResult] = []
-    start = time.perf_counter()
+    results = [episode_result_from_dict(value) for value in (completed_results or [])]
+    expected_prefix = [
+        (t, int(task.get("task_id", t + 1)), e)
+        for t, task in enumerate(tasks)
+        for e in range(episodes_per_task)
+    ]
+    actual_prefix = [(r.task_index, r.task_id, r.episode_index) for r in results]
+    if actual_prefix != expected_prefix[: len(actual_prefix)]:
+        raise ValueError("completed evaluation results are not a valid deterministic prefix")
     for t, task in enumerate(tasks):
         for e in range(episodes_per_task):
+            ordinal = t * episodes_per_task + e
+            if ordinal < len(results):
+                continue
+            if stop_callback is not None and stop_callback():
+                raise EvaluationInterrupted("evaluation interrupted between episodes")
             # Seed derived from task/episode, not from a global counter, so arms are
             # compared on identical start states.
-            results.append(run_episode(env, planner, task, seed=seed + 1000 * t + e,
-                                       max_steps=max_steps, domain=domain))
-    elapsed = time.perf_counter() - start
-
+            episode_start = time.perf_counter()
+            result = run_episode(
+                env,
+                planner,
+                task,
+                seed=seed + 1000 * t + e,
+                max_steps=max_steps,
+                domain=domain,
+                stop_callback=stop_callback,
+            )
+            result.task_index = t
+            result.task_id = int(task.get("task_id", t + 1))
+            result.episode_index = e
+            result.planning_wall_clock_s = time.perf_counter() - episode_start
+            results.append(result)
+            if episode_callback is not None:
+                episode_callback(episode_result_to_dict(result))
     successes = np.array([r.success for r in results], dtype=np.float32)
     steps = np.array([r.steps for r in results], dtype=np.float32)
     nodes = np.array([r.nodes for r in results], dtype=np.float32)
@@ -196,8 +260,9 @@ def evaluate(
 
     nodes_per_success = float(nodes[successes > 0].mean()) if successes.any() else float("nan")
 
-    return {
+    metrics = {
         "eval/success_rate": float(successes.mean()),
+        "eval/successes": float(successes.sum()),
         "eval/episode_return": float(successes.mean()),
         "eval/goal_distance_final": float(final.mean()),
         "eval/goal_distance_best": float(best.mean()),
@@ -217,7 +282,9 @@ def evaluate(
         "eval/path_length": float(path_len.mean()),
         "eval/action_magnitude": float(act_mag.mean()),
         "eval/fraction_moving": float((disp > 1.0).mean()),
-        "eval/planning_wall_clock_s": float(elapsed / max(len(results), 1)),
+        "eval/planning_wall_clock_s": float(
+            np.mean([result.planning_wall_clock_s for result in results])
+        ),
         "eval/num_episodes": float(len(results)),
         # Domain-specific competence, averaged over episodes. These are what make a zero
         # success rate interpretable -- the failure mode that made three AntMaze cycles
@@ -225,6 +292,20 @@ def evaluate(
         **{f"eval/{k}": float(np.mean([r.progress[k] for r in results if k in r.progress]))
            for k in sorted({k for r in results for k in r.progress})},
     }
+    for t, task in enumerate(tasks):
+        task_id = int(task.get("task_id", t + 1))
+        task_results = [r for r in results if r.task_index == t]
+        label = f"task{task_id}"
+        metrics[f"eval/{label}/success_rate"] = float(
+            np.mean([r.success for r in task_results])
+        )
+        metrics[f"eval/{label}/successes"] = float(sum(r.success for r in task_results))
+        metrics[f"eval/{label}/num_episodes"] = float(len(task_results))
+        for key in sorted({key for r in task_results for key in r.progress}):
+            metrics[f"eval/{label}/{key}"] = float(
+                np.mean([r.progress[key] for r in task_results if key in r.progress])
+            )
+    return metrics
 
 
 @torch.no_grad()
@@ -240,6 +321,7 @@ def sweep_budgets(
     episodes_per_task: int = 5,
     max_steps: int = 500,
     seed: int = 0,
+    domain=None,
 ) -> dict[int, dict[str, float]]:
     """Success vs node budget -- the primary plot.
 
@@ -253,8 +335,10 @@ def sweep_budgets(
     out: dict[int, dict[str, float]] = {}
     for budget in budgets:
         tree_cfg = tree_config_for(arm, replace(base_tree_cfg, node_budget=budget), model)
-        planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg)
-        metrics = evaluate(env, planner, tasks, episodes_per_task, max_steps, seed)
+        planner = GoalPlanner(model, normalizer, tree_cfg, planner_cfg, domain=domain)
+        metrics = evaluate(
+            env, planner, tasks, episodes_per_task, max_steps, seed, domain=domain
+        )
         assert metrics["eval/world_model_nodes_per_replan"] <= budget + 1e-6, (
             f"arm {arm} exceeded node budget {budget}"
         )

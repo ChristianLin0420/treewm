@@ -20,7 +20,24 @@ answerable rather than hidden inside one scalar.
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
+
+from treewm.losses.world_losses import detached_target_scale, scale_invariant_latent_error
+
+
+def _masked_action_distance(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Per-branch action MSE over valid time and action coordinates.
+
+    ``predicted`` is ``[B,K,H,A]`` while target/mask are ``[B,H,A]`` and ``[B,H]``.
+    Averaging action coordinates before the time reduction makes the distance invariant
+    to both padded horizon length and action dimensionality.
+    """
+    per_step = (predicted.float() - target.float().unsqueeze(1)).pow(2).mean(-1)
+    weight = mask.float().unsqueeze(1)
+    return (per_step * weight).sum(-1) / weight.sum(-1).clamp_min(1.0)
 
 
 def multi_step_recursive_loss(
@@ -45,18 +62,24 @@ def multi_step_recursive_loss(
     b, d_max = ms_valid.shape
     z = model.encode(obs)
     with torch.no_grad():
-        z_true_all = model.encode(ms_obs)  # [B, D, z_dim]
+        # The target encoder is a teacher for this objective. Detaching is explicit even
+        # though no_grad already enforces it, making the contract robust to refactors.
+        z_true_all = model.encode(ms_obs).detach()  # [B, D, z_dim]
+    target_scale = detached_target_scale(z_true_all, ms_valid)
 
     total = z.sum() * 0.0
     metrics: dict[str, float] = {}
-    weight_sum = 0.0
+    weighted_valid_count = z.new_tensor(0.0, dtype=torch.float32)
     z_cur = z
     z_teacher = z
 
     for d in range(d_max):
         valid = ms_valid[:, d]
         if float(valid.sum()) == 0:
-            break
+            # Validity is applied independently at every depth. Builder-produced chains
+            # are prefixes, but accepting holes keeps this loss correct for adapters and
+            # makes the mask contract testable.
+            continue
 
         act = ms_actions[:, d]  # [B, h_max, dA]
         mask = ms_mask[:, d]
@@ -65,9 +88,12 @@ def multi_step_recursive_loss(
         # Pick the branch whose proposed action best matches the executed one, then push
         # the *true* action through the dynamics with that branch's embedding. This keeps
         # the rollout consistent with how the bind loss defines an executable branch.
-        out = model.branch(z_cur)
+        parent_depth = torch.full(
+            (b,), d, device=z.device, dtype=torch.long
+        )
+        out = model.branch(z_cur, parent_depth)
         with torch.no_grad():
-            diff = (out.action - act.unsqueeze(1)).pow(2).mean((-1, -2))  # [B, K]
+            diff = _masked_action_distance(out.action, act, mask)  # [B, K]
             pick = diff.argmin(dim=1)
         emb = out.embedding[torch.arange(b, device=z.device), pick]  # [B, H]
 
@@ -76,11 +102,14 @@ def multi_step_recursive_loss(
         ).squeeze(1)
 
         target = z_true_all[:, d]
-        per = F.mse_loss(z_next, target, reduction="none").mean(-1)
+        per = scale_invariant_latent_error(z_next, target, target_scale)
         w = float(depth_weights[d]) if depth_weights is not None and d < len(depth_weights) else 1.0
         step_loss = (per * valid).sum() / valid.sum().clamp_min(1.0)
-        total = total + w * step_loss
-        weight_sum += w
+        # Reduce over valid (example, depth) transitions rather than first averaging
+        # each depth equally. Sparse late depths therefore do not get accidental extra
+        # weight; explicit depth_weights remain the sole depth reweighting mechanism.
+        total = total + w * (per * valid).sum()
+        weighted_valid_count = weighted_valid_count + w * valid.sum()
 
         with torch.no_grad():
             metrics[f"recursive/loss_depth{d + 1}"] = float(step_loss.item())
@@ -91,8 +120,8 @@ def multi_step_recursive_loss(
 
         # Teacher-forced reference chain, for the drift diagnostic.
         with torch.no_grad():
-            out_t = model.branch(z_teacher)
-            diff_t = (out_t.action - act.unsqueeze(1)).pow(2).mean((-1, -2))
+            out_t = model.branch(z_teacher, parent_depth)
+            diff_t = _masked_action_distance(out_t.action, act, mask)
             emb_t = out_t.embedding[torch.arange(b, device=z.device), diff_t.argmin(dim=1)]
             z_teacher_next = model.dynamics(
                 z_teacher, act.unsqueeze(1), mask.unsqueeze(1), h_idx.unsqueeze(1), emb_t.unsqueeze(1)
@@ -111,10 +140,12 @@ def multi_step_recursive_loss(
             nxt = z_true_all[:, d]
         z_cur = torch.where(valid.unsqueeze(-1) > 0, nxt, z_cur)
 
-    if weight_sum > 0:
-        total = total / weight_sum
+    if float(weighted_valid_count.item()) > 0:
+        total = total / weighted_valid_count
     metrics["recursive/scheduled_sampling_p"] = float(scheduled_sampling_p)
     metrics["recursive/mean_chain_depth"] = float(ms_valid.sum(1).float().mean().item())
+    metrics["recursive/valid_transitions"] = float(ms_valid.sum().item())
+    metrics["recursive/latent_target_scale"] = float(target_scale.item())
     return total, metrics
 
 

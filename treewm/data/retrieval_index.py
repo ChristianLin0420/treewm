@@ -18,6 +18,7 @@ slower here: tree search degrades to linear scan above ~20 dimensions and z_dim 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -40,18 +41,50 @@ def compute_endpoint_cells(
     index,
     quantizer: StateQuantizer,
     horizon: int,
+    key_idx: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Precompute, for every dataset index, the quantised cell of its own continuation.
 
     Returns ``(cells [N], valid [N])``. Vectorised: this runs once at startup over the
     full dataset, so it must not be a python loop.
     """
-    n = len(obs_norm)
-    remaining = index.steps_remaining
-    valid = remaining >= horizon
-    target_idx = np.where(valid, np.arange(n) + horizon, np.arange(n))
+    # On 100M datasets, materialising `steps_remaining`, `arange`, advanced-indexed
+    # observations and endpoint arrays for every transition costs tens of GB even
+    # though LatentIndex retains only cfg.num_keys. Address only the deterministic key
+    # subset when supplied.
+    source_idx = (
+        np.arange(len(obs_norm), dtype=np.int64)
+        if key_idx is None
+        else np.asarray(key_idx, dtype=np.int64)
+    )
+    # Index *before* converting so a memmapped 100M `steps_remaining` array only
+    # materialises the bounded key subset.
+    valid = np.asarray(index.steps_remaining[source_idx]) >= horizon
+    target_idx = np.where(valid, source_idx + horizon, source_idx)
     cells = quantizer.cell_ids(obs_norm[target_idx])
     return cells.astype(np.int64), valid.astype(np.float32)
+
+
+def sample_key_indices(num_observations: int, cfg: RetrievalConfig, seed: int) -> np.ndarray:
+    """Deterministic, bounded retrieval-key subset without a full-size permutation."""
+    rng = np.random.default_rng(seed)
+    num = min(cfg.num_keys, int(num_observations))
+    if num == int(num_observations):
+        return np.arange(num, dtype=np.int64)
+    if int(num_observations) <= 10_000_000:
+        # Preserve the original sampling stream for standard datasets.
+        return np.sort(rng.choice(int(num_observations), size=num, replace=False))
+    # Generator.choice(replace=False) may allocate work proportional to population on
+    # some NumPy versions. Rejection sampling is O(num_keys) memory and has negligible
+    # collisions for 100k keys from 100M transitions.
+    selected = np.empty(0, dtype=np.int64)
+    while len(selected) < num:
+        needed = num - len(selected)
+        draws = rng.integers(0, int(num_observations), size=max(needed * 2, 1024), dtype=np.int64)
+        selected = np.unique(np.concatenate((selected, draws)))
+    if len(selected) > num:
+        selected = rng.choice(selected, size=num, replace=False)
+    return np.sort(selected)
 
 
 class LatentIndex:
@@ -65,16 +98,24 @@ class LatentIndex:
         cfg: RetrievalConfig,
         device: torch.device,
         seed: int = 0,
+        key_idx: np.ndarray | None = None,
     ) -> None:
         self.cfg = cfg
         self.device = device
-        rng = np.random.default_rng(seed)
         n = len(obs_norm)
-        num = min(cfg.num_keys, n)
-        self.key_idx = np.sort(rng.choice(n, size=num, replace=False))
+        self.key_idx = (
+            sample_key_indices(n, cfg, seed)
+            if key_idx is None
+            else np.asarray(key_idx, dtype=np.int64)
+        )
         self.key_obs = torch.from_numpy(obs_norm[self.key_idx]).to(device)
-        self.key_cells = torch.from_numpy(endpoint_cells[self.key_idx]).to(device)
-        self.key_valid = torch.from_numpy(endpoint_valid[self.key_idx]).to(device)
+        if len(endpoint_cells) == n:
+            endpoint_cells = endpoint_cells[self.key_idx]
+            endpoint_valid = endpoint_valid[self.key_idx]
+        elif len(endpoint_cells) != len(self.key_idx):
+            raise ValueError("endpoint arrays must cover either all observations or selected keys")
+        self.key_cells = torch.from_numpy(np.asarray(endpoint_cells)).to(device)
+        self.key_valid = torch.from_numpy(np.asarray(endpoint_valid)).to(device)
         self.keys: torch.Tensor | None = None
         self.last_refresh = -1
 
@@ -94,6 +135,31 @@ class LatentIndex:
         self.keys = torch.cat(chunks, dim=0)
         self.last_refresh = step
         return True
+
+    def state_dict(self) -> dict[str, Any]:
+        """Persist the moving encoder snapshot used by the gain target.
+
+        Recomputing the index with the resumed *current* encoder would differ from an
+        uninterrupted run whenever the saved index was intentionally stale between
+        refreshes.  The keys are therefore part of the exact training state.
+        """
+        return {
+            "last_refresh": int(self.last_refresh),
+            "keys": self.keys.detach().cpu() if self.keys is not None else None,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        keys = state.get("keys")
+        if keys is not None:
+            if keys.ndim != 2 or keys.shape[0] != len(self.key_idx):
+                raise ValueError(
+                    f"latent-index checkpoint shape {tuple(keys.shape)} is incompatible "
+                    f"with {len(self.key_idx)} configured keys"
+                )
+            self.keys = keys.to(self.device)
+        else:
+            self.keys = None
+        self.last_refresh = int(state.get("last_refresh", -1))
 
     @torch.no_grad()
     def query_cells(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

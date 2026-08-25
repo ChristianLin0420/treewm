@@ -218,21 +218,36 @@ def broad_to_focused_score(tree: BatchedTree, frontier: torch.Tensor, ctx: Scori
 
 
 def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext) -> torch.Tensor:
-    """``g_psi(feat_n, c_T, depth, kappa, sigma)`` -- predicted expansion gain.
+    """Set-aware ``g_psi(feat_n, {feat_j}, depth, kappa, sigma)`` gain.
 
     Feature space follows ``ctx.novelty_space`` so the learned arm consumes exactly the
-    representation whose novelty it is trained to predict.
+    representation whose novelty it is trained to predict.  The full valid tree set is
+    supplied to query-conditioned cross-attention; the exact novelty value is not an
+    input.
     """
     from treewm.tree.novelty import node_features
 
     assert ctx.gain_head is not None, "learned scorer needs an ExpansionGainHead"
-    gain = ctx.gain_head(
-        node_features(tree, ctx.novelty_space),
-        ctx.context_flat.float() if ctx.context_flat is not None else None,
-        tree.depth,
-        tree.keep_score.float(),
-        tree.uncertainty.float(),
-    )
+    features = node_features(tree, ctx.novelty_space)
+    if getattr(ctx.gain_head, "set_aware_enabled", False):
+        gain = ctx.gain_head(
+            features,
+            features,
+            tree.depth,
+            tree.keep_score.float(),
+            tree.uncertainty.float(),
+            context_valid=tree.valid,
+            exclude_self=True,
+        )
+    else:
+        # Exact v1 compatibility: retain the configured mean/max pooled token.
+        gain = ctx.gain_head(
+            features,
+            ctx.context_flat.float() if ctx.context_flat is not None else None,
+            tree.depth,
+            tree.keep_score.float(),
+            tree.uncertainty.float(),
+        )
     return _mask_scores(gain, frontier)
 
 

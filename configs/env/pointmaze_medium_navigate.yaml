@@ -1,0 +1,11 @@
+# @package env
+# Restores the default config referenced by configs/base.yaml and the historical examples.
+short_name: pointmaze-medium
+name: pointmaze-medium-stitch-v0
+source_name: pointmaze-medium-stitch-v0
+dataset_kind: standard
+dataset_dir: ${oc.env:OGBENCH_DATASET_DIR,/tmp/ogbench-data}
+obs_dim: 2
+action_dim: 2
+xy_dims: [0, 1]
+max_episode_steps: 1000

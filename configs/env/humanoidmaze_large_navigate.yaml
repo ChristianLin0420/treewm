@@ -1,0 +1,11 @@
+# @package env
+short_name: humanoidmaze-large
+name: humanoidmaze-large-navigate-v0
+source_name: humanoidmaze-large-navigate-v0
+dataset_kind: standard
+dataset_dir: ${oc.env:TREEWM_DATA_ROOT,/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task}/standard
+obs_dim: 69
+action_dim: 21
+xy_dims: [0, 1]
+max_episode_steps: 2000
+relative_endpoints: true

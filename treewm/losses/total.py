@@ -11,6 +11,7 @@ computation is skipped, so an ablation cannot pay for a loss it is not using.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -19,7 +20,13 @@ from treewm.data.future_sets import gather_mode_targets
 from treewm.losses import controllability_losses as cl
 from treewm.losses import support_losses as sl
 from treewm.losses import world_losses as wl
-from treewm.tree.matching import MatchingConfig, branch_mode_cost, gather_matched_targets, match
+from treewm.tree.matching import (
+    MatchingConfig,
+    assigned_cost_metrics,
+    branch_mode_cost,
+    gather_matched_targets,
+    match,
+)
 
 
 @dataclass
@@ -74,6 +81,23 @@ class LossConfig:
     keep_balance: bool = True
     coverage_space: str = "q"  # q | z  (ablation axis, spec section 18)
     future_scale: float = 1.0
+    # V2 controllability geometry. Defaults retain the historical objective exactly;
+    # formal v2 explicitly selects the task-metric endpoint and bounded RMS target.
+    control_target_transform: str = "linear"  # linear | rms_tanh
+    control_endpoint_key: str = "fut_endpoint"
+    control_allow_endpoint_fallback: bool = True
+    control_require_single_scale: bool = False
+    control_metric_weight: float = 1.0
+    control_rank_weight: float = 0.0
+    control_rank_temperature: float = 0.1
+    # V2 freezes target-side world representations and enables the identifiable
+    # set-aware expansion scorer. Both remain opt-in for checkpoint compatibility.
+    detach_world_targets: bool = False
+    bind_negative_margin: float = 0.0
+    gain_set_context: bool = False
+    gain_rank_weight: float = 0.0
+    gain_calibration_weight: float = 1.0
+    gain_branch_prior_weight: float = 0.0
     # Anchors used for the controllability objective. The future-set Chamfer distance is
     # O(B^2 * M^2) and materialises a [B, B, M, M] tensor, which at B=256 dominates the
     # whole training step (140 ms of 195 ms measured). A fresh random subset each step
@@ -123,13 +147,233 @@ class LossConfig:
         return up * max(0.0, min(1.0, down))
 
 
+@dataclass
+class LossTermTensors:
+    """Differentiable audit view of the exact objective assembled for backward."""
+
+    raw: dict[str, torch.Tensor]
+    effective: dict[str, torch.Tensor]
+    weights: dict[str, float]
+    schedules: dict[str, float]
+    total: torch.Tensor
+
+
+def assemble_loss_terms(
+    raw: dict[str, torch.Tensor], loss_cfg: LossConfig, step: int
+) -> LossTermTensors:
+    """Apply configured weights/schedules without detaching the component graphs."""
+    effective: dict[str, torch.Tensor] = {}
+    weights: dict[str, float] = {}
+    schedules: dict[str, float] = {}
+    for name, value in raw.items():
+        weight = float(getattr(loss_cfg.weights, name))
+        schedule = float(loss_cfg.scale(name, step))
+        weights[name] = weight
+        schedules[name] = schedule
+        effective[name] = value * weight * schedule
+    if effective:
+        total = sum(effective.values())
+    elif raw:
+        total = next(iter(raw.values())).sum() * 0.0
+    else:
+        raise ValueError("cannot assemble an empty loss dictionary")
+    return LossTermTensors(raw, effective, weights, schedules, total)
+
+
+def loss_term_metrics(terms: LossTermTensors, prefix: str = "train") -> dict[str, float]:
+    """Detached telemetry whose sum is exactly ``terms.total``."""
+    metrics: dict[str, float] = {}
+    for name, value in terms.raw.items():
+        metrics[f"{prefix}/loss_{name}"] = float(value.detach().item())
+        metrics[f"{prefix}/loss_raw/{name}"] = float(value.detach().item())
+        metrics[f"{prefix}/loss_effective/{name}"] = float(
+            terms.effective[name].detach().item()
+        )
+        metrics[f"{prefix}/loss_weight/{name}"] = terms.weights[name]
+        metrics[f"{prefix}/loss_schedule/{name}"] = terms.schedules[name]
+    metrics[f"{prefix}/loss_total"] = float(terms.total.detach().item())
+    return metrics
+
+
+@dataclass(frozen=True)
+class GradientAuditResult:
+    """Outcome-blind pilot gate for effective per-term gradient dominance."""
+
+    metrics: dict[str, float]
+    active_terms: tuple[str, ...]
+    max_share: float
+    passed: bool
+
+
+def audit_effective_loss_gradients(
+    terms: LossTermTensors,
+    shared_modules: Mapping[str, torch.nn.Module],
+    *,
+    term_names: Iterable[str] | None = None,
+    max_terms: int = 32,
+    max_gradient_share: float = 1.0,
+    fail_on_excess: bool = False,
+    preserve_graph: bool = False,
+) -> GradientAuditResult:
+    """Measure effective term gradients without touching ``Parameter.grad``.
+
+    This deliberately belongs to a bounded pilot/preflight, not the distributed hot
+    path: it traverses one already-built objective graph once per active term.  The
+    caller supplies the shared modules of scientific interest (formal v2 uses encoder,
+    controllability and branch transformer). For each module and their union it reports
+    the effective gradient L2 norm, cosine against the summed backward objective, and
+    ``norm / sum(term norms)``. The latter is a bounded dominance share suitable for a
+    preregistered initialization gate.
+
+    ``term_names`` can exclude a stride-inactive synthetic zero (for example expansion
+    on a non-gain update). A formal pilot should instead evaluate an active gain step so
+    the default audits every effective configured term. By default the final autograd
+    traversal releases the graph and no production graph is retained.
+    """
+    if max_terms < 1:
+        raise ValueError("gradient audit max_terms must be positive")
+    if not 0 < max_gradient_share <= 1:
+        raise ValueError("max_gradient_share must lie in (0, 1]")
+    if not shared_modules:
+        raise ValueError("gradient audit requires at least one shared module")
+
+    requested = set(term_names) if term_names is not None else None
+    missing = requested.difference(terms.effective) if requested is not None else set()
+    if missing:
+        raise KeyError(f"unknown gradient-audit terms: {sorted(missing)}")
+    active = [
+        name
+        for name, value in terms.effective.items()
+        if (requested is None or name in requested)
+        and terms.weights[name] * terms.schedules[name] != 0.0
+        and value.requires_grad
+    ]
+    if not active:
+        raise ValueError("gradient audit has no active differentiable loss terms")
+    if len(active) > max_terms:
+        raise ValueError(
+            f"gradient audit has {len(active)} terms, exceeding max_terms={max_terms}"
+        )
+
+    parameters: list[torch.nn.Parameter] = []
+    parameter_index: dict[int, int] = {}
+    module_indices: dict[str, list[int]] = {}
+    for module_name, module in shared_modules.items():
+        indices: list[int] = []
+        for parameter in module.parameters():
+            if not parameter.requires_grad:
+                continue
+            identity = id(parameter)
+            if identity not in parameter_index:
+                parameter_index[identity] = len(parameters)
+                parameters.append(parameter)
+            indices.append(parameter_index[identity])
+        if not indices:
+            raise ValueError(f"gradient audit module {module_name!r} has no trainable parameters")
+        module_indices[str(module_name)] = indices
+    module_indices["shared"] = list(range(len(parameters)))
+
+    objective_grads = torch.autograd.grad(
+        terms.total,
+        parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+
+    def norm(grads, indices: list[int]) -> torch.Tensor:
+        values = [
+            grads[index].detach().float().pow(2).sum()
+            for index in indices
+            if grads[index] is not None
+        ]
+        if not values:
+            return terms.total.detach().new_zeros((), dtype=torch.float32)
+        return torch.stack(values).sum().sqrt()
+
+    def cosine(grads, reference, indices: list[int]) -> torch.Tensor:
+        products = [
+            (grads[index].detach().float() * reference[index].detach().float()).sum()
+            for index in indices
+            if grads[index] is not None and reference[index] is not None
+        ]
+        if not products:
+            return terms.total.detach().new_zeros((), dtype=torch.float32)
+        numerator = torch.stack(products).sum()
+        denominator = norm(grads, indices) * norm(reference, indices)
+        return numerator / denominator.clamp_min(1e-12)
+
+    objective_norms = {
+        module_name: norm(objective_grads, indices)
+        for module_name, indices in module_indices.items()
+    }
+    term_norms: dict[str, dict[str, torch.Tensor]] = {}
+    term_cosines: dict[str, dict[str, torch.Tensor]] = {}
+    for offset, term_name in enumerate(active):
+        retain = preserve_graph or offset < len(active) - 1
+        grads = torch.autograd.grad(
+            terms.effective[term_name],
+            parameters,
+            retain_graph=retain,
+            allow_unused=True,
+        )
+        term_norms[term_name] = {
+            module_name: norm(grads, indices)
+            for module_name, indices in module_indices.items()
+        }
+        term_cosines[term_name] = {
+            module_name: cosine(grads, objective_grads, indices)
+            for module_name, indices in module_indices.items()
+        }
+
+    denominators = {
+        module_name: torch.stack(
+            [term_norms[term_name][module_name] for term_name in active]
+        ).sum()
+        for module_name in module_indices
+    }
+    metrics: dict[str, float] = {
+        "gradient_audit/num_terms": float(len(active)),
+        "gradient_audit/share_bound": float(max_gradient_share),
+    }
+    shared_gate_shares: list[float] = []
+    for module_name in module_indices:
+        metrics[f"gradient_audit/objective_norm/{module_name}"] = float(
+            objective_norms[module_name].item()
+        )
+        for term_name in active:
+            term_norm = term_norms[term_name][module_name]
+            share = term_norm / denominators[module_name].clamp_min(1e-12)
+            share_value = float(share.item())
+            if module_name == "shared":
+                shared_gate_shares.append(share_value)
+            metrics[f"gradient_audit/effective_norm/{module_name}/{term_name}"] = float(
+                term_norm.item()
+            )
+            metrics[f"gradient_audit/cosine_total/{module_name}/{term_name}"] = float(
+                term_cosines[term_name][module_name].item()
+            )
+            metrics[f"gradient_audit/share/{module_name}/{term_name}"] = share_value
+    max_share = max(shared_gate_shares, default=0.0)
+    passed = max_share <= max_gradient_share
+    metrics["gradient_audit/max_share"] = max_share
+    metrics["gradient_audit/passed"] = float(passed)
+    result = GradientAuditResult(metrics, tuple(active), max_share, passed)
+    if fail_on_excess and not passed:
+        raise ValueError(
+            "effective loss gradient-share gate failed: "
+            f"max={max_share:.6f} > bound={max_gradient_share:.6f}"
+        )
+    return result
+
+
 def compute_branch_losses(
     model,
     batch: dict[str, torch.Tensor],
     loss_cfg: LossConfig,
     match_cfg: MatchingConfig,
     step: int = 10**9,
-) -> tuple[torch.Tensor, dict[str, float], dict[str, torch.Tensor]]:
+    return_loss_terms: bool = False,
+) -> tuple:
     """Level-1 branch losses for a batch of anchors.
 
     Returns ``(total_loss, metrics, artifacts)``. ``artifacts`` carries tensors the
@@ -145,7 +389,7 @@ def compute_branch_losses(
     tgt_z = model.encode(modes["endpoint"])  # [B, C, D]
     tgt_q = model.q_of(tgt_z)  # [B, C, S, qd]
 
-    cost = branch_mode_cost(
+    cost, cost_components = branch_mode_cost(
         pred_z=child["latent"],
         pred_q=child["q"],
         pred_action=branch.action,
@@ -158,6 +402,7 @@ def compute_branch_losses(
         tgt_valid=modes["valid"],
         cfg=match_cfg,
         q_cdist=model.q_cdist,
+        return_components=True,
     )
     branch_to_mode, mode_to_branch = match(cost, modes["valid"], match_cfg)
     tgt = gather_matched_targets(
@@ -168,6 +413,11 @@ def compute_branch_losses(
             "action_mask": modes["action_mask"],
             "horizon_idx": modes["horizon_idx"],
             "mass": modes["mass"].unsqueeze(-1),
+            **(
+                {"metric_endpoint": modes["metric_endpoint"]}
+                if "metric_endpoint" in modes
+                else {}
+            ),
         },
         branch_to_mode,
     )
@@ -175,31 +425,62 @@ def compute_branch_losses(
     target_mass = tgt["mass"].squeeze(-1)
 
     losses: dict[str, torch.Tensor] = {}
-    w = loss_cfg.weights
+    auxiliary_metrics: dict[str, float] = {}
+    world_target_z = tgt["z"].detach() if loss_cfg.detach_world_targets else tgt["z"]
+    target_scale = wl.detached_target_scale(world_target_z, matched)
 
     if loss_cfg.on("state"):
-        losses["state"] = wl.state_loss(child["latent"], tgt["z"], matched)
+        losses["state"] = wl.state_loss(
+            child["latent"], world_target_z, matched, target_scale=target_scale
+        )
     if loss_cfg.on("action"):
         losses["action"] = wl.action_loss(branch.action, tgt["actions"], tgt["action_mask"], matched)
     if loss_cfg.on("horizon"):
         losses["horizon"] = wl.horizon_loss(branch.horizon_logits, tgt["horizon_idx"], matched)
     if loss_cfg.on("bind"):
-        losses["bind"] = wl.bind_loss(
-            model, z, branch.embedding, tgt["actions"], tgt["action_mask"],
-            tgt["horizon_idx"], tgt["z"], matched,
+        bind_result = wl.bind_loss(
+            model,
+            z,
+            branch.embedding,
+            tgt["actions"],
+            tgt["action_mask"],
+            tgt["horizon_idx"],
+            world_target_z,
+            matched,
+            target_scale=target_scale,
+            bind_negative_margin=float(loss_cfg.bind_negative_margin),
+            return_metrics=True,
         )
+        losses["bind"], bind_metrics = bind_result
+        auxiliary_metrics.update(bind_metrics)
     if loss_cfg.on("coverage"):
         if loss_cfg.coverage_space == "q":
-            losses["coverage"] = sl.coverage_loss(child["q"], tgt_q, modes["valid"], model.q_cdist)
-        else:
-            # z-space coverage ablation: identical objective, different metric space.
             losses["coverage"] = sl.coverage_loss(
-                child["latent"].unsqueeze(2), tgt_z.unsqueeze(2), modes["valid"],
+                child["q"],
+                tgt_q,
+                modes["valid"],
+                model.q_cdist,
+                normalization_version=match_cfg.normalization_version,
+                space="q",
+                branch_to_mode=branch_to_mode,
+            )
+        else:
+            losses["coverage"] = sl.coverage_loss(
+                child["latent"].unsqueeze(2),
+                tgt_z.detach().unsqueeze(2),
+                modes["valid"],
                 lambda a, bb: torch.cdist(a.squeeze(2), bb.squeeze(2)),
+                normalization_version=match_cfg.normalization_version,
+                space="z",
+                branch_to_mode=branch_to_mode,
             )
     if loss_cfg.on("redundancy"):
         losses["redundancy"] = sl.redundancy_loss(
-            child["q"], branch.keep, model.q_cdist, loss_cfg.redundancy_temperature
+            child["q"],
+            branch.keep,
+            model.q_cdist,
+            loss_cfg.redundancy_temperature,
+            matched=matched,
         )
     if loss_cfg.on("keep"):
         losses["keep"] = sl.keep_loss(branch.keep_logit, matched, loss_cfg.keep_balance)
@@ -207,12 +488,24 @@ def compute_branch_losses(
         losses["mass"] = sl.mass_loss(branch.mass_logit, target_mass, matched)
     if loss_cfg.on("uncertainty"):
         losses["uncertainty"] = wl.uncertainty_loss(
-            branch.uncertainty, child["latent"], tgt["z"], matched
+            branch.uncertainty,
+            child["latent"],
+            world_target_z,
+            matched,
+            target_scale=target_scale,
+            balance_groups=True,
         )
     if loss_cfg.on("recursive"):
-        losses["recursive"] = wl.recursive_loss(
-            model, child["latent"], tgt["z"], matched, max_nodes=int(loss_cfg.recursive_batch)
+        recursive_result = wl.recursive_loss(
+            model,
+            child["latent"],
+            world_target_z,
+            matched,
+            max_nodes=int(loss_cfg.recursive_batch),
+            return_metrics=True,
         )
+        losses["recursive"], recursive_metrics = recursive_result
+        auxiliary_metrics.update(recursive_metrics)
     if loss_cfg.on("reconstruction") and model.decoder is not None:
         losses["reconstruction"] = wl.reconstruction_loss(model.decoder, z, obs)
 
@@ -221,8 +514,22 @@ def compute_branch_losses(
         n_ctrl = min(int(loss_cfg.control_batch), z.shape[0])
         sub = torch.randperm(z.shape[0], device=z.device)[:n_ctrl]
         q_anchor = model.q_of(z[sub])
-        endpoints = batch["fut_endpoint"][sub]
+        endpoint_key = str(loss_cfg.control_endpoint_key)
+        used_fallback = False
+        if endpoint_key not in batch:
+            if not loss_cfg.control_allow_endpoint_fallback or "fut_endpoint" not in batch:
+                raise KeyError(
+                    f"control endpoint {endpoint_key!r} is absent and fallback is disabled"
+                )
+            endpoint_key = "fut_endpoint"
+            used_fallback = True
+        endpoints = batch[endpoint_key][sub]
         valid = batch["fut_valid"][sub]
+        if loss_cfg.control_require_single_scale and q_anchor.shape[-2] != 1:
+            raise ValueError(
+                "formal v2 control requires exactly one q scale; got "
+                f"{q_anchor.shape[-2]}"
+            )
         if loss_cfg.control_objective == "contrastive":
             loss_q, control_metrics = cl.future_set_contrastive_loss(
                 q_anchor, endpoints, valid, model.q_distance, loss_cfg.contrastive_temperature
@@ -233,18 +540,32 @@ def compute_branch_losses(
             )
         else:
             loss_q, control_metrics = cl.future_set_distance_loss(
-                q_anchor, endpoints, valid, model.q_distance, loss_cfg.future_scale
+                q_anchor,
+                endpoints,
+                valid,
+                model.q_distance,
+                loss_cfg.future_scale,
+                target_transform=loss_cfg.control_target_transform,
+                metric_weight=float(loss_cfg.control_metric_weight),
+                rank_weight=float(loss_cfg.control_rank_weight),
+                rank_temperature=float(loss_cfg.control_rank_temperature),
             )
         losses["control"] = loss_q
+        control_metrics["control/endpoint_fallback"] = float(used_fallback)
+        control_metrics["control/endpoint_dimension"] = float(endpoints.shape[-1])
+        control_metrics["control/valid_endpoints_per_anchor"] = float(
+            valid.float().sum(-1).mean().item()
+        )
 
-    total = sum(
-        getattr(w, name) * loss_cfg.scale(name, step) * value for name, value in losses.items()
-    )
+    terms = assemble_loss_terms(losses, loss_cfg, step)
+    total = terms.total
 
-    metrics = {f"train/loss_{k}": float(v.detach().item()) for k, v in losses.items()}
+    metrics = loss_term_metrics(terms)
     metrics["train/redundancy_warmup_scale"] = loss_cfg.scale("redundancy", step)
-    metrics["train/loss_total"] = float(total.detach().item())
+    metrics["world/latent_target_scale"] = float(target_scale.detach().item())
     metrics.update(control_metrics)
+    metrics.update(auxiliary_metrics)
+    metrics.update(assigned_cost_metrics(cost_components, branch_to_mode, matched, match_cfg))
     metrics.update(
         wl.prediction_metrics(
             child["latent"].detach(), tgt["z"].detach(), branch.action.detach(),
@@ -252,6 +573,24 @@ def compute_branch_losses(
             tgt["horizon_idx"], matched, model.horizon_selector.horizon_values,
         )
     )
+    if (
+        model.decoder is not None
+        and "metric_endpoint" in tgt
+        and "task_metric_dims" in batch
+    ):
+        dims = batch["task_metric_dims"][0].long()
+        if not bool((batch["task_metric_dims"] == dims.unsqueeze(0)).all()):
+            raise ValueError("task_metric_dims must be identical within a batch")
+        with torch.no_grad():
+            decoded_child = model.decoder(child["latent"].detach())
+            predicted_metric = decoded_child.index_select(-1, dims)
+            endpoint_rms = (
+                predicted_metric.float() - tgt["metric_endpoint"].detach().float()
+            ).square().mean(-1).sqrt()
+            denom = matched.sum().clamp_min(1.0)
+            metrics["model/assigned_task_endpoint_rms"] = float(
+                ((endpoint_rms * matched).sum() / denom).item()
+            )
     metrics.update(
         sl.support_metrics(
             keep=branch.keep.detach(),
@@ -264,10 +603,33 @@ def compute_branch_losses(
             pred_q=child["q"].detach(),
             pred_z=child["latent"].detach(),
             q_cdist=model.q_cdist,
+            mass_enabled=loss_cfg.on("mass"),
         )
     )
-    metrics["data/num_modes"] = float(batch["num_modes"].float().mean().item())
-    metrics["data/future_diversity"] = float(batch["future_diversity"].float().mean().item())
+    for key in (
+        "num_modes",
+        "future_diversity",
+        "num_retrieved",
+        "retrieval_num_candidates",
+        "retrieval_num_valid",
+        "retrieval_mean_distance",
+        "retrieval_fallback",
+        "retrieval_truncated",
+        "retrieval_query_saturated",
+        "modes_raw",
+        "modes_retained",
+        "modes_truncated",
+    ):
+        if key in batch:
+            metrics[f"data/{key}"] = float(batch[key].float().mean().item())
+    if "modes_truncated" in batch:
+        metrics["data/mode_truncation_fraction"] = float(
+            (batch["modes_truncated"] > 0).float().mean().item()
+        )
+    if "num_modes" in batch:
+        metrics["data/multimode_anchor_fraction"] = float(
+            (batch["num_modes"] > 1).float().mean().item()
+        )
 
     if model.decoder is not None and "reconstruction" in losses:
         metrics["model/state_reconstruction_mse"] = metrics.pop("train/loss_reconstruction", 0.0)
@@ -286,6 +648,8 @@ def compute_branch_losses(
         "num_modes": batch["num_modes"],
         "future_diversity": batch["future_diversity"],
     }
+    if return_loss_terms:
+        return total, metrics, artifacts, terms
     return total, metrics, artifacts
 
 

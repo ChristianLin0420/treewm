@@ -35,6 +35,20 @@ def build_dataloader(
     sampler: DistributedSampler | None = None
     if is_distributed():
         sampler = DistributedSampler(dataset, shuffle=shuffle, seed=seed, drop_last=drop_last)
+    elif shuffle:
+        # Use the same epoch-addressable sampler for single-GPU training.  PyTorch's
+        # RandomSampler materialises its permutation from the loader generator once and
+        # exposes no cursor, so a checkpoint in the middle of an epoch cannot recreate
+        # the remaining order.  A one-replica DistributedSampler has identical shuffled
+        # without-replacement semantics and lets InfiniteLoader replay an exact epoch.
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=1,
+            rank=0,
+            shuffle=True,
+            seed=seed,
+            drop_last=drop_last,
+        )
     if generator is None:
         generator = torch.Generator()
         generator.manual_seed(seed)
@@ -61,6 +75,10 @@ class InfiniteLoader:
         self.sampler = sampler
         self.epoch = start_epoch
         self._iter: Iterator | None = None
+        self.batches_yielded_in_epoch = 0
+        self._epoch_generator_state: torch.Tensor | None = None
+        self._resume_batches = 0
+        self._resume_generator_state: torch.Tensor | None = None
 
     def __iter__(self) -> "InfiniteLoader":
         return self
@@ -69,22 +87,56 @@ class InfiniteLoader:
         if self._iter is None:
             self._new_epoch()
         try:
-            return next(self._iter)
+            batch = next(self._iter)
         except StopIteration:
             self.epoch += 1
+            self.batches_yielded_in_epoch = 0
             self._new_epoch()
-            return next(self._iter)
+            batch = next(self._iter)
+        self.batches_yielded_in_epoch += 1
+        return batch
 
     def _new_epoch(self) -> None:
         if self.sampler is not None:
             self.sampler.set_epoch(self.epoch)
+        generator = self.loader.generator
+        if generator is not None:
+            if self._resume_generator_state is not None:
+                generator.set_state(self._resume_generator_state)
+                self._resume_generator_state = None
+            self._epoch_generator_state = generator.get_state().clone()
         self._iter = iter(self.loader)
+        if self._resume_batches:
+            to_skip = self._resume_batches
+            self._resume_batches = 0
+            for _ in range(to_skip):
+                try:
+                    next(self._iter)
+                except StopIteration as exc:
+                    raise ValueError(
+                        f"loader checkpoint offset {to_skip} exceeds epoch length"
+                    ) from exc
+            self.batches_yielded_in_epoch = to_skip
 
     def state_dict(self) -> dict[str, Any]:
-        return {"epoch": self.epoch}
+        return {
+            "epoch": self.epoch,
+            "batches_yielded_in_epoch": self.batches_yielded_in_epoch,
+            "epoch_generator_state": (
+                self._epoch_generator_state.clone()
+                if self._epoch_generator_state is not None
+                else None
+            ),
+        }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self.epoch = int(state.get("epoch", 0))
+        self.batches_yielded_in_epoch = 0
+        self._resume_batches = int(state.get("batches_yielded_in_epoch", 0))
+        generator_state = state.get("epoch_generator_state")
+        self._resume_generator_state = (
+            generator_state.detach().cpu().clone() if torch.is_tensor(generator_state) else None
+        )
         self._iter = None
 
 

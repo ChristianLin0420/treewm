@@ -55,6 +55,9 @@ def main(cfg: DictConfig) -> None:
 
     budgets = [int(b) for b in (cfg.get("budgets") or run_cfg.eval.budgets)]
     base_tree_cfg = cfg_utils.tree_config(run_cfg)
+    from treewm.evaluation.domains import get_domain
+
+    domain = get_domain(run_cfg.env.name)
     print(f"[sweep] arm={run_cfg.arm} budgets={budgets}")
 
     results = sweep_budgets(
@@ -62,6 +65,7 @@ def main(cfg: DictConfig) -> None:
         cfg_utils.planner_config(run_cfg), arm=str(run_cfg.arm),
         episodes_per_task=int(run_cfg.eval.episodes_per_task),
         max_steps=int(run_cfg.planner.max_env_steps), seed=int(run_cfg.eval.seed),
+        domain=domain,
     )
 
     run_dir = Path(checkpoint).parent.parent

@@ -1,0 +1,68 @@
+# @package _global_
+#
+# Scale-coherent TreeWM objective. Dataset-specific retrieval, displacement, and
+# clustering thresholds are supplied by the immutable train-only calibration contract;
+# the negative sentinels below make an uncalibrated invocation fail closed.
+
+objective_version: treewm_v2_rms_rank_v1
+
+train:
+  separate_gain_grad_clip: true
+  world_grad_clip: 1.0
+  gain_grad_clip: 1.0
+
+model:
+  # The old two q heads shared one mixed-horizon target and were non-identifiable.
+  scales: [[mixed, 32, 1.0]]
+  # One recursive operator is reused at inference. Do not condition it on depth rows
+  # that are absent from the supervised training distribution.
+  use_depth_embedding: false
+
+tree:
+  # Standard BCE makes KEEP a calibrated probability; it now controls admission.
+  keep_threshold: 0.5
+
+future_sets:
+  metric_mode: rms_v2
+  retrieval_radius: -1.0
+  displacement_threshold: -1.0
+  cluster_threshold: -1.0
+  max_modes: 4
+
+matching:
+  normalization_version: rms_v2
+  num_horizons: 5
+
+# Novelty gain does not consume the historical latent-dataset retrieval index.
+retrieval:
+  enabled: false
+  num_keys: 0
+
+losses:
+  control_objective: future_set
+  control_target_transform: rms_tanh
+  control_endpoint_key: fut_metric_endpoint
+  control_allow_endpoint_fallback: false
+  control_require_single_scale: true
+  control_metric_weight: 1.0
+  control_rank_weight: 1.0
+  control_rank_temperature: 0.2
+  detach_world_targets: true
+  bind_negative_margin: 0.1
+  gain_target: novelty
+  gain_set_context: true
+  gain_rank_weight: 1.0
+  gain_calibration_weight: 0.1
+  # These two heads are not consumed by the formal learned frontier scorer. Training
+  # them would add auxiliary gradients (mass) or dead parameters (context-free prior)
+  # without changing inference, so v2 freezes both explicitly.
+  gain_branch_prior_weight: 0.0
+  keep_balance: false
+  weights:
+    mass: 0.0
+  enabled:
+    mass: false
+  # The v2 redundancy gate is the detached matched support, so it can remain active:
+  # lowering KEEP can no longer cheat this term.
+  decay:
+    redundancy: 0

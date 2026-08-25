@@ -22,6 +22,7 @@ reshuffle which episodes are run.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -60,3 +61,17 @@ class RngStreams:
         gen = make_generator(self.seed, stream, self.device)
         setattr(self, stream, gen)
         return gen
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        """Return portable states for every explicit non-global stream."""
+        return {
+            name: getattr(self, name).get_state().detach().cpu().clone()
+            for name in ("planner", "eval", "viz")
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore streams without changing their configured device."""
+        for name in ("planner", "eval", "viz"):
+            value = state.get(name)
+            if value is not None:
+                getattr(self, name).set_state(value.detach().cpu())

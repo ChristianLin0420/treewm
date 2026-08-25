@@ -1,0 +1,14 @@
+# @package env
+short_name: puzzle-4x4-100m
+# OGBench registers the base environment, not a `*-100m` environment.  The source name
+# below identifies the sharded dataset independently from the simulator identity.
+name: puzzle-4x4-play-v0
+source_name: puzzle-4x4-play-100m-v0
+dataset_kind: sharded_100m_full
+dataset_dir: ${oc.env:TREEWM_DATA_ROOT,/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task}/100m/puzzle-4x4-play-100m-v0
+obs_dim: 83
+action_dim: 5
+xy_dims: [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52, 55, 56, 59, 60, 63, 64, 67, 68, 71, 72, 75, 76, 79, 80]
+max_episode_steps: 500
+relative_endpoints: false
+expected_shards: 100

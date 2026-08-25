@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
+from torch.utils.data import Dataset
 
 from treewm.data.future_sets import FutureSetBuilder, FutureSetConfig
 from treewm.data.ogbench_dataset import Normalizer, TrajectoryIndex
+from treewm.data.samplers import InfiniteLoader, build_dataloader
 
 
 def make_synthetic(num_traj: int = 20, length: int = 100, obs_dim: int = 2, act_dim: int = 2, seed: int = 0):
@@ -35,6 +38,34 @@ def test_trajectory_index_handles_missing_final_terminal():
     idx = TrajectoryIndex.from_terminals(data["terminals"])
     assert len(idx.traj_id) == 30
     assert idx.num_trajectories == 3
+
+
+def test_infinite_loader_resumes_at_exact_batch_cursor():
+    class IndexDataset(Dataset):
+        def __len__(self):
+            return 23
+
+        def __getitem__(self, index):
+            return {"index": torch.tensor(index)}
+
+    def make_loader():
+        loader, sampler = build_dataloader(
+            IndexDataset(), batch_size=3, shuffle=True, num_workers=0, seed=17
+        )
+        return InfiniteLoader(loader, sampler)
+
+    uninterrupted = make_loader()
+    for _ in range(5):
+        next(uninterrupted)
+    state = uninterrupted.state_dict()
+    expected = [next(uninterrupted)["index"].clone() for _ in range(5)]
+
+    resumed = make_loader()
+    resumed.load_state_dict(state)
+    actual = [next(resumed)["index"].clone() for _ in range(5)]
+    assert state["batches_yielded_in_epoch"] == 5
+    for left, right in zip(expected, actual):
+        torch.testing.assert_close(left, right)
 
 
 def test_chunk_sampling_shapes_and_horizon_masking():
@@ -132,3 +163,26 @@ def test_rare_modes_survive_truncation():
     labels, reps, mass = builder._cluster(endpoints, rng)
     assert len(reps) == 2, "should truncate to max_modes"
     assert np.isclose(mass.sum(), 1.0, atol=1e-5)
+
+
+def test_absolute_endpoints_preserve_discrete_onehot_states():
+    """Scene/puzzle must not translate a neighbour's categorical displacement."""
+    obs = np.array(
+        [[1, 0], [1, 0], [0, 1], [1, 0], [1, 0]], dtype=np.float32
+    )
+    act = np.zeros((5, 1), dtype=np.float32)
+    index = TrajectoryIndex.from_terminals(np.array([0, 0, 0, 0, 1], dtype=bool))
+    cfg = FutureSetConfig(
+        num_neighbors=1,
+        horizons=(1,),
+        h_max=1,
+        include_self=False,
+        relative_endpoints=False,
+        horizon_rule="fixed",
+        fixed_horizon=1,
+    )
+    builder = FutureSetBuilder(obs, act, index, cfg, xy_dims=(0, 1))
+    builder._neighbors = lambda anchor: np.array([2], dtype=np.int64)
+    item = builder.build(0)
+    assert np.array_equal(item["fut_endpoint"][0], np.array([1, 0], dtype=np.float32))
+    assert set(item["fut_endpoint"][0].tolist()) <= {0.0, 1.0}

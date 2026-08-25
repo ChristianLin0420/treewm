@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -59,6 +60,28 @@ def is_distributed() -> bool:
 def barrier() -> None:
     if is_distributed():
         dist.barrier()
+
+
+def any_rank_true(value: bool, device: torch.device | None = None) -> bool:
+    """Collectively report whether any rank requested an action."""
+    if not is_distributed():
+        return bool(value)
+    tensor = torch.tensor(
+        int(bool(value)),
+        dtype=torch.int32,
+        device=device if device is not None else _default_device(),
+    )
+    dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+    return bool(tensor.item())
+
+
+def gather_rank_objects(value: Any, destination: int = 0) -> list[Any] | None:
+    """Gather a small Python state object on ``destination`` only."""
+    if not is_distributed():
+        return [value]
+    gathered = [None] * dist.get_world_size() if dist.get_rank() == destination else None
+    dist.gather_object(value, object_gather_list=gathered, dst=destination)
+    return gathered
 
 
 def all_reduce_mean(value: torch.Tensor | float, device: torch.device | None = None) -> float:

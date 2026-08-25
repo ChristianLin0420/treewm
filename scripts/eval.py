@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from treewm.data.ogbench_dataset import Normalizer, load_ogbench
 from treewm.evaluation.rollout import evaluate
+from treewm.evaluation.domains import get_domain
 from treewm.evaluation.tasks import build_tasks, describe_tasks
 from treewm.models.baselines import build_model, tree_config_for
 from treewm.planning.goal_planner import GoalPlanner
@@ -35,6 +36,10 @@ def load_run(checkpoint: str, device: torch.device, overrides: DictConfig | None
         cfg = OmegaConf.merge(cfg, overrides)
 
     model = build_model(cfg.arm, cfg_utils.model_config(cfg), k_max=int(cfg.model.flatk_max)).to(device)
+    # V2 adds set-attention parameters lazily for v1 checkpoint compatibility. Create
+    # the architecture recorded in the checkpoint before loading its state dict; every
+    # standalone analysis imports this helper, so the rule is centralised here.
+    model.gain_head.set_set_aware(bool(cfg.losses.get("gain_set_context", False)))
     model.load_state_dict(payload["model"])
     model.eval()
 
@@ -68,14 +73,17 @@ def main(cfg: DictConfig) -> None:
         float(run_cfg.eval.hard_percentile), int(run_cfg.eval.seed),
     )
     tree_cfg = tree_config_for(run_cfg.arm, cfg_utils.tree_config(run_cfg), model)
-    planner = GoalPlanner(model, normalizer, tree_cfg, cfg_utils.planner_config(run_cfg), device)
+    domain = get_domain(run_cfg.env.name)
+    planner = GoalPlanner(
+        model, normalizer, tree_cfg, cfg_utils.planner_config(run_cfg), device, domain=domain
+    )
 
     print(f"[eval] arm={run_cfg.arm} budget={tree_cfg.node_budget} scorer={tree_cfg.scorer}")
     print(f"[eval] tasks ({run_cfg.eval.task_split}):\n{describe_tasks(tasks)}")
 
     metrics = evaluate(
         env, planner, tasks, int(run_cfg.eval.episodes_per_task),
-        int(run_cfg.planner.max_env_steps), int(run_cfg.eval.seed),
+        int(run_cfg.planner.max_env_steps), int(run_cfg.eval.seed), domain=domain,
     )
     for key in sorted(metrics):
         print(f"  {key:44s} {metrics[key]:.4f}")

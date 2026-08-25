@@ -35,12 +35,18 @@ class TreeConfig:
     depth_pools: int = 3  # D2 depth strata
     # Explicit user override; when set it wins over the arm's default scorer.
     scorer_override: str | None = None  # lambda for the novelty_q_penalized scorer
+    # ``None`` preserves the historical admit-all behaviour.  V2 inference pins 0.5:
+    # children below threshold are pruned, with a per-parent top-1 fallback so every
+    # valid expansion can still make progress.
+    keep_threshold: float | None = None
 
     def __post_init__(self) -> None:
         assert self.node_budget >= 1
         assert self.expansion_batch_size >= 1
         assert self.branch_factor >= 1
         assert self.context_pooling in {"none", "mean", "max"}
+        if self.keep_threshold is not None and not 0.0 <= self.keep_threshold <= 1.0:
+            raise ValueError("keep_threshold must be in [0, 1] or None")
 
 
 class BranchGenerator(Protocol):
@@ -159,6 +165,7 @@ def generate_tree(
                         "depth": tree.depth.clone(),
                         "keep": tree.keep_score.float().detach(),
                         "sigma": tree.uncertainty.float().detach(),
+                        "valid": tree.valid.clone(),
                         "frontier": frontier.clone(),
                         "target": target.detach(),
                     }
@@ -200,7 +207,13 @@ def generate_tree(
             )
 
         tree.add_children(
-            sel_idx, child, cfg.node_budget, step, child_valid=child_valid, parent_valid=sel_valid
+            sel_idx,
+            child,
+            cfg.node_budget,
+            step,
+            child_valid=child_valid,
+            parent_valid=sel_valid,
+            keep_threshold=cfg.keep_threshold,
         )
 
         if track_novelty:

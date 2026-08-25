@@ -52,8 +52,13 @@ def _as_byte_cpu(t: Any) -> Any:
     return t
 
 
-def set_rng_state(state: dict[str, Any]) -> None:
-    """Restore RNG streams captured by :func:`get_rng_state`."""
+def set_rng_state(state: dict[str, Any], *, strict_cuda: bool = False) -> None:
+    """Restore RNG streams captured by :func:`get_rng_state`.
+
+    ``strict_cuda`` is used by the formal trainer: accepting a changed visible-device
+    topology there would make an allegedly exact resume silently diverge. Interactive
+    checkpoint consumers retain the historical best-effort behaviour by default.
+    """
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(_as_byte_cpu(state["torch"]))
@@ -70,5 +75,7 @@ def set_rng_state(state: dict[str, Any]) -> None:
             else:
                 torch.cuda.set_rng_state_all(saved)
         except (RuntimeError, ValueError, TypeError) as exc:
+            if strict_cuda:
+                raise RuntimeError("CUDA RNG state could not be restored exactly") from exc
             # Non-fatal: the run is still seeded, only bit-exact resume is lost.
             print(f"[treewm] CUDA RNG state not restored ({exc}); continuing seeded")

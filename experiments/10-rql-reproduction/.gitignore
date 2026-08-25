@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+data/
+output/
+state/
+*.part
+.locks/
+*.lock

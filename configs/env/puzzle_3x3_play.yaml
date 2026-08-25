@@ -1,0 +1,11 @@
+# @package env
+short_name: puzzle-3x3
+name: puzzle-3x3-play-v0
+source_name: puzzle-3x3-play-v0
+dataset_kind: standard
+dataset_dir: ${oc.env:TREEWM_DATA_ROOT,/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task}/standard
+obs_dim: 55
+action_dim: 5
+xy_dims: [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52]
+max_episode_steps: 500
+relative_endpoints: false
