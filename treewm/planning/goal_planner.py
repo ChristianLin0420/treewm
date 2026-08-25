@@ -1,11 +1,10 @@
 """Goal-conditioned planning over an already-generated tree.
 
 Deliberately simple (spec section 16). The world model builds the tree without ever
-seeing the goal; the goal enters only here, to score already-generated nodes:
-
-    J(n) = d_z(z_n, z_g)        n* = argmin_n J(n)
-
-then the path from root to ``n*`` is traced and its first action chunk executed, after
+seeing the goal; the goal enters only here, to score already-generated nodes. The
+historical planner uses L2 distance between normalised decoded observations, while the
+``domain_raw`` metric uses each domain's task coordinates and units. The path from the
+best node back to the root is then traced and its first action chunk executed, after
 which the environment is observed again and the tree is rebuilt. No CEM, no MCTS -- the
 claim under test is about how prediction compute is *allocated*, and a strong search
 procedure on top would confound it (section 28).
@@ -22,6 +21,107 @@ from treewm.tree.expansion import TreeConfig
 from treewm.tree.frontier import GOAL_AWARE_SCORERS
 
 
+_ONEHOT_TIEBREAK_SCALE = 1.0e-3
+
+
+def decoded_goal_scores(
+    node_obs_n: torch.Tensor,
+    goal_obs_n: torch.Tensor,
+    *,
+    decoded_metric: str,
+    goal_dims: torch.Tensor | None = None,
+    goal_metric: str = "l2",
+    subgoals: tuple[tuple[int, int], ...] = (),
+    obs_mean: torch.Tensor | None = None,
+    obs_std: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Score batched decoded nodes against batched goals.
+
+    Args:
+        node_obs_n: Normalised decoded observations with shape ``[B, N, D]``.
+        goal_obs_n: Normalised goal observations with shape ``[B, D]``.
+        decoded_metric: ``normalized_l2`` preserves the historical planner exactly;
+            ``domain_raw`` first restores raw observation units and then applies the
+            domain's metric.
+        goal_dims: Task-coordinate indices. ``None`` means all observation dimensions.
+        goal_metric: Domain metric, either ``l2`` or ``onehot``.
+        subgoals: Slices into the selected task coordinates, one per categorical cell.
+        obs_mean: Per-coordinate observation mean, required by ``domain_raw``.
+        obs_std: Per-coordinate observation standard deviation, required by
+            ``domain_raw``.
+
+    The one-hot score is lexicographic: its integer part is the exact Hamming distance
+    used by :class:`treewm.evaluation.domains.Domain`, and a bounded value below
+    ``1e-3`` breaks ties using decoded confidence. Consequently no confidence difference
+    can make an extra categorical mismatch look preferable.
+    """
+    if node_obs_n.ndim != 3:
+        raise ValueError(f"node_obs_n must have shape [B, N, D], got {node_obs_n.shape}")
+    if goal_obs_n.ndim != 2:
+        raise ValueError(f"goal_obs_n must have shape [B, D], got {goal_obs_n.shape}")
+    if node_obs_n.shape[0] != goal_obs_n.shape[0]:
+        raise ValueError("node and goal batch sizes differ")
+    if node_obs_n.shape[-1] != goal_obs_n.shape[-1]:
+        raise ValueError("node and goal observation dimensions differ")
+
+    if decoded_metric == "normalized_l2":
+        node_metric = node_obs_n
+        goal_metric_obs = goal_obs_n
+    elif decoded_metric == "domain_raw":
+        if obs_mean is None or obs_std is None:
+            raise ValueError("domain_raw decoded scoring requires obs_mean and obs_std")
+        # Planner evaluation may run under bf16 autocast. Raw distances and the small
+        # categorical tie-break need fp32 precision, but remain on the model's device.
+        node_metric = node_obs_n.float()
+        goal_metric_obs = goal_obs_n.float()
+        mean = obs_mean.to(device=node_obs_n.device, dtype=torch.float32)
+        std = obs_std.to(device=node_obs_n.device, dtype=torch.float32)
+        if (
+            mean.ndim != 1
+            or std.ndim != 1
+            or mean.shape[0] != node_obs_n.shape[-1]
+            or std.shape[0] != node_obs_n.shape[-1]
+        ):
+            raise ValueError("normalizer statistics must be vectors of observation dimension")
+        node_metric = node_metric * std + mean
+        goal_metric_obs = goal_metric_obs * std + mean
+    else:
+        raise ValueError(f"unknown decoded_metric {decoded_metric!r}")
+
+    if goal_dims is not None:
+        dims = goal_dims.to(device=node_obs_n.device, dtype=torch.long)
+        node_metric = node_metric.index_select(-1, dims)
+        goal_metric_obs = goal_metric_obs.index_select(-1, dims)
+    goal_metric_obs = goal_metric_obs.unsqueeze(1)
+
+    # The legacy mode intentionally ignores categorical domain semantics. This is the
+    # exact normalised L2 behaviour used by historical checkpoints and evaluations.
+    if decoded_metric == "normalized_l2" or goal_metric == "l2":
+        return torch.linalg.vector_norm(node_metric - goal_metric_obs, dim=-1)
+
+    if goal_metric != "onehot":
+        raise ValueError(f"unknown domain goal_metric {goal_metric!r}")
+    if not subgoals:
+        raise ValueError("onehot decoded scoring requires non-empty domain subgoals")
+
+    leading = node_metric.shape[:-1]
+    hamming = torch.zeros(leading, dtype=node_metric.dtype, device=node_metric.device)
+    soft_error = torch.zeros_like(hamming)
+    for lo, hi in subgoals:
+        if not (0 <= lo < hi <= node_metric.shape[-1]):
+            raise ValueError(f"invalid onehot subgoal slice {(lo, hi)}")
+        node_block = node_metric[..., lo:hi]
+        goal_block = goal_metric_obs[..., lo:hi]
+        hamming = hamming + (node_block.argmax(-1) != goal_block.argmax(-1)).to(hamming.dtype)
+        soft_error = soft_error + (node_block - goal_block).square().mean(-1)
+
+    # Map arbitrary decoder errors into [0, 1), then reserve less than 1e-3 for the
+    # tie-break. A one-cell Hamming advantage therefore always dominates confidence.
+    soft_error = soft_error / float(len(subgoals))
+    bounded_tiebreak = soft_error / (1.0 + soft_error)
+    return hamming + _ONEHOT_TIEBREAK_SCALE * bounded_tiebreak
+
+
 @dataclass
 class PlannerConfig:
     # How a generated node is scored against the goal.
@@ -32,6 +132,10 @@ class PlannerConfig:
     # prediction, never for metric goal matching, so distances in it do not track
     # spatial proximity. The decoder is part of the model, so this is not privileged.
     score_space: str = "decoded"
+    # Metric used when score_space=decoded.
+    #   normalized_l2 -- historical L2 over normalised task coordinates
+    #   domain_raw    -- domain metric over denormalised task coordinates
+    decoded_metric: str = "normalized_l2"
     # Track F -- how a node's goal score is formed.
     #   endpoint  F0: decoded endpoint distance only
     #   path_aware F2: endpoint distance + lambda_c * cumulative path cost
@@ -78,7 +182,15 @@ class GoalPlanner:
         self.domain = domain
         self.goal_dims = (
             torch.tensor(domain.goal_dims, dtype=torch.long, device=self.device)
-            if domain is not None and len(domain.goal_dims) < model.cfg.obs_dim else None
+            if domain is not None else None
+        )
+        self.obs_mean = (
+            torch.as_tensor(normalizer.obs_mean, dtype=torch.float32, device=self.device)
+            if normalizer is not None else None
+        )
+        self.obs_std = (
+            torch.as_tensor(normalizer.obs_std, dtype=torch.float32, device=self.device)
+            if normalizer is not None else None
         )
         # Own stream: a diagnostic render must not change what the planner does.
         from treewm.utils.rng import make_generator
@@ -125,16 +237,22 @@ class GoalPlanner:
         )
 
         if self.cfg.score_space == "decoded" and model.decoder is not None:
-            # Compare in observation space, where the goal metric is meaningful.
+            # Compare in observation space, optionally in the domain's raw units and
+            # categorical semantics. Goal dimensions exclude unconstrained state such as
+            # puzzle proprioception and velocities.
             node_obs = model.decoder(tree.latent)  # [1, N, obs_dim]
-            if self.goal_dims is not None:
-                # Score only the dims the task actually constrains. Using the full vector
-                # would let proprioception and velocities -- 19 of puzzle's 55 dims, none
-                # of them part of the goal -- dominate the distance to the target board.
-                d = self.goal_dims
-                score = torch.linalg.vector_norm(node_obs[..., d] - goal_n[..., d].unsqueeze(1), dim=-1)
-            else:
-                score = torch.linalg.vector_norm(node_obs - goal_n.unsqueeze(1), dim=-1)
+            if self.cfg.decoded_metric == "domain_raw" and self.domain is None:
+                raise ValueError("planner.decoded_metric=domain_raw requires a Domain adapter")
+            score = decoded_goal_scores(
+                node_obs,
+                goal_n,
+                decoded_metric=self.cfg.decoded_metric,
+                goal_dims=self.goal_dims,
+                goal_metric=self.domain.goal_metric if self.domain is not None else "l2",
+                subgoals=self.domain.subgoals if self.domain is not None else (),
+                obs_mean=self.obs_mean,
+                obs_std=self.obs_std,
+            )
         else:
             score = torch.linalg.vector_norm(tree.latent - z_goal.unsqueeze(1), dim=-1)  # [1, N]
 

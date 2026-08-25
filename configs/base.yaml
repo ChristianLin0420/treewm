@@ -202,6 +202,8 @@ losses:
 planner:
   # decoded | latent -- decoded nearly doubles success (see README, exp 3 D3)
   score_space: decoded
+  # normalized_l2 preserves historical runs; domain_raw uses raw task units/semantics.
+  decoded_metric: normalized_l2  # normalized_l2 | domain_raw
   score_mode: endpoint      # endpoint | path_aware | ancestor   (Track F)
   path_cost_weight: 0.02
   ancestor_weight: 0.5

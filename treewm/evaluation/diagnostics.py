@@ -39,7 +39,8 @@ def q_vs_z_retrieval(model, batch: dict[str, torch.Tensor], k: int = 5) -> dict[
     """
     z = model.encode(batch["obs"])
     q = model.q_of(z)
-    endpoints, valid = batch["fut_endpoint"], batch["fut_valid"]
+    rand = model.z_control_projection(z)
+    valid = batch["fut_valid"]
 
     def q_dist(_: torch.Tensor) -> torch.Tensor:
         b = q.shape[0]
@@ -47,20 +48,49 @@ def q_vs_z_retrieval(model, batch: dict[str, torch.Tensor], k: int = 5) -> dict[
             q.unsqueeze(1).expand(b, b, *q.shape[1:]), q.unsqueeze(0).expand(b, b, *q.shape[1:])
         )
 
-    prec_q = retrieval_precision(q, endpoints, valid, q_dist, k)
-    prec_z = retrieval_precision(z, endpoints, valid, lambda e: torch.cdist(e, e), k)
-    rand = model.z_control_projection(z)
-    prec_rand = retrieval_precision(rand, endpoints, valid, lambda e: torch.cdist(e, e), k)
+    def scores(endpoints: torch.Tensor) -> tuple[float, float, float]:
+        return (
+            retrieval_precision(q, endpoints, valid, q_dist, k),
+            retrieval_precision(z, endpoints, valid, lambda e: torch.cdist(e, e), k),
+            retrieval_precision(rand, endpoints, valid, lambda e: torch.cdist(e, e), k),
+        )
 
-    return {
+    # Formal q supervision is defined on the task metric coordinates. Using the full
+    # observation endpoint here silently changed the premise being measured, especially
+    # for AntMaze nuisance dimensions and mixed manipulation observations.
+    primary_endpoints = (
+        batch["fut_metric_endpoint"]
+        if "fut_metric_endpoint" in batch
+        else batch["fut_endpoint"]
+    )
+    prec_q, prec_z, prec_rand = scores(primary_endpoints)
+
+    out = {
         "control/local_future_set_retrieval_precision": prec_q,
         "control/retrieval_precision_q": prec_q,
         "control/retrieval_precision_z": prec_z,
         "control/retrieval_precision_random_proj": prec_rand,
+        "control/retrieval_uses_task_metric_endpoint": float(
+            "fut_metric_endpoint" in batch
+        ),
         # The two quantities that decide the premise. Both must be positive.
         "control/q_advantage_over_z": prec_q - prec_z,
         "control/q_advantage_over_random_proj": prec_q - prec_rand,
     }
+    if "fut_metric_endpoint" in batch and "fut_endpoint" in batch:
+        full_q, full_z, full_rand = scores(batch["fut_endpoint"])
+        # Retain the historical full-state view only as an explicitly named secondary
+        # diagnostic. It must not masquerade as the formal task-metric premise.
+        out.update(
+            {
+                "control/full_state_retrieval_precision_q": full_q,
+                "control/full_state_retrieval_precision_z": full_z,
+                "control/full_state_retrieval_precision_random_proj": full_rand,
+                "control/full_state_q_advantage_over_z": full_q - full_z,
+                "control/full_state_q_advantage_over_random_proj": full_q - full_rand,
+            }
+        )
+    return out
 
 
 @torch.no_grad()

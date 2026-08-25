@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import random
 from dataclasses import replace
 import sys
 import time
@@ -25,13 +26,19 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
+from torch.utils.data import default_collate
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from treewm.data.ogbench_dataset import build_datasets
 from treewm.data.retrieval_index import LatentIndex, compute_endpoint_cells, sample_key_indices
-from treewm.data.samplers import InfiniteLoader, build_dataloader, to_device
+from treewm.data.samplers import (
+    InfiniteLoader,
+    build_dataloader,
+    build_fixed_validation_dataloader,
+    to_device,
+)
 from treewm.evaluation import diagnostics as diag
 from treewm.evaluation import tree_stats as tstats
 from treewm.evaluation import tree_viz as tv
@@ -73,6 +80,24 @@ from treewm.utils.meta import build_run_dir, count_parameters, env_summary, git_
 from treewm.utils.provenance import runtime_fingerprint, trainer_code_fingerprint
 from treewm.utils.rng import RngStreams, make_generator
 from treewm.utils.seeding import get_rng_state, seed_everything, set_rng_state
+
+
+TREEWM_V2_OBJECTIVES = frozenset(
+    {"treewm_v2_rms_rank_v1", "treewm_v2_grounded_pilot_v1"}
+)
+BOUNDED_PILOT_OBJECTIVES = {"treewm_v2_grounded_pilot_v1": 20_000}
+
+
+def validate_objective_version(objective_version: str, total_steps: int) -> None:
+    """Reject unknown objectives and prevent diagnostic pilots becoming formal runs."""
+    if objective_version not in {"treewm_v1", *TREEWM_V2_OBJECTIVES}:
+        raise ValueError(f"unsupported objective_version: {objective_version!r}")
+    pilot_cap = BOUNDED_PILOT_OBJECTIVES.get(objective_version)
+    if pilot_cap is not None and total_steps > pilot_cap:
+        raise ValueError(
+            f"{objective_version} is a bounded diagnostic objective: "
+            f"train.steps={total_steps} exceeds the {pilot_cap}-update cap"
+        )
 
 
 def should_visualise(step: int, cfg) -> bool:
@@ -124,6 +149,25 @@ def preserve_global_rng_state(*, strict_cuda: bool = False):
         set_rng_state(state, strict_cuda=strict_cuda)
 
 
+@contextmanager
+def fixed_validation_rng(seed: int, rank: int = 0, *, strict_cuda: bool = False):
+    """Run validation from the same private RNG state at every checkpoint.
+
+    The validation objective subsamples control and recursive targets. Merely restoring
+    the training RNG afterward makes that sampling observational, but does not make two
+    checkpoints comparable: each would start from a different training RNG state. This
+    context both fixes the measurement stream and restores all training streams on exit.
+    """
+    with preserve_global_rng_state(strict_cuda=strict_cuda):
+        effective_seed = int(seed) * 1_000_003 + 30_013 + int(rank)
+        random.seed(effective_seed)
+        np.random.seed(effective_seed % (2**32))
+        torch.manual_seed(effective_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(effective_seed)
+        yield
+
+
 def _stable_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -143,7 +187,7 @@ def required_formal_provenance_hashes(
         "TREEWM_CODE_SHA256": code_sha256,
         "TREEWM_RUNTIME_SHA256": runtime_sha256,
     }
-    if objective_version == "treewm_v2_rms_rank_v1":
+    if objective_version in TREEWM_V2_OBJECTIVES:
         required["TREEWM_CALIBRATION_SHA256"] = calibration_sha256
         required["TREEWM_FUTURE_RECIPE_SHA256"] = future_recipe_sha256
     return required
@@ -177,6 +221,36 @@ def gradients_finite(parameters) -> bool:
 def objective_finite(loss: torch.Tensor) -> bool:
     """Scalar/tensor objective guard used collectively before any backward call."""
     return bool(torch.isfinite(loss).all().item())
+
+
+def add_validation_label_metrics(
+    tracker: MetricTracker,
+    batch: dict[str, torch.Tensor],
+    horizons: tuple[int, ...],
+    max_modes: int,
+) -> None:
+    """Accumulate exact label distributions for the fixed validation sample."""
+    valid = batch["fut_valid"] > 0
+    valid_count = float(valid.sum().item())
+    if valid_count:
+        labels = batch["fut_horizon_idx"].long()
+        for index, horizon in enumerate(horizons):
+            count = float(((labels == index) & valid).sum().item())
+            tracker.add(
+                f"data/validation_horizon_label_fraction_h{int(horizon)}",
+                count / valid_count,
+                count=valid_count,
+            )
+    if "num_modes" in batch:
+        modes = batch["num_modes"].long().clamp(0, int(max_modes))
+        anchor_count = float(modes.numel())
+        for value in range(int(max_modes) + 1):
+            count = float((modes == value).sum().item())
+            tracker.add(
+                f"data/validation_num_modes_fraction_{value}",
+                count / max(anchor_count, 1.0),
+                count=anchor_count,
+            )
 
 
 def gradient_l2_norm(parameters) -> float:
@@ -436,8 +510,7 @@ def main(cfg: DictConfig) -> None:
     if scheduler_total_steps < total_steps:
         raise ValueError("train.scheduler_total_steps cannot be smaller than train.steps")
     objective_version = str(cfg.get("objective_version", "treewm_v1"))
-    if objective_version not in {"treewm_v1", "treewm_v2_rms_rank_v1"}:
-        raise ValueError(f"unsupported objective_version: {objective_version!r}")
+    validate_objective_version(objective_version, total_steps)
     gradient_checkpointing = bool(cfg.train.gradient_checkpointing)
     if total_steps == 1_000_000 and not gradient_checkpointing:
         raise ValueError("formal 1M TreeWM training requires train.gradient_checkpointing=true")
@@ -495,18 +568,44 @@ def main(cfg: DictConfig) -> None:
         print(f"[treewm] train {train_ds.summary()}")
         print(f"[treewm] val   {val_ds.summary()}")
 
-    # Separate loader generators: re-creating the val iterator inside a diagnostic must
-    # not advance the stream the training loader samples from.
+    # Separate loader generators: validation must not advance the stream the training
+    # loader samples from. The fixed sampler also avoids the historical low-rank bias:
+    # val_ds.anchors is sorted, while validation intentionally evaluates only a bounded
+    # number of batches.
     train_loader, train_sampler = build_dataloader(
         train_ds, int(cfg.train.batch_size), shuffle=True,
         num_workers=int(cfg.train.num_workers), seed=int(cfg.seed),
         generator=make_generator(int(cfg.seed), "train"),
     )
-    val_loader, _ = build_dataloader(
-        val_ds, int(cfg.train.batch_size), shuffle=False,
+    val_loader, val_sampler = build_fixed_validation_dataloader(
+        val_ds, int(cfg.train.batch_size), int(cfg.train.val_batches),
         num_workers=max(2, int(cfg.train.num_workers) // 4), seed=int(cfg.seed),
         generator=make_generator(int(cfg.seed), "viz"),
     )
+    # Materialise the first representative batch directly from the sampler once. Every
+    # diagnostic checkpoint reuses these exact anchors instead of constructing another
+    # iterator (and implicitly selecting whatever happens to be at its prefix).
+    diagnostic_positions = val_sampler.local_indices[: int(cfg.train.batch_size)]
+    fixed_diagnostic_batch = default_collate(
+        [val_ds[int(position)] for position in diagnostic_positions.tolist()]
+    )
+    fixed_validation_summary = val_sampler.summary()
+    fixed_validation_scalars = {
+        "data/validation_fixed_sample_count": float(
+            fixed_validation_summary["global_sample_size"]
+        ),
+        "data/validation_fixed_batches_per_rank": float(
+            fixed_validation_summary["num_batches"]
+        ),
+        **{
+            f"data/validation_anchor_rank_fraction_{name}": float(value)
+            for name, value in fixed_validation_summary[
+                "anchor_rank_fraction_quantiles"
+            ].items()
+        },
+    }
+    if dist_info.is_main:
+        print(f"[treewm] fixed validation sample {fixed_validation_summary}", flush=True)
     train_iter = InfiniteLoader(train_loader, train_sampler)
 
     # ---------------------------------------------------------------- model
@@ -526,7 +625,7 @@ def main(cfg: DictConfig) -> None:
     # optimiser construction and checkpoint restore so parameters/state are identical.
     model.gain_head.set_set_aware(bool(loss_cfg.gain_set_context))
     if (
-        objective_version == "treewm_v2_rms_rank_v1"
+        objective_version in TREEWM_V2_OBJECTIVES
         and str(loss_cfg.control_objective) != "bootstrap"
     ):
         # TreeSignature is exclusively the bootstrap target. Formal v2 uses the
@@ -538,7 +637,7 @@ def main(cfg: DictConfig) -> None:
         # module only for v1 checkpoint shape compatibility, but make it explicitly
         # unreachable by the optimiser when disabled.
         model.heads.gain_head.requires_grad_(False)
-    if objective_version == "treewm_v2_rms_rank_v1" and not loss_cfg.on("mass"):
+    if objective_version in TREEWM_V2_OBJECTIVES and not loss_cfg.on("mass"):
         # The formal frontier scorer never consumes predicted mode frequency. Leaving
         # this auxiliary head trainable would perturb the shared branch trunk without
         # changing inference, so v2 removes that causal confound explicitly.
@@ -553,7 +652,7 @@ def main(cfg: DictConfig) -> None:
         model, include_branch_prior=include_branch_prior
     )
     separate_gain_clip = bool(cfg.train.get("separate_gain_grad_clip", False))
-    if total_steps == 1_000_000 and objective_version == "treewm_v2_rms_rank_v1":
+    if total_steps == 1_000_000 and objective_version in TREEWM_V2_OBJECTIVES:
         v2_contract = formal_v2_objective_contract(
             model,
             loss_cfg,
@@ -679,6 +778,12 @@ def main(cfg: DictConfig) -> None:
     )
     calibration_sha256 = os.environ.get("TREEWM_CALIBRATION_SHA256", "")
     future_recipe_sha256 = os.environ.get("TREEWM_FUTURE_RECIPE_SHA256", "")
+    recipe_code_sha256 = os.environ.get(
+        "TREEWM_RECIPE_CODE_SHA256", os.environ.get("TREEWM_CODE_SHA256", "")
+    )
+    recipe_runtime_sha256 = os.environ.get(
+        "TREEWM_RECIPE_RUNTIME_SHA256", os.environ.get("TREEWM_RUNTIME_SHA256", "")
+    )
     injected_code_sha256 = os.environ.get("TREEWM_CODE_SHA256")
     injected_runtime_sha256 = os.environ.get("TREEWM_RUNTIME_SHA256")
     if injected_code_sha256 and injected_code_sha256 != code_fingerprint["manifest_sha256"]:
@@ -718,7 +823,7 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("formal 1M runs require a validated TREEWM_DATA_SHA256")
     dataset_calibration_sha256 = str(getattr(train_ds, "calibration_sha256", ""))
     dataset_future_recipe_sha256 = str(getattr(train_ds, "future_recipe_sha256", ""))
-    if objective_version == "treewm_v2_rms_rank_v1":
+    if objective_version in TREEWM_V2_OBJECTIVES:
         if dataset_calibration_sha256 != calibration_sha256:
             raise ValueError(
                 "TREEWM_CALIBRATION_SHA256 does not match the loaded future recipe"
@@ -765,6 +870,18 @@ def main(cfg: DictConfig) -> None:
         "data_manifest_sha256": data_manifest_sha256,
         "calibration_sha256": calibration_sha256,
         "future_recipe_sha256": future_recipe_sha256,
+        "recipe_code_sha256": recipe_code_sha256,
+        "recipe_runtime_sha256": recipe_runtime_sha256,
+        # Optional bounded-campaign seals. Empty for historical/general runs; when a
+        # campaign injects them they become part of checkpoint/completion identity and
+        # cannot drift across requeues.
+        "campaign_source_sha256": str(cfg.get("campaign_source_sha256", "")),
+        "campaign_protocol_sha256": str(cfg.get("campaign_protocol_sha256", "")),
+        "campaign_config_sha256": str(cfg.get("campaign_config_sha256", "")),
+        "campaign_input_contract_sha256": str(
+            cfg.get("campaign_input_contract_sha256", "")
+        ),
+        "campaign_factorial_arm": str(cfg.get("campaign_factorial_arm", "")),
         "wandb_project": wandb_project,
         "wandb_entity": wandb_entity,
         "wandb_group": wandb_group,
@@ -923,6 +1040,8 @@ def main(cfg: DictConfig) -> None:
             "meta/identity_sha256": identity_sha256,
             "meta/calibration_sha256": calibration_sha256 or "not-applicable",
             "meta/future_recipe_sha256": future_recipe_sha256 or "not-applicable",
+            "meta/recipe_code_sha256": recipe_code_sha256 or "not-applicable",
+            "meta/recipe_runtime_sha256": recipe_runtime_sha256 or "not-applicable",
             "meta/gradient_checkpointing": "enabled",
             **{f"meta/{k}": v for k, v in info.items()},
         }.items():
@@ -930,6 +1049,11 @@ def main(cfg: DictConfig) -> None:
         logger.scalar("meta/num_parameters", count_parameters(model), 0)
         logger.scalar("meta/world_size", dist_info.world_size, 0)
         logger.scalar("meta/seed", int(cfg.seed), 0)
+        logger.scalars(fixed_validation_scalars, 0)
+        logger.text(
+            "meta/fixed_validation_sample",
+            json.dumps(fixed_validation_summary, sort_keys=True, indent=2),
+        )
         print(f"[treewm] parameters: {count_parameters(model)/1e6:.2f}M | scorer={tree_cfg.scorer}")
 
     # -------------------------------------------------------------- train loop
@@ -1208,7 +1332,7 @@ def main(cfg: DictConfig) -> None:
         if completed_updates % int(cfg.train.diag_every) == 0:
             model.eval()
             with torch.no_grad():
-                dbatch = to_device(next(iter(val_loader)), device)
+                dbatch = to_device(fixed_diagnostic_batch, device)
                 dmetrics = {}
                 dmetrics.update(diag.q_vs_z_retrieval(model, dbatch))
                 dmetrics.update(diag.branching_diversity_correlation(model, dbatch))
@@ -1225,11 +1349,16 @@ def main(cfg: DictConfig) -> None:
         # --------------------------------------------------------- validation
         if completed_updates % int(cfg.train.ckpt_every) == 0:
             val_tracker = MetricTracker(device)
+            val_label_tracker = MetricTracker(device)
             model.eval()
             # `compute_branch_losses` samples control/recursive subsets even under
             # no_grad. A different validation/checkpoint cadence (the 5k pilot uses a
             # tighter one) must not perturb subsequent training RNG or parameters.
-            with preserve_global_rng_state(strict_cuda=(total_steps == 1_000_000)):
+            with fixed_validation_rng(
+                int(cfg.seed),
+                dist_info.rank,
+                strict_cuda=(total_steps == 1_000_000),
+            ):
                 with torch.no_grad():
                     for i, vbatch in enumerate(val_loader):
                         if i >= int(cfg.train.val_batches):
@@ -1252,7 +1381,35 @@ def main(cfg: DictConfig) -> None:
                             },
                             count=vbatch["obs"].shape[0],
                         )
+                        add_validation_label_metrics(
+                            val_label_tracker,
+                            vbatch,
+                            tuple(int(value) for value in future_cfg.horizons),
+                            int(future_cfg.max_modes),
+                        )
             vscalars = val_tracker.compute(reduce=True)
+            vscalars.update(val_label_tracker.compute(reduce=True))
+            horizon_probabilities = np.asarray(
+                [
+                    vscalars.get(
+                        f"data/validation_horizon_label_fraction_h{int(horizon)}",
+                        0.0,
+                    )
+                    for horizon in future_cfg.horizons
+                ],
+                dtype=np.float64,
+            )
+            nonzero = horizon_probabilities[horizon_probabilities > 0]
+            entropy = float(-(nonzero * np.log(nonzero)).sum()) if len(nonzero) else 0.0
+            entropy_normalizer = (
+                math.log(len(future_cfg.horizons))
+                if len(future_cfg.horizons) > 1
+                else 1.0
+            )
+            vscalars["data/validation_horizon_label_normalized_entropy"] = (
+                entropy / entropy_normalizer
+            )
+            vscalars.update(fixed_validation_scalars)
             logger.scalars(vscalars, log_step)
             if dist_info.is_main:
                 payload = dict(
@@ -1291,7 +1448,7 @@ def main(cfg: DictConfig) -> None:
                         diag.expansion_gain_heatmap(model, maze_spec, normalizer, device), log_step,
                     )
                 with torch.no_grad():
-                    vbatch = to_device(next(iter(val_loader)), device)
+                    vbatch = to_device(fixed_diagnostic_batch, device)
                     fig = diag.q_pca_plot(model, vbatch, normalizer, maze_spec)
                     if fig is not None:
                         logger.figure("viz/q_pca", fig, log_step)
@@ -1523,6 +1680,8 @@ def main(cfg: DictConfig) -> None:
                     "data_manifest_sha256": data_manifest_sha256,
                     "calibration_sha256": calibration_sha256,
                     "future_recipe_sha256": future_recipe_sha256,
+                    "recipe_code_sha256": recipe_code_sha256,
+                    "recipe_runtime_sha256": recipe_runtime_sha256,
                     "arm": str(cfg.arm),
                     "model_class": model.__class__.__name__,
                     "scorer": str(tree_cfg.scorer),

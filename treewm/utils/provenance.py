@@ -131,6 +131,7 @@ def provenance(
             "dataset": str(g("env.short_name")),
             "train_steps": int(g("train.steps", -1)),
             "score_space": str(g("planner.score_space")),
+            "decoded_metric": str(g("planner.decoded_metric", "normalized_l2")),
             "planner_execute_steps": int(g("planner.execute_steps", -1)),
             "node_budget": int(g("tree.node_budget", -1)),
             "branch_factor": int(g("model.branch_factor", -1)),

@@ -71,9 +71,8 @@ class Domain:
     def distance(self, ob: np.ndarray, goal: np.ndarray) -> float:
         """Scalar goal distance in the domain's own units.
 
-        For one-hot state domains an L2 distance over the one-hot block is monotone in the
-        number of mismatched cells, so this doubles as a Hamming-like signal while staying
-        differentiable-friendly for the planner.
+        Continuous domains use raw-coordinate L2. One-hot domains use the exact count of
+        categorical subgoals whose argmax differs from the goal.
         """
         a, b = self.goal_vector(ob), self.goal_vector(goal)
         if self.goal_metric == "onehot":

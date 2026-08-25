@@ -414,6 +414,20 @@ def build_datasets(
     return env, train_ds, val_ds, normalizer
 
 
+def recipe_producer_identity_from_env() -> tuple[str | None, str | None]:
+    """Return the immutable recipe producer identity, with legacy fallback.
+
+    Historical formal jobs used the trainer identity for both roles. New trainers can
+    safely consume the same immutable recipe by declaring its producer independently.
+    """
+    return (
+        os.environ.get("TREEWM_RECIPE_CODE_SHA256", os.environ.get("TREEWM_CODE_SHA256")),
+        os.environ.get(
+            "TREEWM_RECIPE_RUNTIME_SHA256", os.environ.get("TREEWM_RUNTIME_SHA256")
+        ),
+    )
+
+
 def _attach_future_recipes_if_requested(
     train_ds: ChunkDataset,
     val_ds: ChunkDataset,
@@ -444,14 +458,19 @@ def _attach_future_recipes_if_requested(
     if payload.get("recipe_sha256") != expected_recipe_sha256:
         raise ValueError("injected future recipe SHA256 does not match its manifest")
     normalizer_sha256 = normalizer_state_sha256(normalizer.state_dict())
+    recipe_code_sha256, recipe_runtime_sha256 = recipe_producer_identity_from_env()
     validate_recipe_manifest(
         root,
         payload,
         expected_source_manifest_sha256=source_manifest_sha256,
         expected_normalizer_sha256=normalizer_sha256,
         expected_calibration_sha256=calibration_sha256,
-        expected_code_sha256=os.environ.get("TREEWM_CODE_SHA256"),
-        expected_runtime_sha256=os.environ.get("TREEWM_RUNTIME_SHA256"),
+        # A read-only compact recipe can be reused by a later trainer revision when
+        # its own immutable producer identity is supplied explicitly. Keep these
+        # distinct from TREEWM_CODE_SHA256/TREEWM_RUNTIME_SHA256, which identify and
+        # validate the code executing this training run.
+        expected_code_sha256=recipe_code_sha256,
+        expected_runtime_sha256=recipe_runtime_sha256,
     )
     train_recipe = FutureRecipe(
         root / "train",

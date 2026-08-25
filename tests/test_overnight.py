@@ -242,6 +242,16 @@ def test_collector_rejects_mixed_scoring_rules():
     ok, reason = compatible([a, b], ("score_space",))
     assert not ok and "score_space" in reason
 
+    raw = {"provenance": {"score_space": "decoded", "decoded_metric": "domain_raw"}}
+    normalised = {
+        "provenance": {
+            "score_space": "decoded",
+            "decoded_metric": "normalized_l2",
+        }
+    }
+    ok, reason = compatible([raw, normalised], ("score_space", "decoded_metric"))
+    assert not ok and "decoded_metric" in reason
+
 
 def test_missing_artifacts_are_reported_not_silently_skipped(tmp_path):
     import json
