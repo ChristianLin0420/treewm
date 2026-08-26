@@ -62,6 +62,8 @@ def set_rng_state(state: dict[str, Any], *, strict_cuda: bool = False) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(_as_byte_cpu(state["torch"]))
+    if torch.cuda.is_available() and strict_cuda and "torch_cuda" not in state:
+        raise RuntimeError("CUDA RNG state is absent from an exact-resume checkpoint")
     if "torch_cuda" in state and torch.cuda.is_available():
         try:
             saved = [_as_byte_cpu(s) for s in state["torch_cuda"]]
@@ -69,6 +71,11 @@ def set_rng_state(state: dict[str, Any], *, strict_cuda: bool = False) -> None:
             # checkpoint written under a different visible-device count would otherwise
             # mismatch here.
             n = torch.cuda.device_count()
+            if strict_cuda and len(saved) != n:
+                raise RuntimeError(
+                    "CUDA RNG visible-device count differs: "
+                    f"checkpoint={len(saved)} current={n}"
+                )
             if len(saved) >= n:
                 for i in range(n):
                     torch.cuda.set_rng_state(saved[i], i)

@@ -43,7 +43,11 @@ from treewm.evaluation import diagnostics as diag
 from treewm.evaluation import tree_stats as tstats
 from treewm.evaluation import tree_viz as tv
 from treewm.tree.frontier import GOAL_AWARE_SCORERS
-from treewm.evaluation.rollout import EvaluationInterrupted, evaluate
+from treewm.evaluation.rollout import (
+    EvaluationInterrupted,
+    build_evaluation_seed_tables,
+    evaluate,
+)
 from treewm.evaluation.tasks import build_tasks, describe_tasks
 from treewm.evaluation.coverage import StateQuantizer
 from treewm.data.maze_utils import MazeSpec
@@ -65,6 +69,7 @@ from treewm.utils.checkpoint import (
     CheckpointManager,
     StopController,
     atomic_json_dump,
+    build_checkpoint,
     load_checkpoint,
 )
 from treewm.utils.distributed import (
@@ -83,9 +88,14 @@ from treewm.utils.seeding import get_rng_state, seed_everything, set_rng_state
 
 
 TREEWM_V2_OBJECTIVES = frozenset(
-    {"treewm_v2_rms_rank_v1", "treewm_v2_grounded_pilot_v1"}
+    {
+        "treewm_v2_rms_rank_v1",
+        "treewm_v2_grounded_pilot_v1",
+        "treewm_v2_grounded_formal_v1",
+    }
 )
 BOUNDED_PILOT_OBJECTIVES = {"treewm_v2_grounded_pilot_v1": 20_000}
+FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
 
 
 def validate_objective_version(objective_version: str, total_steps: int) -> None:
@@ -98,6 +108,32 @@ def validate_objective_version(objective_version: str, total_steps: int) -> None
             f"{objective_version} is a bounded diagnostic objective: "
             f"train.steps={total_steps} exceeds the {pilot_cap}-update cap"
         )
+    if objective_version == "treewm_v2_grounded_formal_v1" and int(total_steps) != 1_000_000:
+        raise ValueError(
+            "treewm_v2_grounded_formal_v1 requires exactly 1,000,000 scientific updates"
+        )
+
+
+def resolve_stage_stop_after(
+    objective_version: str,
+    total_steps: int,
+    value: str | None,
+) -> tuple[int, bool]:
+    """Resolve lifecycle-only formal staging without changing scientific identity."""
+    if value is None:
+        return int(total_steps), False
+    if objective_version != "treewm_v2_grounded_formal_v1":
+        raise ValueError(
+            "TREEWM_STOP_AFTER_UPDATE is reserved for grounded formal v1 stages"
+        )
+    stage = int(value)
+    if stage not in FORMAL_STAGE_UPDATES:
+        raise ValueError(
+            "grounded formal stage limit must be 2000, 25000, 100000, or 1000000"
+        )
+    if stage > int(total_steps):
+        raise ValueError("stage limit cannot exceed scientific train.steps")
+    return stage, True
 
 
 def should_visualise(step: int, cfg) -> bool:
@@ -168,9 +204,60 @@ def fixed_validation_rng(seed: int, rank: int = 0, *, strict_cuda: bool = False)
         yield
 
 
+def heldout_multistep_validation(
+    model,
+    batch: dict[str, torch.Tensor],
+    depth_weights: tuple[float, ...] | None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
+    """Measure both teacher-forced and fully self-fed recursive generalisation.
+
+    The teacher-forced loss remains the validation counterpart of the train objective
+    and is therefore the tensor returned for objective assembly.  The separate p=1
+    diagnostic exposes compounding recursive error without changing that objective.
+    Validation runs under :func:`fixed_validation_rng`, so both measurements use an
+    identical private stream at every checkpoint and cannot perturb training RNG.
+    """
+    teacher_loss, teacher_metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=0.0,
+        depth_weights=depth_weights,
+    )
+    self_fed_loss, self_fed_metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=1.0,
+        depth_weights=depth_weights,
+    )
+    metrics: dict[str, torch.Tensor | float] = {
+        "train/loss_multistep_teacher_forced": teacher_loss,
+        "train/loss_multistep_self_fed": self_fed_loss,
+        "train/objective_multistep_teacher_forced": 1.0,
+        "train/objective_multistep_self_fed_diagnostic": 1.0,
+    }
+    for key, value in teacher_metrics.items():
+        if key.startswith("recursive/loss_depth"):
+            depth = key.removeprefix("recursive/loss_depth")
+            # Preserve the pre-existing per-depth validation names.
+            metrics[f"train/loss_multistep_depth{depth}"] = value
+    for key, value in self_fed_metrics.items():
+        if key.startswith("recursive/loss_depth"):
+            depth = key.removeprefix("recursive/loss_depth")
+            metrics[f"train/loss_multistep_self_fed_depth{depth}"] = value
+    return teacher_loss, metrics
+
+
 def _stable_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(16 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def required_formal_provenance_hashes(
@@ -304,9 +391,12 @@ def formal_v2_objective_contract(
     tree_cfg,
     *,
     separate_gain_clip: bool,
+    expected_depth: int = 16,
+    require_grounded_multistep: bool = False,
+    train_cfg=None,
 ) -> dict[str, bool]:
     """Pure, testable formal-v2 contract evaluated before optimiser construction."""
-    return {
+    contract = {
         "one_q_scale": int(model.controllability.num_scales) == 1,
         # The bounded q-distance and normalized matching formulas are valid only for
         # an L2-normalized, single-scale q representation.  The remaining switches
@@ -322,7 +412,7 @@ def formal_v2_objective_contract(
         "formal_horizon_width": int(model.cfg.h_max) == 64,
         "model_tree_depth_aligned": int(model.cfg.max_depth)
         == int(tree_cfg.max_depth)
-        == 16,
+        == int(expected_depth),
         "depth_embedding_disabled": not bool(model.cfg.use_depth_embedding)
         and not bool(model.branch_transformer.use_depth_embedding),
         "set_aware_gain": bool(loss_cfg.gain_set_context),
@@ -342,7 +432,7 @@ def formal_v2_objective_contract(
         "control_rank_active": float(loss_cfg.control_rank_weight) > 0,
         "novelty_gain_target": str(loss_cfg.gain_target) == "novelty",
         "gain_rank_active": float(loss_cfg.gain_rank_weight) > 0,
-        "gain_calibration_active": float(loss_cfg.gain_calibration_weight) > 0,
+        "gain_rank_only": float(loss_cfg.gain_calibration_weight) == 0,
         "mass_objective_disabled": not loss_cfg.on("mass"),
         "mass_head_disabled": not any(
             parameter.requires_grad for parameter in model.heads.mass_head.parameters()
@@ -359,7 +449,34 @@ def formal_v2_objective_contract(
         "future_metric_rms_v2": str(future_cfg.metric_mode) == "rms_v2",
         "keep_threshold": tree_cfg.keep_threshold is not None,
         "separate_gain_grad_clip": bool(separate_gain_clip),
+        **(
+            {
+                "grounded_multistep_active": loss_cfg.on("multistep"),
+                "grounded_multistep_depth_three": int(future_cfg.multi_step_depth) == 3,
+                "grounded_multistep_weights": tuple(loss_cfg.multistep_depth_weights)
+                == (1.0, 1.0, 1.0),
+                "scheduled_sampling_active": float(loss_cfg.scheduled_sampling_p) > 0.0,
+            }
+            if require_grounded_multistep
+            else {}
+        ),
     }
+    if train_cfg is not None:
+        configured_gain_lr = getattr(train_cfg, "gain_lr", None)
+        configured_gain_weight_decay = getattr(train_cfg, "gain_weight_decay", None)
+        configured_gain_scorers = getattr(train_cfg, "gain_training_scorers", None)
+        contract.update(
+            {
+                "gain_update_every_step": int(train_cfg.gain_loss_every) == 1,
+                "dedicated_gain_learning_rate": configured_gain_lr is not None
+                and float(configured_gain_lr) == 3.0e-4,
+                "zero_gain_weight_decay": configured_gain_weight_decay is not None
+                and float(configured_gain_weight_decay) == 0.0,
+                "mixed_gain_training_behavior": tuple(configured_gain_scorers or ())
+                == ("learned", "novelty_q"),
+            }
+        )
+    return contract
 
 
 class TrainingStepModule(torch.nn.Module):
@@ -435,6 +552,9 @@ class TrainingStepModule(torch.nn.Module):
         if gain_active:
             n_gain = min(int(self.train_cfg.gain_batch_size), batch["obs"].shape[0])
             if str(self.losses_cfg.gain_target) == "novelty":
+                configured_gain_training_scorers = getattr(
+                    self.train_cfg, "gain_training_scorers", None
+                )
                 gain_loss, gain_metrics = novelty_gain_loss(
                     self.model,
                     artifacts["z"][:n_gain],
@@ -444,6 +564,11 @@ class TrainingStepModule(torch.nn.Module):
                     rank_weight=float(self.loss_cfg.gain_rank_weight),
                     calibration_weight=float(self.loss_cfg.gain_calibration_weight),
                     branch_prior_weight=float(self.loss_cfg.gain_branch_prior_weight),
+                    training_scorers=(
+                        tuple(configured_gain_training_scorers)
+                        if configured_gain_training_scorers is not None
+                        else None
+                    ),
                 )
             else:
                 gain_loss, gain_metrics = compute_expansion_gain_loss(
@@ -511,6 +636,18 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("train.scheduler_total_steps cannot be smaller than train.steps")
     objective_version = str(cfg.get("objective_version", "treewm_v1"))
     validate_objective_version(objective_version, total_steps)
+    stage_limit_value = os.environ.get("TREEWM_STOP_AFTER_UPDATE")
+    stage_stop_after, stage_lifecycle_active = resolve_stage_stop_after(
+        objective_version, total_steps, stage_limit_value
+    )
+    checkpoint_every = int(cfg.train.ckpt_every)
+    validation_every = int(
+        cfg.train.get("val_every")
+        if cfg.train.get("val_every") is not None
+        else checkpoint_every
+    )
+    if validation_every <= 0 or checkpoint_every <= 0:
+        raise ValueError("train.val_every and train.ckpt_every must be positive")
     gradient_checkpointing = bool(cfg.train.gradient_checkpointing)
     if total_steps == 1_000_000 and not gradient_checkpointing:
         raise ValueError("formal 1M TreeWM training requires train.gradient_checkpointing=true")
@@ -550,6 +687,9 @@ def main(cfg: DictConfig) -> None:
         cache_root=os.environ.get("TREEWM_CACHE"),
         data_manifest_sha256=os.environ.get("TREEWM_DATA_SHA256"),
         task_metric_dims=tuple(cfg.env.get("task_metric_dims") or cfg.env.xy_dims),
+        recipe_anchor_policy=str(
+            cfg.future_sets.get("recipe_anchor_policy", "selected_seed")
+        ),
     )
     # Prove the shared cache is actually backing the loader rather than merely present.
     cache_metrics = getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
@@ -660,6 +800,13 @@ def main(cfg: DictConfig) -> None:
             future_cfg,
             tree_cfg,
             separate_gain_clip=separate_gain_clip,
+            expected_depth=(
+                3 if objective_version == "treewm_v2_grounded_formal_v1" else 16
+            ),
+            require_grounded_multistep=(
+                objective_version == "treewm_v2_grounded_formal_v1"
+            ),
+            train_cfg=cfg.train,
         )
         violations = [name for name, passed in v2_contract.items() if not passed]
         if bool(cfg.retrieval.enabled) or int(cfg.retrieval.num_keys) != 0:
@@ -668,9 +815,39 @@ def main(cfg: DictConfig) -> None:
             raise ValueError(
                 "formal v2 objective contract failed: " + ", ".join(violations)
             )
+    configured_gain_lr = cfg.train.get("gain_lr")
+    configured_gain_weight_decay = cfg.train.get("gain_weight_decay")
+    gain_lr = (
+        float(configured_gain_lr)
+        if configured_gain_lr is not None
+        else float(cfg.train.lr)
+    )
+    gain_weight_decay = (
+        float(configured_gain_weight_decay)
+        if configured_gain_weight_decay is not None
+        else float(cfg.train.weight_decay)
+    )
+    separate_gain_optimizer = bool(
+        separate_gain_clip
+        or configured_gain_lr is not None
+        or configured_gain_weight_decay is not None
+    )
     optimizer_parameters = (
-        [{"params": world_parameters}, {"params": gain_parameters}]
-        if separate_gain_clip
+        [
+            {
+                "params": world_parameters,
+                "lr": float(cfg.train.lr),
+                "weight_decay": float(cfg.train.weight_decay),
+                "name": "world",
+            },
+            {
+                "params": gain_parameters,
+                "lr": gain_lr,
+                "weight_decay": gain_weight_decay,
+                "name": "gain",
+            },
+        ]
+        if separate_gain_optimizer
         else model.parameters()
     )
     optimizer = torch.optim.AdamW(
@@ -763,6 +940,20 @@ def main(cfg: DictConfig) -> None:
             "future_sets.cache=false/shared_cache=true, built-in task IDs 1..5, "
             "50 final episodes per task, and a 1M scheduler horizon"
         )
+    if objective_version == "treewm_v2_grounded_formal_v1" and (
+        str(planner_cfg.score_space) != "decoded"
+        or str(planner_cfg.decoded_metric) != "domain_raw"
+        or str(planner_cfg.execute_mode) != "clipped"
+        or int(planner_cfg.execute_steps) != 4
+        or not bool(planner_cfg.require_first_edge_improvement)
+        or float(planner_cfg.min_first_edge_improvement) < 0.0
+        or int(model.cfg.max_depth) != 3
+        or int(tree_cfg.max_depth) != 3
+    ):
+        raise ValueError(
+            "grounded formal v1 requires decoded domain_raw planning, clipped e4, "
+            "the first-edge improvement guard, and aligned model/tree depth 3"
+        )
 
     # ---------------------------------------------------------- identity/resume
     resolved_config = OmegaConf.to_container(cfg, resolve=True)
@@ -832,12 +1023,51 @@ def main(cfg: DictConfig) -> None:
             raise ValueError(
                 "TREEWM_FUTURE_RECIPE_SHA256 does not match the loaded future recipe"
             )
+    if objective_version == "treewm_v2_grounded_formal_v1" and (
+        str(getattr(train_ds, "recipe_anchor_policy", "")) != "published_union"
+        or str(getattr(val_ds, "recipe_anchor_policy", "")) != "published_union"
+    ):
+        raise ValueError(
+            "grounded formal v1 requires the sealed published-union train/validation anchors"
+        )
     wandb_project = os.environ.get("WANDB_PROJECT", "treewm")
     wandb_entity = os.environ.get("WANDB_ENTITY", "")
     wandb_group = os.environ.get("WANDB_RUN_GROUP", "")
     wandb_mode = os.environ.get("WANDB_MODE", "online")
     if total_steps == 1_000_000 and wandb_mode in {"offline", "disabled"}:
         raise ValueError("formal 1M runs require online W&B mode")
+    injected_evaluation_seed_protocol = os.environ.get(
+        "TREEWM_EVALUATION_SEED_PROTOCOL_SHA256"
+    )
+    if injected_evaluation_seed_protocol and malformed_sha256_names(
+        {"TREEWM_EVALUATION_SEED_PROTOCOL_SHA256": injected_evaluation_seed_protocol}
+    ):
+        raise ValueError("TREEWM_EVALUATION_SEED_PROTOCOL_SHA256 must be lowercase SHA256")
+    evaluation_seed_protocol_sha256 = (
+        injected_evaluation_seed_protocol
+        or (
+            protocol_sha256
+            if not malformed_sha256_names({"protocol": protocol_sha256})
+            else _stable_hash(
+            {
+                "namespace": "unsealed-treewm-evaluation-seeds-v1",
+                "objective_version": objective_version,
+                "env_name": str(cfg.env.name),
+                "task_ids": task_ids,
+            }
+        )
+        )
+    )
+    evaluation_seed_tables = build_evaluation_seed_tables(
+        evaluation_seed_protocol_sha256,
+        int(cfg.seed),
+        task_ids,
+        int(cfg.eval.episodes_per_task),
+        final_episodes_per_task,
+    )
+    use_protocol_bound_evaluation_seeds = (
+        objective_version == "treewm_v2_grounded_formal_v1"
+    )
     run_identity = {
         "schema_version": 1,
         "objective_version": objective_version,
@@ -863,6 +1093,10 @@ def main(cfg: DictConfig) -> None:
         "retrieval_num_keys": int(cfg.retrieval.num_keys),
         "task_ids": task_ids,
         "final_episodes_per_task": final_episodes_per_task,
+        "evaluation_seed_protocol_sha256": evaluation_seed_protocol_sha256,
+        "evaluation_seed_tables_sha256": evaluation_seed_tables["sha256"],
+        "monitor_seed_table_sha256": evaluation_seed_tables["monitor"]["sha256"],
+        "final_seed_table_sha256": evaluation_seed_tables["final"]["sha256"],
         "config_sha256": _stable_hash(identity_config),
         "protocol_sha256": protocol_sha256,
         "code_sha256": code_fingerprint["manifest_sha256"],
@@ -870,6 +1104,11 @@ def main(cfg: DictConfig) -> None:
         "data_manifest_sha256": data_manifest_sha256,
         "calibration_sha256": calibration_sha256,
         "future_recipe_sha256": future_recipe_sha256,
+        "recipe_anchor_policy": str(
+            cfg.future_sets.get("recipe_anchor_policy", "selected_seed")
+        ),
+        "train_anchor_count": int(len(train_ds)),
+        "validation_anchor_count": int(len(val_ds)),
         "recipe_code_sha256": recipe_code_sha256,
         "recipe_runtime_sha256": recipe_runtime_sha256,
         # Optional bounded-campaign seals. Empty for historical/general runs; when a
@@ -891,6 +1130,49 @@ def main(cfg: DictConfig) -> None:
     run_identity["wandb_id"] = wandb_id
     identity_sha256 = _stable_hash(run_identity)
 
+    seed_tables_path = run_dir / "evaluation_seed_tables.json"
+    seed_table_failed = False
+    if dist_info.is_main:
+        try:
+            if seed_tables_path.exists():
+                with seed_tables_path.open("r", encoding="utf-8") as handle:
+                    existing_seed_tables = json.load(handle)
+                if existing_seed_tables != evaluation_seed_tables:
+                    raise ValueError(
+                        f"evaluation seed tables differ from existing run: {seed_tables_path}"
+                    )
+            else:
+                atomic_json_dump(evaluation_seed_tables, seed_tables_path)
+        except BaseException as exc:
+            seed_table_failed = True
+            print(
+                f"[treewm] evaluation seed-table publication failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+    if any_rank_true(seed_table_failed, device):
+        raise RuntimeError("failed to publish exact evaluation seed tables")
+    barrier()
+
+    final_episode_seeds = (
+        evaluation_seed_tables["final"]["seeds"]
+        if use_protocol_bound_evaluation_seeds
+        else [
+            [
+                int(cfg.eval.seed) + 1_000 * task_index + episode_index
+                for episode_index in range(final_episodes_per_task)
+            ]
+            for task_index in range(len(task_ids))
+        ]
+    )
+    expected_final_episode_rows = [
+        (task_index, task_id, episode_index, int(seed_value))
+        for task_index, (task_id, task_seeds) in enumerate(
+            zip(task_ids, final_episode_seeds, strict=True)
+        )
+        for episode_index, seed_value in enumerate(task_seeds)
+    ]
+
     if completion_path.exists():
         with completion_path.open("r", encoding="utf-8") as handle:
             completion = json.load(handle)
@@ -904,6 +1186,10 @@ def main(cfg: DictConfig) -> None:
             or completion.get("status") != "complete"
             or completion.get("run_identity") != run_identity
             or completion.get("identity_sha256") != identity_sha256
+            or completion.get("evaluation_seed_tables_sha256")
+            != evaluation_seed_tables["sha256"]
+            or completion.get("final_seed_table_sha256")
+            != evaluation_seed_tables["final"]["sha256"]
             or int(completion.get("completed_updates", -1)) != total_steps
             or int(completion.get("scheduler_total_steps", -1)) != scheduler_total_steps
             or int(completion.get("final_eval_step", -1)) != total_steps
@@ -937,7 +1223,19 @@ def main(cfg: DictConfig) -> None:
         if (
             final_progress.get("status") != "complete"
             or final_progress.get("identity_sha256") != identity_sha256
+            or final_progress.get("seed_table_sha256")
+            != evaluation_seed_tables["final"]["sha256"]
             or len(final_progress.get("completed_results", [])) != expected_final_episodes
+            or [
+                (
+                    row.get("task_index"),
+                    row.get("task_id"),
+                    row.get("episode_index"),
+                    row.get("episode_seed"),
+                )
+                for row in final_progress.get("completed_results", [])
+            ]
+            != expected_final_episode_rows
             or final_progress.get("metrics") != completion_metrics
         ):
             raise ValueError(f"final-eval artifact is incomplete or inconsistent: {final_progress_path}")
@@ -973,10 +1271,17 @@ def main(cfg: DictConfig) -> None:
             restore_rng=False,
             rank=dist_info.rank,
             expected_identity=run_identity,
+            require_exact_resume=True,
+            expected_world_size=dist_info.world_size,
+            require_cuda_rng=(device.type == "cuda" and total_steps == 1_000_000),
         )
         completed_updates = int(resume_payload.get("completed_updates", -1))
         if not 0 <= completed_updates <= total_steps:
             raise ValueError(f"invalid completed_updates in checkpoint: {completed_updates}")
+        if completed_updates > stage_stop_after:
+            raise ValueError(
+                "checkpoint is beyond TREEWM_STOP_AFTER_UPDATE for this lifecycle stage"
+            )
         if int(resume_payload.get("step", -1)) != completed_updates:
             raise ValueError("checkpoint step/completed_updates mismatch")
         rank_states = resume_payload.get("rank_states") or []
@@ -1073,13 +1378,28 @@ def main(cfg: DictConfig) -> None:
             "horizon_generator": model._horizon_gen.get_state().detach().cpu(),
         }
 
-    def save_training_checkpoint(reason: str) -> None:
-        """Collect rank-local cursors/RNG and atomically commit on rank zero."""
+    def save_training_checkpoint(
+        reason: str,
+        *,
+        best_success: float | None = None,
+        best_val_loss: float | None = None,
+    ) -> None:
+        """Commit one complete collective boundary to latest and selected best slots."""
         rank_states = gather_rank_objects(local_rank_state(), destination=0)
         save_failed = False
         if dist_info.is_main:
             try:
-                ckpt.save_latest(
+                improved_success = (
+                    ckpt.record_success(best_success)
+                    if best_success is not None
+                    else False
+                )
+                improved_val_loss = (
+                    ckpt.record_val_loss(best_val_loss)
+                    if best_val_loss is not None
+                    else False
+                )
+                payload = build_checkpoint(
                     model=model,
                     optimizer=optimizer,
                     scheduler=scheduler,
@@ -1102,8 +1422,17 @@ def main(cfg: DictConfig) -> None:
                         "final_eval": final_eval,
                         "phase": phase,
                         "gradient_checkpointing": gradient_checkpointing,
+                        "evaluation_seed_tables_sha256": evaluation_seed_tables["sha256"],
                     },
                 )
+                if improved_success:
+                    ckpt.save_best_success_payload(payload)
+                if improved_val_loss:
+                    ckpt.save_best_val_loss_payload(payload)
+                # Publish latest last: it is the authoritative transaction boundary.
+                # If a best-slot write fails, the previous latest still causes the
+                # metric selection to be retried after resume.
+                ckpt.save_latest_payload(payload)
                 print(
                     f"[treewm] checkpointed {completed_updates} completed updates ({reason})",
                     flush=True,
@@ -1136,6 +1465,7 @@ def main(cfg: DictConfig) -> None:
         pending_eval_step = int(eval_step)
         save_training_checkpoint("evaluation-pending")
         eval_failed = False
+        eval_success = None
         if dist_info.is_main:
             try:
                 model.eval()
@@ -1157,25 +1487,19 @@ def main(cfg: DictConfig) -> None:
                     int(cfg.eval.seed),
                     domain=domain,
                     stop_callback=lambda: stop.requested,
+                    episode_seed_table=(
+                        evaluation_seed_tables["monitor"]
+                        if use_protocol_bound_evaluation_seeds
+                        else None
+                    ),
+                    expected_episode_seed_split=(
+                        "monitor" if use_protocol_bound_evaluation_seeds else None
+                    ),
                 )
                 emetrics.update(cache_metrics)
                 emetrics.update(resource_metrics())
                 logger.scalars(emetrics, eval_step)
-                ckpt.maybe_save_success(
-                    emetrics["eval/success_rate"],
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    step=completed_updates,
-                    epoch=train_iter.epoch,
-                    config=resolved_config,
-                    extra={
-                        "completed_updates": completed_updates,
-                        "run_identity": run_identity,
-                        "normalizer": normalizer.state_dict(),
-                        "gradient_checkpointing": gradient_checkpointing,
-                    },
-                )
+                eval_success = float(emetrics["eval/success_rate"])
                 print(
                     f"[treewm] step {eval_step} success={emetrics['eval/success_rate']:.3f}"
                 )
@@ -1191,13 +1515,18 @@ def main(cfg: DictConfig) -> None:
             raise RuntimeError(f"evaluation failed at step {eval_step}")
         raise_if_stopping()
         pending_eval_step = None
-        save_training_checkpoint("evaluation-complete")
+        save_training_checkpoint(
+            "evaluation-complete",
+            best_success=eval_success if dist_info.is_main else None,
+        )
 
     if phase == "train" and pending_eval_step is not None:
         run_synchronized_evaluation(int(pending_eval_step))
 
     progress = tqdm(
-        range(completed_updates, total_steps), initial=completed_updates, total=total_steps,
+        range(completed_updates, stage_stop_after),
+        initial=completed_updates,
+        total=stage_stop_after,
         disable=not dist_info.is_main, desc=cfg.arm,
     )
     last_log = time.perf_counter()
@@ -1292,8 +1621,14 @@ def main(cfg: DictConfig) -> None:
         completed_updates = step + 1
         log_step = completed_updates
         tracker.add("train/grad_norm", float(grad_norm))
-        tracker.add("train/learning_rate", scheduler.get_last_lr()[0])
+        learning_rates = scheduler.get_last_lr()
+        tracker.add("train/learning_rate", learning_rates[0])
+        tracker.add(
+            "train/learning_rate_gain",
+            learning_rates[1] if separate_gain_optimizer else learning_rates[0],
+        )
         tracker.add("train/weight_decay", float(cfg.train.weight_decay))
+        tracker.add("train/weight_decay_gain", gain_weight_decay)
         # Signals delivered during the update are handled only after the optimizer and
         # scheduler have committed the same absolute update on every rank.
         raise_if_stopping()
@@ -1347,7 +1682,7 @@ def main(cfg: DictConfig) -> None:
             logger.scalars({k: all_reduce_mean(v, device) for k, v in dmetrics.items()}, log_step)
 
         # --------------------------------------------------------- validation
-        if completed_updates % int(cfg.train.ckpt_every) == 0:
+        if completed_updates % validation_every == 0:
             val_tracker = MetricTracker(device)
             val_label_tracker = MetricTracker(device)
             model.eval()
@@ -1364,13 +1699,36 @@ def main(cfg: DictConfig) -> None:
                         if i >= int(cfg.train.val_batches):
                             break
                         vbatch = to_device(vbatch, device)
-                        _, vmetrics, _ = compute_branch_losses(
+                        _, vmetrics, _, validation_branch_terms = compute_branch_losses(
                             model,
                             vbatch,
                             loss_cfg,
                             match_cfg,
                             step=completed_updates,
+                            return_loss_terms=True,
                         )
+                        validation_raw_terms = dict(validation_branch_terms.raw)
+                        if loss_cfg.on("multistep"):
+                            # Keep the stable teacher-forced objective and separately
+                            # expose fully self-fed compounding error on the same sealed
+                            # multi-step recipe targets.
+                            validation_multistep, validation_multistep_metrics = (
+                                heldout_multistep_validation(
+                                    model,
+                                    vbatch,
+                                    tuple(loss_cfg.multistep_depth_weights) or None,
+                                )
+                            )
+                            validation_raw_terms["multistep"] = validation_multistep
+                            vmetrics.update(validation_multistep_metrics)
+                        validation_terms = assemble_loss_terms(
+                            validation_raw_terms,
+                            loss_cfg,
+                            completed_updates,
+                        )
+                        # Replace the branch-only total/components with the exact
+                        # held-out world objective, including grounded multistep.
+                        vmetrics.update(loss_term_metrics(validation_terms))
                         vmetrics["train/objective_matches_train_branch"] = 1.0
                         vmetrics["train/objective_includes_gain"] = 0.0
                         val_tracker.add_many(
@@ -1411,21 +1769,16 @@ def main(cfg: DictConfig) -> None:
             )
             vscalars.update(fixed_validation_scalars)
             logger.scalars(vscalars, log_step)
-            if dist_info.is_main:
-                payload = dict(
-                    model=model, optimizer=optimizer, scheduler=scheduler,
-                    step=completed_updates,
-                    epoch=train_iter.epoch, config=OmegaConf.to_container(cfg, resolve=True),
-                    extra={
-                        "completed_updates": completed_updates,
-                        "run_identity": run_identity,
-                        "checkpoint_manager": ckpt.state_dict(),
-                        "normalizer": normalizer.state_dict(),
-                        "gradient_checkpointing": gradient_checkpointing,
-                    },
-                )
-                ckpt.maybe_save_val_loss(vscalars.get("val/loss_total", float("inf")), **payload)
-            save_training_checkpoint("periodic-validation")
+            save_training_checkpoint(
+                "periodic-validation",
+                best_val_loss=(
+                    vscalars.get("val/loss_total", float("inf"))
+                    if dist_info.is_main
+                    else None
+                ),
+            )
+        elif completed_updates % checkpoint_every == 0:
+            save_training_checkpoint("periodic")
 
         # ---------------------------------------------------- goal evaluation
         if completed_updates % int(cfg.train.eval_every) == 0:
@@ -1533,6 +1886,54 @@ def main(cfg: DictConfig) -> None:
             barrier()
             raise_if_stopping()
 
+    # ------------------------------------------------------- external stage gate
+    if stage_lifecycle_active:
+        if completed_updates != stage_stop_after:
+            raise RuntimeError(
+                f"stage stopped at {completed_updates}, expected {stage_stop_after} updates"
+            )
+        phase = "train"
+        pending_eval_step = None
+        save_training_checkpoint("awaiting-external-stage-gate")
+        stage_marker_failed = False
+        if dist_info.is_main:
+            try:
+                latest_path = ckpt.directory / "latest.pt"
+                atomic_json_dump(
+                    {
+                        "schema_version": 1,
+                        "status": "awaiting_external_stage_gate",
+                        "objective_version": objective_version,
+                        "completed_updates": completed_updates,
+                        "step": completed_updates,
+                        "total_steps": total_steps,
+                        "scheduler_total_steps": scheduler_total_steps,
+                        "identity_sha256": identity_sha256,
+                        "checkpoint": "checkpoints/latest.pt",
+                        "checkpoint_sha256": _file_sha256(latest_path),
+                        "evaluation_seed_tables_sha256": evaluation_seed_tables["sha256"],
+                    },
+                    run_dir
+                    / "stage-gates"
+                    / f"AWAITING_GATE_{stage_stop_after}.json",
+                )
+                logger.flush()
+            except BaseException as exc:
+                stage_marker_failed = True
+                print(
+                    f"[treewm] stage-gate marker write failed: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        barrier()
+        if any_rank_true(stage_marker_failed, device):
+            cleanup_distributed()
+            raise RuntimeError("failed to durably publish stage-gate marker")
+        logger.close(exit_code=0)
+        barrier()
+        cleanup_distributed()
+        return
+
     # ------------------------------------------------------------ final eval
     if completed_updates != total_steps:
         raise RuntimeError(
@@ -1555,6 +1956,8 @@ def main(cfg: DictConfig) -> None:
                 progress_state = json.load(handle)
             if (
                 progress_state.get("identity_sha256") != identity_sha256
+                or progress_state.get("seed_table_sha256")
+                != evaluation_seed_tables["final"]["sha256"]
                 or progress_state.get("task_ids")
                 != [int(task.get("task_id", i + 1)) for i, task in enumerate(tasks)]
                 or int(progress_state.get("episodes_per_task", -1))
@@ -1587,6 +1990,7 @@ def main(cfg: DictConfig) -> None:
                     "objective_version": objective_version,
                     "status": "in_progress",
                     "identity_sha256": identity_sha256,
+                    "seed_table_sha256": evaluation_seed_tables["final"]["sha256"],
                     "task_ids": [
                         int(task.get("task_id", i + 1)) for i, task in enumerate(tasks)
                     ],
@@ -1608,6 +2012,14 @@ def main(cfg: DictConfig) -> None:
             stop_callback=lambda: stop.requested,
             completed_results=completed_results,
             episode_callback=persist_final_episode,
+            episode_seed_table=(
+                evaluation_seed_tables["final"]
+                if use_protocol_bound_evaluation_seeds
+                else None
+            ),
+            expected_episode_seed_split=(
+                "final" if use_protocol_bound_evaluation_seeds else None
+            ),
         )
         atomic_json_dump(
             {
@@ -1615,6 +2027,7 @@ def main(cfg: DictConfig) -> None:
                 "objective_version": objective_version,
                 "status": "complete",
                 "identity_sha256": identity_sha256,
+                "seed_table_sha256": evaluation_seed_tables["final"]["sha256"],
                 "task_ids": [
                     int(task.get("task_id", i + 1)) for i, task in enumerate(tasks)
                 ],
@@ -1673,6 +2086,9 @@ def main(cfg: DictConfig) -> None:
                     "status": "complete",
                     "run_identity": run_identity,
                     "identity_sha256": identity_sha256,
+                    "evaluation_seed_tables": seed_tables_path.name,
+                    "evaluation_seed_tables_sha256": evaluation_seed_tables["sha256"],
+                    "final_seed_table_sha256": evaluation_seed_tables["final"]["sha256"],
                     "protocol_sha256": protocol_sha256,
                     "code_sha256": code_fingerprint["manifest_sha256"],
                     "runtime_sha256": runtime["sha256"],

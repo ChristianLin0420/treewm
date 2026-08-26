@@ -432,6 +432,12 @@ def test_post_training_gradient_audit_gate_is_encoder_specific():
         validate_pilot.validate_gradient_audit(initialization, "scene")
 
 
+def test_gradient_audit_uses_the_preregistered_validation_anchor_selection():
+    source = (CAMPAIGN_DIR / "gpu_preflight.py").read_text(encoding="utf-8")
+    assert "max_val_anchors=int(cfg.train.max_val_anchors)" in source
+    assert "max_val_anchors=16" not in source
+
+
 def test_pilot_launch_rewrites_only_lifecycle_overrides(manifest, tmp_path, monkeypatch):
     run = validate_pilot.seed_zero_run(manifest, 0)
     command = [

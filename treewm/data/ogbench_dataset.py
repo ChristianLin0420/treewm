@@ -318,6 +318,7 @@ def build_datasets(
     cache_root: str | None = None,
     data_manifest_sha256: str | None = None,
     task_metric_dims: tuple[int, ...] | None = None,
+    recipe_anchor_policy: str = "selected_seed",
 ) -> tuple[Any, ChunkDataset, ChunkDataset, Normalizer]:
     """Load ``dataset_name`` and build train/val :class:`ChunkDataset` objects.
 
@@ -325,6 +326,10 @@ def build_datasets(
     from a memory-mapped on-disk cache built exactly once (see
     :mod:`treewm.data.shared_cache`), so concurrent jobs share one physical copy.
     """
+    if recipe_anchor_policy not in {"selected_seed", "published_union"}:
+        raise ValueError(
+            "recipe_anchor_policy must be 'selected_seed' or 'published_union'"
+        )
     source_name = source_name or dataset_name
     sharded = dataset_kind == "sharded_100m_full"
     if dataset_kind not in (None, "standard", "sharded_100m_full"):
@@ -369,7 +374,12 @@ def build_datasets(
         if data_manifest_sha256 and data_manifest_sha256 != train_ds.manifest_sha256:
             raise ValueError("injected data manifest SHA256 does not match full-shard cache")
         _attach_future_recipes_if_requested(
-            train_ds, val_ds, normalizer, future_cfg, train_ds.manifest_sha256
+            train_ds,
+            val_ds,
+            normalizer,
+            future_cfg,
+            train_ds.manifest_sha256,
+            anchor_policy=recipe_anchor_policy,
         )
         return env, train_ds, val_ds, normalizer
 
@@ -397,7 +407,12 @@ def build_datasets(
         if data_manifest_sha256 and data_manifest_sha256 != manifest_sha256:
             raise ValueError("injected data manifest SHA256 does not match standard cache")
         _attach_future_recipes_if_requested(
-            train_ds, val_ds, normalizer, future_cfg, manifest_sha256
+            train_ds,
+            val_ds,
+            normalizer,
+            future_cfg,
+            manifest_sha256,
+            anchor_policy=recipe_anchor_policy,
         )
         return env, train_ds, val_ds, normalizer
 
@@ -428,17 +443,36 @@ def recipe_producer_identity_from_env() -> tuple[str | None, str | None]:
     )
 
 
+def apply_recipe_anchor_policy(
+    train_ds: ChunkDataset,
+    val_ds: ChunkDataset,
+    train_recipe: Any,
+    val_recipe: Any,
+    anchor_policy: str,
+) -> None:
+    """Bind datasets to either their selected slice or the sealed recipe union."""
+    if anchor_policy == "published_union":
+        train_ds.anchors = np.asarray(train_recipe.anchors, dtype=np.int64)
+        val_ds.anchors = np.asarray(val_recipe.anchors, dtype=np.int64)
+    elif anchor_policy != "selected_seed":
+        raise ValueError(f"unsupported recipe anchor policy {anchor_policy!r}")
+
+
 def _attach_future_recipes_if_requested(
     train_ds: ChunkDataset,
     val_ds: ChunkDataset,
     normalizer: Normalizer,
     future_cfg: FutureSetConfig,
     source_manifest_sha256: str,
+    *,
+    anchor_policy: str = "selected_seed",
 ) -> None:
     """Wire formal-v2 recipes without changing historical dataset semantics."""
     recipe_root_value = os.environ.get("TREEWM_FUTURE_RECIPE_ROOT")
     calibration_sha256 = os.environ.get("TREEWM_CALIBRATION_SHA256")
     if not recipe_root_value:
+        if anchor_policy != "selected_seed":
+            raise ValueError("published_union anchor policy requires a formal future recipe")
         if calibration_sha256 and future_cfg.metric_mode == "rms_v2":
             raise ValueError("formal v2 supplied calibration identity but no recipe root")
         return
@@ -484,6 +518,12 @@ def _attach_future_recipes_if_requested(
         expected_source_manifest_sha256=source_manifest_sha256,
         expected_calibration_sha256=calibration_sha256,
     )
+    # The published-union option reuses the exact union already sealed across all four
+    # preregistered seed selections: more unique anchors, but no recomputed targets and
+    # no anchor that the immutable recipe cannot substantiate.
+    apply_recipe_anchor_policy(
+        train_ds, val_ds, train_recipe, val_recipe, anchor_policy
+    )
     train_ds.attach_future_recipe(train_recipe)
     val_ds.attach_future_recipe(val_recipe)
     train_ds.future_recipe_sha256 = expected_recipe_sha256
@@ -495,4 +535,9 @@ def _attach_future_recipes_if_requested(
         "future_recipe/consumed": 1.0,
         "future_recipe/train_rows": float(len(train_recipe.records)),
         "future_recipe/validation_rows": float(len(val_recipe.records)),
+        "future_recipe/published_union_anchors": float(
+            anchor_policy == "published_union"
+        ),
     }
+    train_ds.recipe_anchor_policy = anchor_policy
+    val_ds.recipe_anchor_policy = anchor_policy

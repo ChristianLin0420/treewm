@@ -352,6 +352,35 @@ def test_budget_sweep_propagates_domain_to_planner_and_evaluator(monkeypatch):
     assert seen == {"planner": [domain], "evaluate": [domain]}
 
 
+def test_budget_sweep_counts_first_edge_guard_predictions(monkeypatch):
+    class FakePlanner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(rollout, "GoalPlanner", FakePlanner)
+    monkeypatch.setattr(
+        rollout,
+        "evaluate",
+        lambda *_args, **_kwargs: {"eval/world_model_nodes_per_replan": 8.0},
+    )
+    import treewm.models.baselines as baselines
+
+    monkeypatch.setattr(baselines, "tree_config_for", lambda _arm, cfg, _model: cfg)
+    model = type("Model", (), {"cfg": type("Cfg", (), {"branch_factor": 4})()})()
+    planner_cfg = type(
+        "PlannerCfg", (), {"require_first_edge_improvement": True}
+    )()
+    rollout.sweep_budgets(
+        object(),
+        model,
+        object(),
+        [],
+        [4],
+        TreeConfig(node_budget=4),
+        planner_cfg,
+    )
+
+
 def test_loss_warmup_ramps_redundancy():
     cfg = LossConfig()
     assert cfg.scale("redundancy", 0) == 0.0

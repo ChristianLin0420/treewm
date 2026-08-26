@@ -1,15 +1,23 @@
 # @package _global_
 #
-# Clean-restart diagnostic objective after the stopped formal-v2 campaign. This is a
-# bounded pilot, not a promotable 1M recipe: it corrects planner/validation semantics and
-# exercises trajectory-grounded recursive training while retaining the calibrated v2
-# future recipes. Promotion is decided from held-out loss, q/gain gates, and rollouts.
+# Fresh 1M grounded TreeWM formal objective. The campaign package redundantly overrides
+# every material field; these defaults keep direct composition fail-closed and ensure
+# this formal objective never inherits the bounded pilot's identity or anchor policy.
 
-objective_version: treewm_v2_grounded_pilot_v1
+objective_version: treewm_v2_grounded_formal_v1
 
 train:
-  # Regularisation bundle selected as one axis of the corrected 2x2 pilot. Individual
-  # arms override these back to the v2 values so its effect remains identifiable.
+  # A direct composition must carry the same scientific horizon as the guarded
+  # campaign. Missing campaign/data provenance will then fail closed before training;
+  # it can never silently become an unrelated 50k experiment.
+  steps: 1000000
+  scheduler_total_steps: 1000000
+  ckpt_every: 1000
+  val_every: 2000
+  diag_every: 2000
+  eval_every: 25000
+  num_workers: 10
+  gradient_checkpointing: true
   lr: 1.0e-4
   weight_decay: 1.0e-3
   separate_gain_grad_clip: true
@@ -28,21 +36,21 @@ model:
 
 tree:
   keep_threshold: 0.5
-  # Training provides three grounded recursive transitions. Do not ask inference to
-  # rank unsupported depth-4+ hallucinations in this pilot.
   max_depth: 3
 
 future_sets:
   metric_mode: rms_v2
-  # Consume the immutable normalised memmaps and compatible future recipes. The raw
-  # per-item future-set cache stays disabled because the recipe is the sole target rail.
+  recipe_anchor_policy: published_union
   cache: false
   shared_cache: true
   retrieval_pool: 50000
-  retrieval_radius: -1.0
-  displacement_threshold: -1.0
-  cluster_threshold: -1.0
+  # Valid direct-composition defaults. The sealed campaign replaces all three with
+  # each setting's protocol-bound calibration before any formal worker is launched.
+  retrieval_radius: 1.0
+  displacement_threshold: 0.25
+  cluster_threshold: 0.25
   max_modes: 4
+  multi_step_depth: 3
 
 matching:
   normalization_version: rms_v2
@@ -85,3 +93,10 @@ planner:
   decoded_metric: domain_raw
   execute_mode: clipped
   execute_steps: 4
+  require_first_edge_improvement: true
+  min_first_edge_improvement: 0.0
+
+eval:
+  task_split: standard
+  episodes_per_task: 1
+  final_episodes_per_task: 50

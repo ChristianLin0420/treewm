@@ -24,6 +24,69 @@ from treewm.tree.frontier import GOAL_AWARE_SCORERS
 _ONEHOT_TIEBREAK_SCALE = 1.0e-3
 
 
+def first_root_edge_indices(parent_index: torch.Tensor) -> torch.Tensor:
+    """Return the first root-edge slot on every node's path.
+
+    ``BatchedTree`` is topologically ordered: a parent is always stored before its
+    children.  Keeping this small helper tensor-only makes the non-regression contract
+    easy to test independently of an environment or model.
+    """
+    if parent_index.ndim != 2:
+        raise ValueError("parent_index must have shape [B, N]")
+    batch, nodes = parent_index.shape
+    first = torch.zeros_like(parent_index)
+    rows = torch.arange(batch, device=parent_index.device)
+    for slot in range(1, nodes):
+        parent = parent_index[:, slot]
+        # Unallocated slots use parent=-1. They map to root here and are removed by the
+        # caller's validity mask; any other negative value is malformed.
+        if bool(((parent < -1) | (parent >= slot)).any()):
+            raise ValueError("tree parents must precede their children")
+        safe_parent = parent.clamp_min(0)
+        first[:, slot] = torch.where(
+            parent < 0,
+            torch.zeros_like(parent),
+            torch.where(
+                parent == 0,
+                torch.full_like(parent, slot),
+                first[rows, safe_parent],
+            ),
+        )
+    return first
+
+
+def first_edge_improvement_mask(
+    executable_first_edge_score: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    current_observation_score: torch.Tensor,
+    minimum_improvement: float = 0.0,
+) -> torch.Tensor:
+    """Keep nodes whose executable first edge improves on the actual observation.
+
+    Tree search may rank a deep hallucinated endpoint highly even though only its first
+    edge will be executed.  This guard compares that actually executable edge with the
+    observed current state in the same domain-aligned metric.  Using the observation
+    rather than the decoded root avoids making safety decisions from reconstruction
+    error. The root is never executable and is therefore false in the returned mask.
+    """
+    if executable_first_edge_score.ndim != 2:
+        raise ValueError("executable_first_edge_score must have shape [B, N]")
+    if valid.shape != executable_first_edge_score.shape:
+        raise ValueError("first-edge score and valid tensors must have identical shapes")
+    if current_observation_score.shape != (executable_first_edge_score.shape[0],):
+        raise ValueError("current_observation_score must have shape [B]")
+    if minimum_improvement < 0:
+        raise ValueError("minimum_improvement must be non-negative")
+    allowed = valid & (
+        executable_first_edge_score
+        <= current_observation_score.unsqueeze(1) - float(minimum_improvement)
+    )
+    allowed = allowed.clone()
+    allowed[:, 0] = False
+    return allowed
+
+
 def decoded_goal_scores(
     node_obs_n: torch.Tensor,
     goal_obs_n: torch.Tensor,
@@ -155,6 +218,12 @@ class PlannerConfig:
     use_uncertainty: bool = False
     uncertainty_weight: float = 0.0
     exclude_root: bool = True
+    # A selected deep node only contributes its first root-edge action before replanning.
+    # When enabled, reject candidates whose executable first edge is predicted to be
+    # worse than the current state in the same decoded domain metric. If no candidate
+    # remains, return an empty action sequence instead of knowingly regressing.
+    require_first_edge_improvement: bool = False
+    min_first_edge_improvement: float = 0.0
 
 
 @dataclass
@@ -221,6 +290,65 @@ class GoalPlanner:
             return (1.0 - w) * endpoint_score + w * best_on_path
         raise ValueError(f"unknown score_mode {self.cfg.score_mode!r}")
 
+    def _executable_first_edge_scores(
+        self,
+        model,
+        root_z: torch.Tensor,
+        tree,
+        goal_n: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict the state reached by the prefix the controller actually executes.
+
+        Formal v1 replans after four primitive actions, while a learned root branch may
+        predict a 4/8/16/32/64-step endpoint. Scoring that full endpoint would not guard
+        the executable e4 transition. Reapply the root operator with the same action
+        head and the four-step horizon mask, then map each tree node to its root branch.
+        """
+        horizons = tuple(int(value) for value in model.cfg.horizons)
+        execute_steps = int(self.cfg.execute_steps)
+        if (
+            self.cfg.execute_mode != "clipped"
+            or not horizons
+            or execute_steps != min(horizons)
+            or execute_steps not in horizons
+        ):
+            raise ValueError(
+                "first-edge improvement requires clipped execution at the minimum "
+                "model horizon so the executed prefix has an exact dynamics target"
+            )
+        if not hasattr(model, "predict_children"):
+            raise ValueError("first-edge improvement requires recursive child prediction")
+        batch = root_z.shape[0]
+        branch_factor = int(model.cfg.branch_factor)
+        horizon_index = horizons.index(execute_steps)
+        horizon_override = torch.full(
+            (batch, branch_factor),
+            horizon_index,
+            dtype=torch.long,
+            device=root_z.device,
+        )
+        prefix = model.predict_children(
+            root_z,
+            torch.zeros(batch, dtype=torch.long, device=root_z.device),
+            horizon_override=horizon_override,
+        )
+        prefix_obs = model.decoder(prefix["latent"])
+        prefix_branch_score = decoded_goal_scores(
+            prefix_obs,
+            goal_n,
+            decoded_metric=self.cfg.decoded_metric,
+            goal_dims=self.goal_dims,
+            goal_metric=self.domain.goal_metric if self.domain is not None else "l2",
+            subgoals=self.domain.subgoals if self.domain is not None else (),
+            obs_mean=self.obs_mean,
+            obs_std=self.obs_std,
+        )
+        root_branch = tree.root_branch
+        malformed = tree.valid & (root_branch >= branch_factor)
+        if bool(malformed.any()):
+            raise ValueError("tree root-branch identity exceeds the model branch factor")
+        return prefix_branch_score.gather(1, root_branch.clamp(min=0))
+
     @torch.no_grad()
     def plan(self, obs: np.ndarray, goal: np.ndarray, generator=None, return_tree: bool = False) -> PlanResult:
         generator = generator or self.generator
@@ -243,7 +371,7 @@ class GoalPlanner:
             node_obs = model.decoder(tree.latent)  # [1, N, obs_dim]
             if self.cfg.decoded_metric == "domain_raw" and self.domain is None:
                 raise ValueError("planner.decoded_metric=domain_raw requires a Domain adapter")
-            score = decoded_goal_scores(
+            endpoint_score = decoded_goal_scores(
                 node_obs,
                 goal_n,
                 decoded_metric=self.cfg.decoded_metric,
@@ -253,22 +381,69 @@ class GoalPlanner:
                 obs_mean=self.obs_mean,
                 obs_std=self.obs_std,
             )
+            # The root latent decodes only an approximation of the current state.
+            # Guard executable actions against the actual observation, otherwise a
+            # reconstruction error can approve a regressive first edge (or reject a
+            # real improvement), especially for categorical puzzle/scene state.
+            current_observation_score = decoded_goal_scores(
+                obs_n.unsqueeze(1),
+                goal_n,
+                decoded_metric=self.cfg.decoded_metric,
+                goal_dims=self.goal_dims,
+                goal_metric=self.domain.goal_metric if self.domain is not None else "l2",
+                subgoals=self.domain.subgoals if self.domain is not None else (),
+                obs_mean=self.obs_mean,
+                obs_std=self.obs_std,
+            )[:, 0]
         else:
-            score = torch.linalg.vector_norm(tree.latent - z_goal.unsqueeze(1), dim=-1)  # [1, N]
+            endpoint_score = torch.linalg.vector_norm(
+                tree.latent - z_goal.unsqueeze(1), dim=-1
+            )  # [1, N]
+            # Latent/legacy planners do not use the executable-edge guard, but a
+            # root-only or otherwise fully masked tree still needs a defined no-action
+            # score instead of reading the decoded-only observation baseline.
+            current_observation_score = endpoint_score[:, 0]
 
+        score = endpoint_score
         if self.cfg.score_mode != "endpoint":
             score = self._path_aware_score(tree, score)
         if self.cfg.use_uncertainty and self.cfg.uncertainty_weight != 0.0:
             score = score + self.cfg.uncertainty_weight * tree.uncertainty
 
         invalid = ~tree.valid
+        guard_extra_predictions = 0
+        if self.cfg.require_first_edge_improvement:
+            if self.cfg.score_space != "decoded" or model.decoder is None:
+                raise ValueError(
+                    "first-edge improvement requires decoded planner scoring"
+                )
+            executable_first_edge_score = self._executable_first_edge_scores(
+                model,
+                z,
+                tree,
+                goal_n,
+            )
+            guard_extra_predictions = int(model.cfg.branch_factor)
+            allowed = first_edge_improvement_mask(
+                executable_first_edge_score,
+                tree.valid,
+                current_observation_score=current_observation_score,
+                minimum_improvement=float(self.cfg.min_first_edge_improvement),
+            )
+            invalid = invalid | ~allowed
         if self.cfg.exclude_root:
             # The root is the current state: selecting it would mean "do nothing".
             invalid = invalid.clone()
             invalid[:, 0] = True
         score = score.masked_fill(invalid, float("inf"))
 
-        best = int(score.argmin(dim=1).item())
+        if not bool(torch.isfinite(score).any()):
+            # Fail closed: no predicted executable edge improves on the current state.
+            best = 0
+            selected_score = current_observation_score[0]
+        else:
+            best = int(score.argmin(dim=1).item())
+            selected_score = score[0, best]
         chain = tree.path_to_root(torch.tensor([best], device=self.device))
         path = [int(c.item()) for c in chain]
         # Drop the root and any repeats introduced by padding shallower paths.
@@ -299,8 +474,12 @@ class GoalPlanner:
             actions=actions.astype(np.float32),
             selected_node=best,
             path_length=len(trimmed),
-            num_nodes=int(tree.num_nodes[0].item()),
+            # The search tree remains capped by tree.node_budget, while the e4 safety
+            # guard evaluates one additional K-way root-prefix prediction. Include that
+            # real model compute in rollout-normalized telemetry instead of reporting a
+            # misleading 64 when 68 successor predictions were scored.
+            num_nodes=int(tree.num_nodes[0].item()) + guard_extra_predictions,
             selected_depth=int(tree.depth[0, best].item()),
-            goal_distance=float(score[0, best].item()),
+            goal_distance=float(selected_score.item()),
             tree=tree if return_tree else None,
         )

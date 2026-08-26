@@ -50,10 +50,20 @@ train:
   viz_early_until: 2000
   viz_anchors: 4          # fixed diagnostic anchors rendered during training
   ckpt_every: 2000
+  # Null preserves historical behavior: validation accompanies every checkpoint.
+  # Formal campaigns may checkpoint more often than their fixed held-out evaluation.
+  val_every: null
   val_batches: 20
-  # The expansion-gain stage generates a full tree per step, so it runs on a stride.
+  # Historical/v1 cadence. Corrected v2 recipes explicitly override this to every step.
   gain_loss_every: 4
   gain_batch_size: 64
+  # Null preserves legacy shared-optimizer settings. Formal v2 pins a dedicated gain
+  # optimizer policy independently of the world-model regularisation axis.
+  gain_lr: null
+  gain_weight_decay: null
+  # Null preserves each historical arm's configured gain-tree scorer. Corrected v2
+  # explicitly pins its deterministic mixed behavior policy.
+  gain_training_scorers: null
   # Node budget for the tree grown *to train the gain head* -- small and uniform across
   # arms. This is NOT the evaluation budget. SingleWM's tree is a chain, so at the full
   # budget it runs 63 sequential expansions per gain step (measured ~2.2x slower overall
@@ -84,6 +94,9 @@ future_sets:
   # loading and normalising its own copy (treewm/data/shared_cache.py). Essential when
   # 16 jobs share one host: antsoccer alone is 4M x 42 per process otherwise.
   shared_cache: false
+  # selected_seed preserves historical per-seed slices. published_union consumes the
+  # exact union already sealed into a compatible formal future recipe.
+  recipe_anchor_policy: selected_seed  # selected_seed | published_union
   horizon_rule: displacement
   displacement_threshold: 0.25
   fixed_horizon: 32
@@ -213,6 +226,8 @@ planner:
   use_uncertainty: false
   uncertainty_weight: 0.0
   exclude_root: true
+  require_first_edge_improvement: false
+  min_first_edge_improvement: 0.0
 
 # ----------------------------------------------------------------- evaluation
 eval:

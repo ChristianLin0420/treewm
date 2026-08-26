@@ -35,6 +35,7 @@ from treewm.models.baselines import build_model, tree_config_for
 from treewm.models.branch_transformer import ExpansionGainHead
 from treewm.models.treewm import TreeWMConfig
 from treewm.tree.expansion import TreeConfig
+from treewm.tree.frontier import ScoringContext, learned_score
 from treewm.tree.matching import MatchingConfig
 from treewm.tree.node import BatchedTree
 
@@ -178,6 +179,184 @@ def test_frontier_rank_loss_rewards_order_and_weights_decisions_equally():
     assert float(combined) == pytest.approx(float(torch.stack(row_losses).mean()), abs=1e-7)
 
 
+def test_frontier_gain_excludes_unrankable_rows_and_credits_prediction_ties():
+    predicted = torch.tensor(
+        [[91.0, 0.0, 0.0], [37.0, -9.0, 4.0], [0.0, 0.0, 1.0]],
+        requires_grad=True,
+    )
+    target = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, 1.00004, 1.00009], [0.0, 0.001, 0.01]]
+    )
+    frontier = torch.tensor(
+        [[1, 0, 0], [1, 1, 1], [1, 1, 1]], dtype=torch.bool
+    )
+    loss, metrics = frontier_gain_objective(
+        predicted,
+        target,
+        frontier,
+        rank_weight=1.0,
+        calibration_weight=1.0,
+    )
+    eligible_loss, _ = frontier_gain_objective(
+        predicted[2:],
+        target[2:],
+        frontier[2:],
+        rank_weight=1.0,
+        calibration_weight=1.0,
+    )
+
+    assert float(loss) == pytest.approx(float(eligible_loss), abs=1e-7)
+    assert metrics["decision_count"] == 3
+    assert metrics["ranking_decision_count"] == 1
+    assert metrics["calibration_decision_count"] == 1
+    assert metrics["eligible_decision_fraction"] == pytest.approx(1 / 3)
+    assert metrics["total_pair_count"] == 6
+    assert metrics["ordered_pair_count"] == 3
+    assert metrics["target_tie_fraction"] == pytest.approx(0.5)
+    assert metrics["predicted_tie_fraction"] == pytest.approx(1 / 3)
+    assert metrics["pairwise_accuracy"] == pytest.approx(5 / 6)
+    loss.backward()
+    assert torch.equal(predicted.grad[:2], torch.zeros_like(predicted.grad[:2]))
+
+
+def test_frontier_gain_adaptive_tie_band_is_scale_relative():
+    predicted = torch.tensor([[0.0, 0.1, 1.0]])
+    frontier = torch.ones_like(predicted, dtype=torch.bool)
+    for scale in (1.0, 100.0):
+        target = scale * torch.tensor([[0.0, 0.04, 1.0]])
+        _, metrics = frontier_gain_objective(predicted, target, frontier)
+        assert metrics["ordered_pair_count"] == 2
+        assert metrics["target_tie_fraction"] == pytest.approx(1 / 3)
+        assert metrics["mean_target_tie_band"] == pytest.approx(0.05 * scale)
+
+
+def test_frontier_gain_rank_does_not_chain_smooth_adjacent_values_into_one_tie():
+    target = torch.linspace(0.0, 1.0, 26).unsqueeze(0)
+    frontier = torch.ones_like(target, dtype=torch.bool)
+    _, metrics = frontier_gain_objective(target.clone(), target, frontier)
+
+    assert metrics["ordered_pair_count"] == 300
+    assert metrics["pair_coverage_fraction"] == pytest.approx(300 / 325)
+    assert metrics["pairwise_accuracy"] == pytest.approx(1.0)
+    assert metrics["rank_correlation"] == pytest.approx(1.0)
+
+
+def test_gain_loss_disables_autocast_and_records_deterministic_behavior_mix(monkeypatch):
+    class RecordingHead(torch.nn.Module):
+        set_aware_enabled = True
+
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(1, 1)
+            self.autocast_enabled = []
+
+        def forward(self, node_feats, *_args, **_kwargs):
+            self.autocast_enabled.append(torch.is_autocast_enabled("cpu"))
+            return self.linear(node_feats.float()).squeeze(-1)
+
+    class RecordingModel:
+        def __init__(self):
+            self.gain_head = RecordingHead()
+            self.calls = []
+
+        def generate(self, z, cfg, **_kwargs):
+            self.calls.append((cfg.scorer, z[:, 0].tolist()))
+            batch = z.shape[0]
+            feats = torch.tensor([[-1.0, 0.0, 2.0]]).repeat(batch, 1).unsqueeze(-1)
+            snapshot = {
+                "feats": feats,
+                "context": None,
+                "depth": torch.zeros(batch, 3, dtype=torch.long),
+                "keep": torch.ones(batch, 3),
+                "sigma": torch.ones(batch, 3),
+                "valid": torch.ones(batch, 3, dtype=torch.bool),
+                "frontier": torch.ones(batch, 3, dtype=torch.bool),
+                "target": torch.tensor([[0.1, 0.3, 0.9]]).repeat(batch, 1),
+            }
+            trace = SimpleNamespace(
+                snapshots=[snapshot],
+                frontier_novelty_before=[],
+                frontier_novelty_after=[],
+            )
+            return object(), trace
+
+    monkeypatch.setattr(
+        "treewm.losses.expansion_losses.tree_expansion_metrics", lambda *_args: {}
+    )
+    model = RecordingModel()
+    z0 = torch.arange(4.0).unsqueeze(-1)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        loss, metrics = novelty_gain_loss(
+            model,
+            z0,
+            TreeConfig(node_budget=3, scorer="learned"),
+            rank_weight=1.0,
+            calibration_weight=0.0,
+            training_scorers=("learned", "novelty_q"),
+        )
+
+    assert model.calls == [("learned", [0.0, 2.0]), ("novelty_q", [1.0, 3.0])]
+    assert model.gain_head.autocast_enabled == [False, False]
+    assert loss.dtype == torch.float32
+    assert metrics["expansion/gain_objective_fp32"] == 1.0
+    assert metrics["expansion/gain_training_scorer_learned_fraction"] == 0.5
+    assert metrics["expansion/gain_training_scorer_novelty_q_fraction"] == 0.5
+    assert metrics["expansion/gain_ranking_decision_count"] == 4
+
+    class NoFrontierModel(RecordingModel):
+        def generate(self, z, cfg, **kwargs):
+            tree, trace = super().generate(z, cfg, **kwargs)
+            trace.snapshots[0]["frontier"].zero_()
+            return tree, trace
+
+    no_frontier = NoFrontierModel()
+    empty_z = z0.clone().requires_grad_(True)
+    empty_loss, empty_metrics = novelty_gain_loss(
+        no_frontier,
+        empty_z,
+        TreeConfig(node_budget=3, scorer="learned"),
+        rank_weight=1.0,
+    )
+    assert float(empty_loss) == 0.0
+    assert empty_metrics == {}
+    empty_loss.backward()
+    assert torch.equal(empty_z.grad, torch.zeros_like(empty_z))
+
+
+def test_learned_frontier_allocation_is_fp32_inside_training_autocast():
+    class RecordingHead(torch.nn.Module):
+        set_aware_enabled = True
+
+        def __init__(self):
+            super().__init__()
+            self.autocast_enabled: list[bool] = []
+            self.input_dtypes: list[torch.dtype] = []
+
+        def forward(self, node_feats, *_args, **_kwargs):
+            self.autocast_enabled.append(torch.is_autocast_enabled("cpu"))
+            self.input_dtypes.append(node_feats.dtype)
+            return node_feats.sum(-1)
+
+    tree = BatchedTree.initialize(
+        torch.zeros(1, 1),
+        torch.ones(1, 1, 1),
+        capacity=2,
+        h_max=4,
+        action_dim=1,
+    )
+    frontier = tree.expandable_frontier()
+    head = RecordingHead()
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        scores = learned_score(
+            tree,
+            frontier,
+            ScoringContext(gain_head=head, novelty_space="q"),
+        )
+    assert head.autocast_enabled == [False]
+    assert head.input_dtypes == [torch.float32]
+    assert scores.dtype == torch.float32
+
+
 def test_set_gain_excludes_self_and_uses_nonself_set_geometry():
     torch.manual_seed(7)
     head = ExpansionGainHead(feat_dim=1, hidden_dim=16, num_attention_heads=4)
@@ -221,6 +400,54 @@ def test_set_gain_excludes_self_and_uses_nonself_set_geometry():
     assert torch.isfinite(lone).all(), "lone-root attention must not be all-masked"
 
 
+def test_set_gain_head_can_overfit_synthetic_nearest_neighbor_ranking():
+    """The scorer/objective pair must have enough signal to fit its declared target."""
+    torch.manual_seed(123)
+    batch_size, nodes = 12, 6
+    base = torch.tensor([0.0, 0.02, 0.12, 0.4, 1.0, 2.0]).view(nodes, 1)
+    features = torch.stack([base[torch.randperm(nodes)] for _ in range(batch_size)])
+    target = torch.cdist(features, features)
+    target = target.masked_fill(
+        torch.eye(nodes, dtype=torch.bool).unsqueeze(0), float("inf")
+    ).min(-1).values
+    valid = torch.ones(batch_size, nodes, dtype=torch.bool)
+    metadata = torch.zeros(batch_size, nodes)
+    head = ExpansionGainHead(feat_dim=1, hidden_dim=32, num_attention_heads=4)
+    head.set_set_aware(True)
+    optimizer = torch.optim.Adam(head.parameters(), lr=3e-3)
+
+    for _ in range(100):
+        predicted = head(
+            features,
+            features,
+            metadata.long(),
+            metadata,
+            metadata,
+            context_valid=valid,
+            exclude_self=True,
+        )
+        loss, _ = frontier_gain_objective(
+            predicted, target, valid, rank_weight=1.0, calibration_weight=0.0
+        )
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        predicted = head(
+            features,
+            features,
+            metadata.long(),
+            metadata,
+            metadata,
+            context_valid=valid,
+            exclude_self=True,
+        )
+        _, metrics = frontier_gain_objective(predicted, target, valid)
+    assert metrics["pairwise_accuracy"] > 0.95
+    assert metrics["rank_correlation"] > 0.90
+
+
 def test_v2_gain_loss_reaches_only_contextual_and_enabled_prior_heads():
     cfg = TreeWMConfig(
         obs_dim=2,
@@ -236,14 +463,15 @@ def test_v2_gain_loss_reaches_only_contextual_and_enabled_prior_heads():
     tree_cfg = tree_config_for(
         "treewm", TreeConfig(node_budget=12, branch_factor=4, max_depth=8), model
     )
-    loss, _ = novelty_gain_loss(
+    loss, metrics = novelty_gain_loss(
         model,
         torch.randn(3, cfg.z_dim),
         tree_cfg,
         space="q",
         rank_weight=1.0,
-        calibration_weight=0.1,
+        calibration_weight=0.0,
         branch_prior_weight=0.25,
+        training_scorers=("learned", "novelty_q"),
     )
     loss.backward()
     assert model.gain_head.query_proj.weight.grad is not None
@@ -263,6 +491,8 @@ def test_v2_gain_loss_reaches_only_contextual_and_enabled_prior_heads():
         model.controllability,
     ):
         assert all(parameter.grad is None for parameter in module.parameters())
+    assert metrics["expansion/gain_training_scorer_learned_fraction"] == pytest.approx(2 / 3)
+    assert metrics["expansion/gain_training_scorer_novelty_q_fraction"] == pytest.approx(1 / 3)
 
 
 def test_objective_assembly_and_gain_stride_are_exact(monkeypatch):
@@ -348,7 +578,7 @@ def test_formal_v2_active_step_reaches_every_trainable_parameter():
         bind_negative_margin=0.1,
         gain_set_context=True,
         gain_rank_weight=1.0,
-        gain_calibration_weight=0.1,
+        gain_calibration_weight=0.0,
         gain_branch_prior_weight=0.0,
         control_batch=batch_size,
         recursive_batch=32,
@@ -365,6 +595,12 @@ def test_formal_v2_active_step_reaches_every_trainable_parameter():
         ),
         model,
     )
+    formal_train_cfg = SimpleNamespace(
+        gain_loss_every=1,
+        gain_lr=3.0e-4,
+        gain_weight_decay=0.0,
+        gain_training_scorers=("learned", "novelty_q"),
+    )
     contract = formal_v2_objective_contract(
         model,
         loss_cfg,
@@ -372,6 +608,7 @@ def test_formal_v2_active_step_reaches_every_trainable_parameter():
         SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
         tree_cfg,
         separate_gain_clip=True,
+        train_cfg=formal_train_cfg,
     )
     assert all(contract.values()), contract
     loss_cfg.future_scale = 0.5
@@ -382,6 +619,7 @@ def test_formal_v2_active_step_reaches_every_trainable_parameter():
         SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
         tree_cfg,
         separate_gain_clip=True,
+        train_cfg=formal_train_cfg,
     )["unit_future_scale"]
     loss_cfg.future_scale = 1.0
     module = TrainingStepModule(

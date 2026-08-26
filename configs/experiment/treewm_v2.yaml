@@ -10,6 +10,10 @@ train:
   separate_gain_grad_clip: true
   world_grad_clip: 1.0
   gain_grad_clip: 1.0
+  gain_loss_every: 1
+  gain_lr: 3.0e-4
+  gain_weight_decay: 0.0
+  gain_training_scorers: [learned, novelty_q]
 
 model:
   # The old two q heads shared one mixed-horizon target and were non-identifiable.
@@ -52,7 +56,9 @@ losses:
   gain_target: novelty
   gain_set_context: true
   gain_rank_weight: 1.0
-  gain_calibration_weight: 0.1
+  # Frontier allocation consumes ordering only. Raw singleton calibration caused the
+  # gain scores to collapse toward zero in the corrected pilot.
+  gain_calibration_weight: 0.0
   # These two heads are not consumed by the formal learned frontier scorer. Training
   # them would add auxiliary gradients (mass) or dead parameters (context-free prior)
   # without changing inference, so v2 freezes both explicitly.

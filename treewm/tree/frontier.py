@@ -230,17 +230,24 @@ def learned_score(tree: BatchedTree, frontier: torch.Tensor, ctx: ScoringContext
     assert ctx.gain_head is not None, "learned scorer needs an ExpansionGainHead"
     features = node_features(tree, ctx.novelty_space)
     if getattr(ctx.gain_head, "set_aware_enabled", False):
-        gain = ctx.gain_head(
-            features,
-            features,
-            tree.depth,
-            tree.keep_score.float(),
-            tree.uncertainty.float(),
-            context_valid=tree.valid,
-            exclude_self=True,
-        )
+        # V2 gain differences are deliberately small. BF16 can quantise distinct scores
+        # into ties, changing which frontier states are collected for the rank objective
+        # and creating a train/inference mismatch. Keep the repaired set-aware v2 path
+        # in FP32 even when tree generation is called inside training autocast.
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            features_fp32 = features.float()
+            gain = ctx.gain_head(
+                features_fp32,
+                features_fp32,
+                tree.depth,
+                tree.keep_score.float(),
+                tree.uncertainty.float(),
+                context_valid=tree.valid,
+                exclude_self=True,
+            )
     else:
-        # Exact v1 compatibility: retain the configured mean/max pooled token.
+        # Exact v1 compatibility: preserve the historical ambient autocast and pooled
+        # context path. The v2 FP32 repair must not alter already-available v1 runs.
         gain = ctx.gain_head(
             features,
             ctx.context_flat.float() if ctx.context_flat is not None else None,

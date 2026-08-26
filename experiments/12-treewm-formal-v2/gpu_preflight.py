@@ -336,7 +336,12 @@ def real_v2_gradient_audit(
         env, train_ds, _val_ds, normalizer = build_datasets(
             cfg.env.name, future_cfg, dataset_dir=cfg.env.dataset_dir,
             xy_dims=tuple(cfg.env.xy_dims), max_train_anchors=int(cfg.train.max_train_anchors),
-            max_val_anchors=16, seed=0, cache_future_sets=False, shared_cache=True,
+            # Dataset construction attaches and verifies both immutable recipes. Use the
+            # preregistered validation selection here; independently resampling only 16
+            # anchors selects a different set that the sealed recipe never claimed to
+            # cover and made every historical pilot audit fail before gradients ran.
+            max_val_anchors=int(cfg.train.max_val_anchors), seed=0,
+            cache_future_sets=False, shared_cache=True,
             dataset_kind=str(cfg.env.dataset_kind), source_name=str(cfg.env.source_name),
             expected_shards=int(cfg.env.get("expected_shards", 1)), cache_root=str(cache_root),
             data_manifest_sha256=environment["TREEWM_DATA_SHA256"],

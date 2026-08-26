@@ -10,9 +10,12 @@ so that two arms see the same start states.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -22,6 +25,191 @@ from treewm.planning.goal_planner import GoalPlanner
 
 class EvaluationInterrupted(RuntimeError):
     """A deferred lifecycle request interrupted evaluation at a safe boundary."""
+
+
+SEED_TABLE_SCHEMA_VERSION = 1
+MAX_ENVIRONMENT_SEED = 2**31 - 1
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _seed_table_sha256(value: Mapping[str, Any]) -> str:
+    body = dict(value)
+    body.pop("sha256", None)
+    return hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+
+
+def _protocol_seed(
+    protocol_sha256: str,
+    split: str,
+    task_id: int,
+    episode_index: int,
+    nonce: int,
+) -> int:
+    digest = hashlib.sha256(
+        _canonical_json(
+            {
+                "protocol_sha256": protocol_sha256,
+                "split": split,
+                "task_id": int(task_id),
+                "episode_index": int(episode_index),
+                "nonce": int(nonce),
+            }
+        ).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") % MAX_ENVIRONMENT_SEED
+
+
+def _build_seed_table(
+    protocol_sha256: str,
+    split: str,
+    task_ids: Sequence[int],
+    episodes_per_task: int,
+    used: set[int],
+) -> dict[str, Any]:
+    if split not in {"monitor", "final"}:
+        raise ValueError(f"unsupported evaluation seed split: {split!r}")
+    if episodes_per_task <= 0:
+        raise ValueError("episodes_per_task must be positive")
+    rows: list[list[int]] = []
+    for task_id in task_ids:
+        row: list[int] = []
+        for episode_index in range(episodes_per_task):
+            nonce = 0
+            value = _protocol_seed(
+                protocol_sha256,
+                split,
+                int(task_id),
+                episode_index,
+                nonce,
+            )
+            while value in used:
+                nonce += 1
+                value = _protocol_seed(
+                    protocol_sha256,
+                    split,
+                    int(task_id),
+                    episode_index,
+                    nonce,
+                )
+            used.add(value)
+            row.append(value)
+        rows.append(row)
+    table: dict[str, Any] = {
+        "schema_version": SEED_TABLE_SCHEMA_VERSION,
+        "split": split,
+        "protocol_sha256": protocol_sha256,
+        "task_ids": [int(value) for value in task_ids],
+        "episodes_per_task": int(episodes_per_task),
+        "seeds": rows,
+    }
+    table["sha256"] = _seed_table_sha256(table)
+    return table
+
+
+def validate_evaluation_seed_table(
+    table: Mapping[str, Any],
+    *,
+    split: str | None = None,
+    task_ids: Sequence[int] | None = None,
+    episodes_per_task: int | None = None,
+) -> None:
+    """Fail closed on an explicit, protocol-bound episode seed table."""
+    if table.get("schema_version") != SEED_TABLE_SCHEMA_VERSION:
+        raise ValueError("evaluation seed-table schema differs")
+    if _SHA256.fullmatch(str(table.get("protocol_sha256", ""))) is None:
+        raise ValueError("evaluation seed table is not protocol-bound")
+    if table.get("sha256") != _seed_table_sha256(table):
+        raise ValueError("evaluation seed-table hash differs")
+    if table.get("split") not in {"monitor", "final"}:
+        raise ValueError("evaluation seed-table split is invalid")
+    if split is not None and table.get("split") != split:
+        raise ValueError("evaluation seed-table split differs")
+    expected_tasks = (
+        [int(value) for value in task_ids]
+        if task_ids is not None
+        else [int(value) for value in table.get("task_ids", [])]
+    )
+    if table.get("task_ids") != expected_tasks or not expected_tasks:
+        raise ValueError("evaluation seed-table tasks differ")
+    expected_episodes = (
+        int(episodes_per_task)
+        if episodes_per_task is not None
+        else int(table.get("episodes_per_task", -1))
+    )
+    if int(table.get("episodes_per_task", -1)) != expected_episodes or expected_episodes <= 0:
+        raise ValueError("evaluation seed-table episode count differs")
+    rows = table.get("seeds")
+    if (
+        not isinstance(rows, list)
+        or len(rows) != len(expected_tasks)
+        or any(not isinstance(row, list) or len(row) != expected_episodes for row in rows)
+    ):
+        raise ValueError("evaluation seed-table shape differs")
+    flattened = [value for row in rows for value in row]
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        or not 0 <= value < MAX_ENVIRONMENT_SEED
+        for value in flattened
+    ):
+        raise ValueError("evaluation seed-table value is invalid")
+    if len(set(flattened)) != len(flattened):
+        raise ValueError("evaluation seed table contains duplicate episode seeds")
+
+
+def build_evaluation_seed_tables(
+    protocol_sha256: str,
+    training_seed: int,
+    task_ids: Sequence[int],
+    monitor_episodes_per_task: int,
+    final_episodes_per_task: int,
+) -> dict[str, Any]:
+    """Build protocol-bound, disjoint monitor/final episode banks.
+
+    The training seed is recorded for provenance but deliberately excluded from episode
+    derivation: every model seed and evaluation rail within a sealed campaign must see
+    paired environment episodes. Collision handling is deterministic within the union
+    of monitor and final banks.
+    """
+    protocol = str(protocol_sha256)
+    if _SHA256.fullmatch(protocol) is None:
+        raise ValueError("evaluation seed tables require a lowercase SHA256 protocol")
+    tasks = [int(value) for value in task_ids]
+    if not tasks or len(set(tasks)) != len(tasks):
+        raise ValueError("evaluation seed-table task IDs must be unique and nonempty")
+    used: set[int] = set()
+    monitor = _build_seed_table(
+        protocol,
+        "monitor",
+        tasks,
+        int(monitor_episodes_per_task),
+        used,
+    )
+    final = _build_seed_table(
+        protocol,
+        "final",
+        tasks,
+        int(final_episodes_per_task),
+        used,
+    )
+    bundle: dict[str, Any] = {
+        "schema_version": SEED_TABLE_SCHEMA_VERSION,
+        "protocol_sha256": protocol,
+        "training_seed": int(training_seed),
+        "monitor": monitor,
+        "final": final,
+    }
+    bundle["sha256"] = _seed_table_sha256(bundle)
+    return bundle
 
 
 @dataclass
@@ -43,6 +231,7 @@ class EpisodeResult:
     task_index: int = -1
     task_id: int = -1
     episode_index: int = -1
+    episode_seed: int = -1
     planning_wall_clock_s: float = 0.0
 
 
@@ -117,12 +306,15 @@ def run_episode(
     act_mag: list[float] = []
 
     steps = replans = nodes = 0
-    success = False
-    best_dist = float("inf")
+    # Some fixed tasks can reset directly into a solved state. A planner that correctly
+    # returns no action under the non-regression guard must not turn that into a false
+    # failure merely because success was historically checked only after env.step().
+    success = bool(info.get("success", False))
+    best_dist = initial_d
     chunks: list[int] = []
     depths: list[int] = []
     traj: list[np.ndarray] = [np.asarray(ob, dtype=np.float32)] if record_trajectory else []
-    best_progress = 0.0
+    best_progress = float(initial_frac) if np.isfinite(initial_frac) else 0.0
 
     done = False
     while steps < max_steps and not success and not done:
@@ -208,15 +400,38 @@ def evaluate(
     stop_callback: Callable[[], bool] | None = None,
     completed_results: list[dict[str, Any]] | None = None,
     episode_callback: Callable[[dict[str, Any]], None] | None = None,
+    episode_seed_table: Mapping[str, Any] | None = None,
+    expected_episode_seed_split: str | None = None,
 ) -> dict[str, float]:
     """Run the full task set and return the ``eval/*`` namespace."""
+    task_ids = [int(task.get("task_id", index + 1)) for index, task in enumerate(tasks)]
+    if episode_seed_table is not None:
+        validate_evaluation_seed_table(
+            episode_seed_table,
+            split=expected_episode_seed_split,
+            task_ids=task_ids,
+            episodes_per_task=episodes_per_task,
+        )
+        episode_seeds = episode_seed_table["seeds"]
+    else:
+        if expected_episode_seed_split is not None:
+            raise ValueError("an expected seed split requires an explicit episode seed table")
+        episode_seeds = [
+            [
+                int(seed) + 1000 * task_index + episode_index
+                for episode_index in range(episodes_per_task)
+            ]
+            for task_index in range(len(tasks))
+        ]
     results = [episode_result_from_dict(value) for value in (completed_results or [])]
     expected_prefix = [
-        (t, int(task.get("task_id", t + 1)), e)
+        (t, int(task.get("task_id", t + 1)), e, int(episode_seeds[t][e]))
         for t, task in enumerate(tasks)
         for e in range(episodes_per_task)
     ]
-    actual_prefix = [(r.task_index, r.task_id, r.episode_index) for r in results]
+    actual_prefix = [
+        (r.task_index, r.task_id, r.episode_index, r.episode_seed) for r in results
+    ]
     if actual_prefix != expected_prefix[: len(actual_prefix)]:
         raise ValueError("completed evaluation results are not a valid deterministic prefix")
     for t, task in enumerate(tasks):
@@ -233,7 +448,7 @@ def evaluate(
                 env,
                 planner,
                 task,
-                seed=seed + 1000 * t + e,
+                seed=int(episode_seeds[t][e]),
                 max_steps=max_steps,
                 domain=domain,
                 stop_callback=stop_callback,
@@ -241,6 +456,7 @@ def evaluate(
             result.task_index = t
             result.task_id = int(task.get("task_id", t + 1))
             result.episode_index = e
+            result.episode_seed = int(episode_seeds[t][e])
             result.planning_wall_clock_s = time.perf_counter() - episode_start
             results.append(result)
             if episode_callback is not None:
@@ -258,7 +474,8 @@ def evaluate(
     path_len = np.array([r.path_length for r in results], dtype=np.float32)
     act_mag = np.array([r.action_magnitude for r in results], dtype=np.float32)
 
-    nodes_per_success = float(nodes[successes > 0].mean()) if successes.any() else float("nan")
+    has_success = bool(successes.any())
+    nodes_per_success = float(nodes[successes > 0].mean()) if has_success else 0.0
 
     metrics = {
         "eval/success_rate": float(successes.mean()),
@@ -271,6 +488,7 @@ def evaluate(
         "eval/world_model_nodes_per_replan": float((nodes / replans.clip(1)).mean()),
         "eval/world_model_nodes_total": float(nodes.mean()),
         "eval/world_model_nodes_per_success": nodes_per_success,
+        "eval/world_model_nodes_per_success_defined": float(has_success),
         "eval/action_chunk_execution_length": float(chunk_lens.mean()) if chunk_lens.size else 0.0,
         "eval/selected_leaf_depth": float(sel_depths.mean()) if sel_depths.size else 0.0,
         # Locomotion diagnostics -- on AntMaze a zero success rate is uninformative
@@ -339,8 +557,15 @@ def sweep_budgets(
         metrics = evaluate(
             env, planner, tasks, episodes_per_task, max_steps, seed, domain=domain
         )
-        assert metrics["eval/world_model_nodes_per_replan"] <= budget + 1e-6, (
-            f"arm {arm} exceeded node budget {budget}"
+        guard_predictions = (
+            int(model.cfg.branch_factor)
+            if bool(getattr(planner_cfg, "require_first_edge_improvement", False))
+            else 0
+        )
+        effective_bound = budget + guard_predictions
+        assert metrics["eval/world_model_nodes_per_replan"] <= effective_bound + 1e-6, (
+            f"arm {arm} exceeded effective prediction budget {effective_bound} "
+            f"(tree={budget}, guard={guard_predictions})"
         )
         out[budget] = metrics
     return out
