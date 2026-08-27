@@ -79,7 +79,7 @@ def _split(tmp_path: Path, *, mmap: bool = False):
     return obs_norm, act_norm, index, normalizer
 
 
-def _cfg() -> FutureSetConfig:
+def _cfg(executable_prefix_steps: int = 0) -> FutureSetConfig:
     return FutureSetConfig(
         num_neighbors=8,
         query_multiplier=4,
@@ -94,13 +94,21 @@ def _cfg() -> FutureSetConfig:
         cluster_threshold=0.4,
         max_modes=4,
         multi_step_depth=3,
+        executable_prefix_steps=executable_prefix_steps,
         retrieval_pool=0,
     )
 
 
-def _build(tmp_path: Path, *, mmap: bool = False, stop_callback=None, chunk_size=3):
+def _build(
+    tmp_path: Path,
+    *,
+    mmap: bool = False,
+    stop_callback=None,
+    chunk_size=3,
+    executable_prefix_steps: int = 0,
+):
     obs, act, index, normalizer = _split(tmp_path, mmap=mmap)
-    cfg = _cfg()
+    cfg = _cfg(executable_prefix_steps)
     anchors = anchors_for_seed(index, 20, seed=0)
     payload = build_or_load_split_recipe(
         tmp_path / "recipe",
@@ -130,14 +138,24 @@ def _build(tmp_path: Path, *, mmap: bool = False, stop_callback=None, chunk_size
 
 
 @pytest.mark.parametrize("mmap", [False, True])
-def test_recipe_reconstruction_is_bitwise_identical_to_every_builder_output(tmp_path, mmap):
-    obs, act, index, cfg, anchors, payload = _build(tmp_path, mmap=mmap)
+@pytest.mark.parametrize("executable_prefix_steps", [0, 4])
+def test_recipe_reconstruction_is_bitwise_identical_to_every_builder_output(
+    tmp_path, mmap, executable_prefix_steps
+):
+    obs, act, index, cfg, anchors, payload = _build(
+        tmp_path,
+        mmap=mmap,
+        executable_prefix_steps=executable_prefix_steps,
+    )
     recipe = FutureRecipe(
         tmp_path / "recipe",
         expected_recipe_sha256=payload["recipe_sha256"],
         expected_source_manifest_sha256="a" * 64,
         expected_calibration_sha256="d" * 64,
     )
+    assert (
+        "executable_prefix_steps" in payload["identity"]["future_config"]
+    ) is bool(executable_prefix_steps)
     builder = FutureSetBuilder(
         obs, act, index, cfg, xy_dims=(0, 1), task_metric_dims=(0, 1, 2)
     )
@@ -148,6 +166,41 @@ def test_recipe_reconstruction_is_bitwise_identical_to_every_builder_output(tmp_
         for key in expected:
             assert actual[key].dtype == expected[key].dtype, key
             assert np.array_equal(actual[key], expected[key]), key
+
+
+def test_legacy_recipe_rows_can_derive_opt_in_prefix_without_identity_mutation(
+    tmp_path,
+):
+    obs, act, index, cfg, anchors, payload = _build(
+        tmp_path, executable_prefix_steps=0
+    )
+    recipe = FutureRecipe(
+        tmp_path / "recipe", expected_recipe_sha256=payload["recipe_sha256"]
+    )
+    anchor = int(anchors[0])
+    historical = recipe.build(anchor, obs_norm=obs, act_norm=act, index=index)
+    assert not any("executable_prefix" in key for key in historical)
+
+    active_cfg = replace(cfg, executable_prefix_steps=4)
+    expected = FutureSetBuilder(
+        obs,
+        act,
+        index,
+        active_cfg,
+        xy_dims=(0, 1),
+        task_metric_dims=(0, 1, 2),
+    ).build(anchor)
+    prospective = recipe.build(
+        anchor,
+        obs_norm=obs,
+        act_norm=act,
+        index=index,
+        executable_prefix_steps=4,
+    )
+    assert recipe.recipe_sha256 == payload["recipe_sha256"]
+    assert prospective.keys() == expected.keys()
+    for key in expected:
+        assert np.array_equal(prospective[key], expected[key]), key
 
 
 def test_recipe_build_resumes_only_after_durable_chunk_and_reuses_complete(tmp_path):

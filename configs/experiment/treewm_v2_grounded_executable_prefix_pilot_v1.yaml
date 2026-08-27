@@ -1,0 +1,127 @@
+# @package _global_
+#
+# Bounded prospective executable-prefix causal pilot. It starts from the corrected
+# gauge/sequence recipe, materializes the same-continuation four-action target, and
+# makes all three prefix components first-class loss terms. A paired monitor-only cell
+# may set the three weights to zero while retaining this identical graph and telemetry;
+# a campaign must hash-bind its final positive tuple after a fixed-batch gradient audit.
+
+objective_version: treewm_v2_grounded_executable_prefix_pilot_v1
+
+train:
+  steps: 25000
+  scheduler_total_steps: 1000000
+  ckpt_every: 1000
+  val_every: 1000
+  diag_every: 1000
+  eval_every: 12500
+  validation_sample_seed: 1701
+  num_workers: 10
+  gradient_checkpointing: true
+  lr: 3.0e-5
+  weight_decay: 1.0e-3
+  separate_gain_grad_clip: true
+  world_grad_clip: 1.0
+  gain_grad_clip: 1.0
+  separate_branch_transformer_grad_clip: true
+  branch_transformer_grad_clip: 1.0
+  gain_loss_every: 1
+  gain_lr: 3.0e-4
+  gain_weight_decay: 0.0
+  gain_training_scorers: [learned, novelty_q]
+
+model:
+  scales: [[mixed, 32, 1.0]]
+  use_depth_embedding: false
+  dropout: 0.1
+  max_depth: 3
+
+tree:
+  keep_threshold: 0.5
+  max_depth: 3
+
+future_sets:
+  metric_mode: rms_v2
+  recipe_anchor_policy: published_union
+  cache: false
+  shared_cache: true
+  retrieval_pool: 50000
+  retrieval_radius: 1.0
+  displacement_threshold: 0.25
+  cluster_threshold: 0.25
+  max_modes: 4
+  multi_step_depth: 3
+  executable_prefix_steps: 4
+
+matching:
+  normalization_version: rms_v2
+  num_horizons: 5
+
+retrieval:
+  enabled: false
+  num_keys: 0
+
+losses:
+  control_objective: future_set
+  control_target_transform: rms_tanh
+  control_endpoint_key: fut_metric_endpoint
+  control_allow_endpoint_fallback: false
+  control_require_single_scale: true
+  control_metric_weight: 1.0
+  control_rank_weight: 1.0
+  control_rank_temperature: 0.2
+  detach_world_targets: true
+  bind_negative_margin: 0.1
+  gain_target: novelty
+  gain_set_context: true
+  gain_rank_weight: 1.0
+  gain_calibration_weight: 0.0
+  gain_branch_prior_weight: 0.0
+  keep_balance: true
+  scheduled_sampling_p: 0.25
+  scheduled_sampling_warmup: 5000
+  scheduled_sampling_granularity: sequence
+  multistep_transition_mode: grounded_execution_v2
+  grounded_select_action_weight: 1.0
+  grounded_select_endpoint_weight: 1.0
+  grounded_select_horizon_weight: 0.25
+  grounded_loss_latent_weight: 0.25
+  grounded_loss_action_weight: 0.5
+  grounded_loss_horizon_weight: 0.25
+  grounded_loss_endpoint_weight: 0.5
+  grounded_detach_self_fed_parent: true
+  multistep_depth_weights: [1.0, 1.0, 1.0]
+  latent_gauge_epsilon: 1.0e-8
+  latent_gauge_min_reference_scale: 1.0e-4
+  executable_action_lower_bound: -1.0
+  executable_action_upper_bound: 1.0
+  weights:
+    mass: 0.0
+    multistep: 1.0
+    latent_gauge: 1.0
+    executable_prefix_action: 0.5
+    executable_prefix_latent: 0.25
+    executable_prefix_endpoint: 0.5
+  enabled:
+    mass: false
+    multistep: true
+    latent_gauge: true
+    executable_prefix_action: true
+    executable_prefix_latent: true
+    executable_prefix_endpoint: true
+  decay:
+    redundancy: 0
+
+planner:
+  decoded_metric: domain_raw
+  execute_mode: clipped
+  execute_steps: 4
+  action_lower_bound: -1.0
+  action_upper_bound: 1.0
+  require_first_edge_improvement: true
+  min_first_edge_improvement: 0.0
+
+eval:
+  task_split: standard
+  episodes_per_task: 1
+  final_episodes_per_task: 5

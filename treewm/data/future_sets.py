@@ -88,6 +88,11 @@ class FutureSetConfig:
     # Track A: supervise the anchor's own continuation at depths 1..multi_step_depth so
     # recursion is trained on chained predictions, not only single edges.
     multi_step_depth: int = 3
+    # Prospective, opt-in executable-prefix target. Zero preserves the historical item
+    # schema and materialization loop exactly. A positive value materializes the logged
+    # endpoint reached after min(value, selected_horizon) actions from the same
+    # continuation that supplies each future slot.
+    executable_prefix_steps: int = 0
     # Size of the retrieval pool. k-d trees degrade toward a linear scan in high
     # dimensions, and AntMaze observations are 29-D: querying 145 neighbours over 1M
     # points measured 0.37 it/s (9h for a 12k-step run). Subsampling the pool restores
@@ -104,6 +109,24 @@ class FutureSetConfig:
         assert self.num_neighbors >= 1
         assert self.query_multiplier >= 1
         assert self.metric_mode in {"rms_v2", "legacy_l2"}
+        raw_prefix_steps = self.executable_prefix_steps
+        if isinstance(raw_prefix_steps, bool):
+            raise ValueError("executable_prefix_steps must be an integer")
+        try:
+            self.executable_prefix_steps = int(raw_prefix_steps)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("executable_prefix_steps must be an integer") from exc
+        if self.executable_prefix_steps != raw_prefix_steps:
+            raise ValueError("executable_prefix_steps must be an integer")
+        if self.executable_prefix_steps < 0:
+            raise ValueError("executable_prefix_steps must be non-negative")
+        if self.executable_prefix_steps > 0:
+            if self.executable_prefix_steps > self.h_max:
+                raise ValueError("executable_prefix_steps cannot exceed h_max")
+            if self.horizons.count(self.executable_prefix_steps) != 1:
+                raise ValueError(
+                    "executable_prefix_steps must be one unique candidate horizon"
+                )
         if not np.isfinite(self.retrieval_radius) or self.retrieval_radius < 0:
             raise ValueError("retrieval_radius must be finite and non-negative")
         if not np.isfinite(self.displacement_threshold) or self.displacement_threshold < 0:
@@ -349,6 +372,16 @@ class FutureSetBuilder:
         fut_h_len = np.zeros(m, dtype=np.float32)
         fut_valid = np.zeros(m, dtype=np.float32)
 
+        prefix_steps = int(cfg.executable_prefix_steps)
+        if prefix_steps > 0:
+            fut_prefix_endpoint = np.zeros((m, self.obs_dim), dtype=np.float32)
+            fut_prefix_metric_endpoint = np.zeros(
+                (m, len(self.task_metric_dims)), dtype=np.float32
+            )
+            fut_prefix_mask = np.zeros((m, cfg.h_max), dtype=np.float32)
+            fut_prefix_h_idx = np.zeros(m, dtype=np.int64)
+            fut_prefix_len = np.zeros(m, dtype=np.float32)
+
         anchor = self.obs_norm[t]
         h_lookup = {int(h): i for i, h in enumerate(self.horizons)}
 
@@ -371,6 +404,21 @@ class FutureSetBuilder:
             fut_h_idx[slot] = h_lookup[h]
             fut_h_len[slot] = float(h)
             fut_valid[slot] = 1.0
+            if prefix_steps > 0:
+                prefix_len = min(prefix_steps, h)
+                prefix_end = self.obs_norm[c + prefix_len]
+                if cfg.relative_endpoints:
+                    prefix_end = prefix_end.copy()
+                    prefix_end[self.xy_dims] = anchor[self.xy_dims] + (
+                        prefix_end[self.xy_dims] - self.obs_norm[c][self.xy_dims]
+                    )
+                fut_prefix_endpoint[slot] = prefix_end
+                fut_prefix_metric_endpoint[slot] = self._metric_coordinates(
+                    prefix_end
+                )
+                fut_prefix_mask[slot, :prefix_len] = 1.0
+                fut_prefix_h_idx[slot] = h_lookup[prefix_len]
+                fut_prefix_len[slot] = float(prefix_len)
 
         labels_used, reps_used, mass_used, num_modes_raw = self._cluster(
             fut_metric_endpoint[:m_used], rng, return_raw_count=True
@@ -434,7 +482,7 @@ class FutureSetBuilder:
             ms_valid[d] = 1.0
             cursor = cursor + h
 
-        return {
+        item = {
             "anchor_index": np.int64(t),
             # Repeated per item so a collated batch is self-describing to loss and
             # diagnostic code; every item in one dataset has the same index vector.
@@ -474,6 +522,19 @@ class FutureSetBuilder:
             "modes_retained": np.int64(num_modes),
             "modes_truncated": np.int64(max(num_modes_raw - num_modes, 0)),
         }
+        if prefix_steps > 0:
+            item.update(
+                {
+                    "fut_executable_prefix_endpoint": fut_prefix_endpoint,
+                    "fut_executable_prefix_metric_endpoint": (
+                        fut_prefix_metric_endpoint
+                    ),
+                    "fut_executable_prefix_action_mask": fut_prefix_mask,
+                    "fut_executable_prefix_horizon_idx": fut_prefix_h_idx,
+                    "fut_executable_prefix_len": fut_prefix_len,
+                }
+            )
+        return item
 
 
 def gather_mode_targets(batch: dict[str, Any]) -> dict[str, Any]:
@@ -503,4 +564,21 @@ def gather_mode_targets(batch: dict[str, Any]) -> dict[str, Any]:
     }
     if "fut_metric_endpoint" in batch:
         out["metric_endpoint"] = _gather(batch["fut_metric_endpoint"])
+    prefix_fields = {
+        "executable_prefix_endpoint": "fut_executable_prefix_endpoint",
+        "executable_prefix_metric_endpoint": (
+            "fut_executable_prefix_metric_endpoint"
+        ),
+        "executable_prefix_action_mask": "fut_executable_prefix_action_mask",
+        "executable_prefix_horizon_idx": (
+            "fut_executable_prefix_horizon_idx"
+        ),
+        "executable_prefix_len": "fut_executable_prefix_len",
+    }
+    present = [source in batch for source in prefix_fields.values()]
+    if any(present) and not all(present):
+        raise ValueError("executable-prefix future tensors must be present as one set")
+    if all(present):
+        for target, source in prefix_fields.items():
+            out[target] = _gather(batch[source])
     return out

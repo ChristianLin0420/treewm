@@ -296,6 +296,13 @@ def _identity(
     if not normalized_sets or any(len(values) == 0 for values in normalized_sets.values()):
         raise FutureRecipeError("every formal seed anchor set must be nonempty")
     union = np.unique(np.concatenate(list(normalized_sets.values()))).astype(np.int64)
+    future_config = asdict(cfg)
+    # Keep disabled recipe identities byte-for-byte compatible with manifests created
+    # before this prospective view existed. Active recipes bind the requested prefix;
+    # old sealed rows can also supply it later through FutureRecipe.build's explicit
+    # opt-in argument.
+    if int(cfg.executable_prefix_steps) == 0:
+        future_config.pop("executable_prefix_steps", None)
     identity = {
         "schema_version": SCHEMA_VERSION,
         "recipe_version": RECIPE_VERSION,
@@ -305,7 +312,7 @@ def _identity(
         "normalizer_sha256": normalizer_sha256,
         "calibration_sha256": calibration_sha256,
         "chosen_thresholds": dict(chosen_thresholds),
-        "future_config": asdict(cfg),
+        "future_config": future_config,
         "xy_dims": [int(dim) for dim in xy_dims],
         "task_metric_dims": [int(dim) for dim in task_metric_dims],
         "code_sha256": code_sha256,
@@ -664,6 +671,7 @@ class FutureRecipe:
         obs_norm: np.ndarray,
         act_norm: np.ndarray,
         index: Any,
+        executable_prefix_steps: int | None = None,
     ) -> dict[str, np.ndarray]:
         row = self._row(anchor)
         identity = self.identity
@@ -680,6 +688,31 @@ class FutureRecipe:
         fut_metric_endpoint = np.zeros((k, len(metric_dims)), dtype=np.float32)
         fut_horizon_idx = np.asarray(row["horizon_idx"], dtype=np.int64).copy()
         fut_horizon_len = np.zeros(k, dtype=np.float32)
+        # Existing formal recipes predate executable-prefix supervision.  Their
+        # compact rows nevertheless seal the exact continuation and horizon needed to
+        # derive the target.  An explicit consumer-side request therefore adds only a
+        # deterministic view over those immutable rows; it does not mutate or
+        # reinterpret the recipe identity.  Omitting the argument preserves historical
+        # reconstruction exactly, including its key set.
+        prefix_steps = (
+            int(cfg.executable_prefix_steps)
+            if executable_prefix_steps is None
+            else int(executable_prefix_steps)
+        )
+        if prefix_steps < 0 or prefix_steps > cfg.h_max:
+            raise FutureRecipeError("executable prefix is outside the recipe horizon")
+        if prefix_steps > 0 and int(np.count_nonzero(horizons == prefix_steps)) != 1:
+            raise FutureRecipeError(
+                "executable prefix is not one unique candidate horizon"
+            )
+        if prefix_steps > 0:
+            fut_prefix_endpoint = np.zeros((k, obs_dim), dtype=np.float32)
+            fut_prefix_metric_endpoint = np.zeros(
+                (k, len(metric_dims)), dtype=np.float32
+            )
+            fut_prefix_mask = np.zeros((k, cfg.h_max), dtype=np.float32)
+            fut_prefix_horizon_idx = np.zeros(k, dtype=np.int64)
+            fut_prefix_len = np.zeros(k, dtype=np.float32)
         neighbors = np.asarray(row["neighbors"], dtype=np.int64)
         valid_neighbors = neighbors >= 0
         anchor_obs = obs_norm[int(anchor)]
@@ -697,6 +730,25 @@ class FutureRecipe:
             fut_actions[slot, :horizon] = act_norm[continuation : continuation + horizon]
             fut_mask[slot, :horizon] = 1.0
             fut_horizon_len[slot] = float(horizon)
+            if prefix_steps > 0:
+                prefix_len = min(prefix_steps, horizon)
+                prefix_endpoint = obs_norm[continuation + prefix_len]
+                if cfg.relative_endpoints:
+                    prefix_endpoint = prefix_endpoint.copy()
+                    prefix_endpoint[xy_dims] = anchor_obs[xy_dims] + (
+                        prefix_endpoint[xy_dims]
+                        - obs_norm[continuation][xy_dims]
+                    )
+                fut_prefix_endpoint[slot] = prefix_endpoint
+                fut_prefix_metric_endpoint[slot] = prefix_endpoint[metric_dims]
+                fut_prefix_mask[slot, :prefix_len] = 1.0
+                prefix_matches = np.flatnonzero(horizons == prefix_len)
+                if len(prefix_matches) != 1:
+                    raise FutureRecipeError(
+                        "executable prefix is not one unique candidate horizon"
+                    )
+                fut_prefix_horizon_idx[slot] = int(prefix_matches[0])
+                fut_prefix_len[slot] = float(prefix_len)
 
         d_max = cfg.multi_step_depth
         ms_actions = np.zeros((d_max, cfg.h_max, act_dim), dtype=np.float32)
@@ -714,7 +766,7 @@ class FutureRecipe:
             ms_obs[depth] = obs_norm[cursor + horizon]
             cursor += horizon
 
-        return {
+        item = {
             "anchor_index": np.int64(anchor),
             "task_metric_dims": metric_dims.astype(np.int64, copy=True),
             "ms_actions": ms_actions,
@@ -747,3 +799,18 @@ class FutureRecipe:
             "modes_retained": np.int64(row["modes_retained"]),
             "modes_truncated": np.int64(row["modes_truncated"]),
         }
+        if prefix_steps > 0:
+            item.update(
+                {
+                    "fut_executable_prefix_endpoint": fut_prefix_endpoint,
+                    "fut_executable_prefix_metric_endpoint": (
+                        fut_prefix_metric_endpoint
+                    ),
+                    "fut_executable_prefix_action_mask": fut_prefix_mask,
+                    "fut_executable_prefix_horizon_idx": (
+                        fut_prefix_horizon_idx
+                    ),
+                    "fut_executable_prefix_len": fut_prefix_len,
+                }
+            )
+        return item

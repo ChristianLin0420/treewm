@@ -101,6 +101,7 @@ TREEWM_V2_OBJECTIVES = frozenset(
         "treewm_v2_grounded_gauge_pilot_v1",
         "treewm_v2_grounded_gauge_pilot_v2",
         "treewm_v2_grounded_gauge_formal_v1",
+        "treewm_v2_grounded_executable_prefix_pilot_v1",
     }
 )
 BOUNDED_PILOT_OBJECTIVES = {
@@ -108,13 +109,18 @@ BOUNDED_PILOT_OBJECTIVES = {
     "treewm_v2_grounded_repair_pilot_v1": 25_000,
     "treewm_v2_grounded_gauge_pilot_v1": 25_000,
     "treewm_v2_grounded_gauge_pilot_v2": 25_000,
+    "treewm_v2_grounded_executable_prefix_pilot_v1": 25_000,
 }
 LATENT_GAUGE_OBJECTIVES = frozenset(
     {
         "treewm_v2_grounded_gauge_pilot_v1",
         "treewm_v2_grounded_gauge_pilot_v2",
         "treewm_v2_grounded_gauge_formal_v1",
+        "treewm_v2_grounded_executable_prefix_pilot_v1",
     }
+)
+EXECUTABLE_PREFIX_OBJECTIVES = frozenset(
+    {"treewm_v2_grounded_executable_prefix_pilot_v1"}
 )
 FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
 GAUGE_PILOT_STAGE_UPDATES = frozenset({5_000, 25_000})
@@ -519,6 +525,180 @@ def validate_latent_gauge_configuration(
     ):
         raise ValueError(
             "latent_gauge_min_reference_scale must exceed latent_gauge_epsilon"
+        )
+
+
+def validate_executable_prefix_configuration(
+    objective_version: str,
+    loss_cfg,
+    future_cfg,
+    planner_cfg,
+    *,
+    tree_cfg=None,
+    action_space=None,
+    model=None,
+) -> None:
+    """Fail closed around the one registered prospective prefix objective."""
+
+    names = (
+        "executable_prefix_action",
+        "executable_prefix_latent",
+        "executable_prefix_endpoint",
+    )
+    enabled = tuple(bool(loss_cfg.enabled.get(name, False)) for name in names)
+    weights = tuple(float(getattr(loss_cfg.weights, name)) for name in names)
+    loss_bounds = (
+        loss_cfg.executable_action_lower_bound,
+        loss_cfg.executable_action_upper_bound,
+    )
+    planner_bounds = (
+        planner_cfg.action_lower_bound,
+        planner_cfg.action_upper_bound,
+    )
+    registered = objective_version in EXECUTABLE_PREFIX_OBJECTIVES
+    if not registered:
+        if (
+            any(enabled)
+            or any(weight != 0.0 for weight in weights)
+            or int(future_cfg.executable_prefix_steps) != 0
+            or any(value is not None for value in (*loss_bounds, *planner_bounds))
+            or any(
+                int(loss_cfg.warmup.get(name, 0)) != 0
+                or int(loss_cfg.decay.get(name, 0)) != 0
+                for name in names
+            )
+        ):
+            raise ValueError(
+                "executable-prefix data/loss/planner fields are restricted to a "
+                "registered bounded objective"
+            )
+        return
+
+    if not all(enabled):
+        raise ValueError(
+            "registered executable-prefix objective requires all three components enabled"
+        )
+    if any(not math.isfinite(weight) or weight < 0.0 for weight in weights):
+        raise ValueError("executable-prefix weights must be finite and nonnegative")
+    # The paired causal pilot uses the exact same graph in both cells. Its package will
+    # hash-bind the outcome-blind gradient-audited positive tuple; core accepts that
+    # future tuple without blessing a provisional numerical choice here.
+    if not (
+        all(weight == 0.0 for weight in weights)
+        or all(weight > 0.0 for weight in weights)
+    ):
+        raise ValueError(
+            "registered executable-prefix weights must be all-zero monitor-only "
+            "or an all-positive treatment tuple"
+        )
+    if any(
+        int(loss_cfg.warmup.get(name, 0)) != 0
+        or int(loss_cfg.decay.get(name, 0)) != 0
+        for name in names
+    ):
+        raise ValueError("executable-prefix component weights cannot warm up or decay")
+    if int(future_cfg.executable_prefix_steps) != 4:
+        raise ValueError(
+            "registered executable-prefix objective requires a four-step target"
+        )
+    sealed_horizons = (4, 8, 16, 32, 64)
+    if (
+        tuple(int(value) for value in future_cfg.horizons) != sealed_horizons
+        or int(future_cfg.h_max) != 64
+    ):
+        raise ValueError(
+            "registered executable-prefix objective requires sealed formal horizons/h_max"
+        )
+    if model is None or getattr(model, "decoder", None) is None:
+        raise ValueError("registered executable-prefix objective requires model.decoder")
+    model_cfg = getattr(model, "cfg", None)
+    model_horizons = getattr(model, "horizons", None)
+    if (
+        model_cfg is None
+        or tuple(int(value) for value in getattr(model_cfg, "horizons", ()))
+        != sealed_horizons
+        or int(getattr(model_cfg, "h_max", -1)) != 64
+        or model_horizons is None
+        or tuple(
+            int(value)
+            for value in torch.as_tensor(model_horizons).detach().cpu().tolist()
+        )
+        != sealed_horizons
+    ):
+        raise ValueError(
+            "registered executable-prefix objective requires aligned sealed model horizons"
+        )
+    if (
+        tree_cfg is None
+        or int(getattr(model_cfg, "max_depth", -1)) != 3
+        or int(getattr(tree_cfg, "max_depth", -1)) != 3
+    ):
+        raise ValueError(
+            "registered executable-prefix objective requires aligned model/tree depth 3"
+        )
+
+    prefix_steps = int(future_cfg.executable_prefix_steps)
+    minimum_improvement = float(planner_cfg.min_first_edge_improvement)
+    if (
+        str(planner_cfg.score_space) != "decoded"
+        or str(planner_cfg.decoded_metric) != "domain_raw"
+        or str(planner_cfg.execute_mode) != "clipped"
+        or int(planner_cfg.execute_steps) != prefix_steps
+        or not bool(planner_cfg.require_first_edge_improvement)
+        or not math.isfinite(minimum_improvement)
+        or minimum_improvement < 0.0
+    ):
+        raise ValueError(
+            "registered executable-prefix objective requires decoded domain_raw planning, "
+            "clipped execution at the supervised prefix, and a finite nonnegative "
+            "first-edge improvement guard"
+        )
+
+    if any(value is None for value in (*loss_bounds, *planner_bounds)):
+        raise ValueError(
+            "registered executable-prefix objective requires sealed train/planner bounds"
+        )
+    numeric_loss_bounds = tuple(float(value) for value in loss_bounds)
+    numeric_planner_bounds = tuple(float(value) for value in planner_bounds)
+    if (
+        not all(
+            math.isfinite(value)
+            for value in (*numeric_loss_bounds, *numeric_planner_bounds)
+        )
+        or numeric_loss_bounds[0] >= numeric_loss_bounds[1]
+        or numeric_planner_bounds != numeric_loss_bounds
+    ):
+        raise ValueError("executable-prefix train/planner action bounds are invalid or differ")
+
+    if (
+        action_space is None
+        or not hasattr(action_space, "low")
+        or not hasattr(action_space, "high")
+    ):
+        raise ValueError(
+            "executable-prefix objective requires sealed environment action bounds"
+        )
+    environment_low = np.asarray(action_space.low, dtype=np.float32).reshape(-1)
+    environment_high = np.asarray(action_space.high, dtype=np.float32).reshape(-1)
+    model_action_dim = int(getattr(model_cfg, "action_dim", -1))
+    if (
+        environment_low.size == 0
+        or environment_low.size != model_action_dim
+        or environment_low.shape != environment_high.shape
+        or not np.isfinite(environment_low).all()
+        or not np.isfinite(environment_high).all()
+        or not np.all(environment_low < environment_high)
+        or not np.array_equal(
+            environment_low,
+            np.full_like(environment_low, numeric_loss_bounds[0]),
+        )
+        or not np.array_equal(
+            environment_high,
+            np.full_like(environment_high, numeric_loss_bounds[1]),
+        )
+    ):
+        raise ValueError(
+            "sealed executable-prefix bounds do not equal the environment action space"
         )
 
 
@@ -1096,6 +1276,16 @@ def main(cfg: DictConfig) -> None:
         future_cfg = replace(
             future_cfg, relative_endpoints=bool(cfg.env.get("relative_endpoints"))
         )
+    executable_domain = None
+    executable_dataset_kwargs: dict[str, object] = {}
+    if objective_version in EXECUTABLE_PREFIX_OBJECTIVES:
+        from treewm.evaluation.domains import get_domain
+
+        executable_domain = get_domain(cfg.env.name)
+        executable_dataset_kwargs = {
+            "task_goal_metric": str(executable_domain.goal_metric),
+            "task_subgoals": tuple(executable_domain.subgoals),
+        }
     env, train_ds, val_ds, normalizer = build_datasets(
         cfg.env.name,
         future_cfg,
@@ -1116,6 +1306,7 @@ def main(cfg: DictConfig) -> None:
             cfg.future_sets.get("recipe_anchor_policy", "selected_seed")
         ),
         validation_sample_seed=validation_sample_seed,
+        **executable_dataset_kwargs,
     )
     # Prove the shared cache is actually backing the loader rather than merely present.
     cache_metrics = getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
@@ -1203,6 +1394,15 @@ def main(cfg: DictConfig) -> None:
             ).to(device),
         )
     planner_cfg = cfg_utils.planner_config(cfg)
+    validate_executable_prefix_configuration(
+        objective_version,
+        loss_cfg,
+        future_cfg,
+        planner_cfg,
+        tree_cfg=tree_cfg,
+        action_space=getattr(env, "action_space", None),
+        model=model,
+    )
     # The v2 scorer creates its set-attention modules lazily. This must precede both
     # optimiser construction and checkpoint restore so parameters/state are identical.
     model.gain_head.set_set_aware(bool(loss_cfg.gain_set_context))
@@ -1409,7 +1609,11 @@ def main(cfg: DictConfig) -> None:
     from treewm.evaluation.domains import get_domain
     from treewm.evaluation.tasks import has_maze
 
-    domain = get_domain(cfg.env.name)
+    domain = (
+        executable_domain
+        if executable_domain is not None
+        else get_domain(cfg.env.name)
+    )
     maze_spec = MazeSpec.from_env(env) if has_maze(env) else None
     anchors = (
         tv.expand_xy_anchors(
@@ -2579,6 +2783,7 @@ def main(cfg: DictConfig) -> None:
                                 if "loss" in k
                                 or "objective_" in k
                                 or "grounded/" in k
+                                or "executable_prefix/" in k
                             },
                             count=vbatch["obs"].shape[0],
                         )

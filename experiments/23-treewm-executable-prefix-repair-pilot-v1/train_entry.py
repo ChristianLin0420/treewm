@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""Fail-closed, signal-safe entry point for one sealed Exp23 trainer launch.
+
+The worker deliberately starts this wrapper rather than ``scripts/train.py``.  The
+wrapper installs signal latches before importing torch/Hydra, proves that its argv,
+environment, package and source snapshot are the sealed launch, registers Exp23's
+mandatory post-update cadence state, and then invokes the unmodified trainer exactly
+once.  It does not instrument or repeat the first forward pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import stat
+import sys
+from types import ModuleType
+from typing import Any, Mapping, Sequence
+
+
+OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
+PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
+ENTRY_PATH = Path(os.path.abspath(__file__))
+PACKAGE_DIR = ENTRY_PATH.parent
+REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
+STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
+HEADLESS_RUNTIME_ENVIRONMENT = {
+    "MUJOCO_GL": "egl",
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+}
+READY_BYTE = b"R"
+PINNED_PYTHON = Path(
+    "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/"
+    "users/chrislin/envs/treewm-formal-py311/bin/python"
+)
+PINNED_SITE_DIRECTORIES = (
+    Path(
+        "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/"
+        "users/chrislin/envs/treewm-formal-py311/lib/python3.11/site-packages"
+    ),
+    Path(
+        "/lustre/fsw/portfolios/edgeai/users/chrislin/envs/maniskill-conda/"
+        "lib/python3.11/site-packages"
+    ),
+)
+SHA256_CHARS = frozenset("0123456789abcdef")
+SUBMISSION_CONTRACT_FIELDS = frozenset(
+    {
+        "schema_version", "status", "campaign_id", "formal_validation",
+        "submission_root", "snapshot_root", "package_protocol_sha256",
+        "manifest_sha256", "trainer_code_fingerprint", "runtime_sha256",
+        "orchestration_interpreter", "weight_audit_artifact_sha256",
+        "prefix_target_artifact_sha256", "resolved_config_artifact_sha256",
+        "causal_parity_artifact_sha256", "snapshot_inventory",
+        "snapshot_inventory_sha256", "live_audit_replays", "snapshot_audit_replays",
+        "direct_hydra_compositions", "scientific_output_fingerprint_before",
+        "scientific_output_fingerprint_after", "full_output_fingerprint_before",
+        "full_output_fingerprint_after", "snapshot_full_output_fingerprint_before",
+        "snapshot_full_output_fingerprint_after",
+        "snapshot_scientific_output_fingerprint_before",
+        "snapshot_scientific_output_fingerprint_after", "git_provenance", "launches",
+        "array", "fresh_start",
+    }
+)
+INTERPRETER_CONTRACT_FIELDS = frozenset(
+    {
+        "lexical_executable", "lexical_symlink_target", "resolved_executable",
+        "resolved_executable_sha256", "resolved_executable_size", "base_executable",
+        "venv_site_packages", "base_site_packages", "python_version",
+    }
+)
+SUBMISSION_LAUNCH_FIELDS = frozenset(
+    {
+        "index", "path", "launch_sha256", "launch_file_sha256", "setting_id",
+        "arm_id", "seed", "weight_audit_artifact_sha256",
+        "prefix_target_artifact_sha256", "resolved_config_artifact_sha256",
+        "causal_parity_artifact_sha256",
+    }
+)
+
+_EARLY_SIGNAL: int | None = None
+
+
+class EntryContractError(RuntimeError):
+    """The process is not the exact package-authorized invocation."""
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise EntryContractError(message)
+
+
+def _early_handler(signum: int, _frame: object) -> None:
+    """Latch only.  The trainer performs all I/O at its own safe boundary."""
+    global _EARLY_SIGNAL
+    # Cancellation has precedence while both signals are still in the import bridge.
+    if _EARLY_SIGNAL is None or signum == signal.SIGTERM:
+        _EARLY_SIGNAL = int(signum)
+
+
+def install_early_signal_handlers() -> None:
+    signal.signal(signal.SIGUSR1, _early_handler)
+    signal.signal(signal.SIGTERM, _early_handler)
+    # The worker starts us with these signals blocked.  That inherited mask closes
+    # the otherwise fatal exec-to-handler window (including a direct Slurm TERM to
+    # every process in the batch step).  Unblock only after both handlers exist.
+    signal.pthread_sigmask(
+        signal.SIG_UNBLOCK,
+        {signal.SIGUSR1, signal.SIGTERM},
+    )
+
+
+def notify_worker_ready(fd: int) -> None:
+    """Tell the worker that USR1/TERM can no longer take the default disposition."""
+    _require(type(fd) is int and fd >= 3, "signal-ready fd is invalid")
+    try:
+        written = os.write(fd, READY_BYTE)
+        _require(written == len(READY_BYTE), "short signal-ready write")
+    except OSError as exc:
+        raise EntryContractError(f"cannot publish signal readiness: {exc}") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _sha256_string(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= SHA256_CHARS
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _stable_hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _absolute(path: str | Path, label: str) -> Path:
+    value = Path(path)
+    _require(value.is_absolute(), f"{label} is not absolute")
+    _require(all(part not in {"", ".", ".."} for part in value.parts[1:]), f"{label} is not normalized")
+    return value
+
+
+def _safe_relative(path: str | Path, label: str) -> Path:
+    value = Path(path)
+    _require(
+        not value.is_absolute() and bool(value.parts)
+        and all(part not in {"", ".", ".."} for part in value.parts),
+        f"{label} is not a safe relative path",
+    )
+    return value
+
+
+def _open_directory(path: str | Path, label: str) -> int:
+    absolute = _absolute(path, label)
+    descriptor = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        for part in absolute.parts[1:]:
+            try:
+                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            except OSError as exc:
+                raise EntryContractError(f"{label} has a symlink/non-directory component: {exc}") from exc
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _open_relative_directory(root_fd: int, relative: Path, label: str) -> int:
+    descriptor = os.dup(root_fd)
+    try:
+        for part in relative.parts:
+            try:
+                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            except OSError as exc:
+                raise EntryContractError(f"{label} has a symlink/non-directory component: {exc}") from exc
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _open_regular(path: str | Path, label: str) -> tuple[int, os.stat_result]:
+    absolute = _absolute(path, label)
+    parent_fd = _open_directory(absolute.parent, f"parent of {label}")
+    try:
+        try:
+            descriptor = os.open(absolute.name, _FILE_FLAGS, dir_fd=parent_fd)
+        except OSError as exc:
+            raise EntryContractError(f"{label} is unavailable or symlinked: {exc}") from exc
+    finally:
+        os.close(parent_fd)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise EntryContractError(f"{label} is not a regular nonsymlink file")
+    return descriptor, info
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _read_stable(descriptor: int, label: str) -> tuple[bytes, os.stat_result]:
+    before = os.fstat(descriptor)
+    _require(stat.S_ISREG(before.st_mode), f"{label} is not regular")
+    offset = 0
+    chunks: list[bytes] = []
+    while block := os.pread(descriptor, 16 * 1024 * 1024, offset):
+        chunks.append(block)
+        offset += len(block)
+    after = os.fstat(descriptor)
+    _require(_identity(before) == _identity(after), f"{label} changed while open")
+    payload = b"".join(chunks)
+    _require(len(payload) == before.st_size, f"{label} short read")
+    return payload, before
+
+
+def _decode_json(payload: bytes, path: Path) -> dict[str, Any]:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise EntryContractError(f"duplicate JSON key in {path}: {key}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                EntryContractError(f"non-finite JSON value in {path}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EntryContractError(f"cannot read JSON {path}: {exc}") from exc
+    _require(isinstance(value, dict), f"JSON root is not an object: {path}")
+    return value
+
+
+def _read_json_artifact(path: Path, label: str, *, mode: int | None = None) -> tuple[dict[str, Any], str]:
+    descriptor, opened = _open_regular(path, label)
+    try:
+        payload, stable = _read_stable(descriptor, label)
+    finally:
+        os.close(descriptor)
+    _require(_identity(opened) == _identity(stable), f"{label} path/open identity differs")
+    if mode is not None:
+        _require(stat.S_IMODE(stable.st_mode) == mode, f"{label} mode differs")
+    return _decode_json(payload, path), hashlib.sha256(payload).hexdigest()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    return _read_json_artifact(path, f"JSON artifact {path}")[0]
+
+
+def _regular_nonsymlink(path: Path, label: str) -> None:
+    descriptor, _ = _open_regular(path, label)
+    os.close(descriptor)
+
+
+def _directory_nonsymlink(path: Path, label: str) -> None:
+    descriptor = _open_directory(path, label)
+    os.close(descriptor)
+
+
+def _contained(path: Path, root: Path, label: str) -> Path:
+    candidate = _absolute(path, label)
+    expected_root = _absolute(root, f"{label} root")
+    try:
+        relative = candidate.relative_to(expected_root)
+    except ValueError as exc:
+        raise EntryContractError(f"{label} escapes its declared root") from exc
+    root_fd = _open_directory(expected_root, f"{label} root")
+    try:
+        parent_fd = _open_relative_directory(root_fd, relative.parent, f"parent of {label}")
+        os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+    return candidate
+
+
+def assert_isolated_runtime() -> None:
+    _require(sys.flags.safe_path == 1, "train entry requires Python -P safe-path mode")
+    _require(sys.flags.isolated == 0, "train entry forbids -I because it ignores PYTHONHASHSEED")
+    _require(sys.flags.no_site == 1, "train entry requires Python -S")
+    _require(bool(sys.dont_write_bytecode), "train entry requires Python -B")
+    _require("" not in sys.path, "current directory is importable before bootstrap")
+    _require(not any("site-packages" in item for item in sys.path), "site-packages active before bootstrap")
+    _require("sitecustomize" not in sys.modules, "sitecustomize loaded before bootstrap")
+    _require("usercustomize" not in sys.modules, "usercustomize loaded before bootstrap")
+    _require("treewm" not in sys.modules and "torch" not in sys.modules, "scientific modules loaded before bootstrap")
+    _require("PYTHONPATH" not in os.environ, "PYTHONPATH is forbidden in trainer bootstrap")
+    hash_seed = os.environ.get("PYTHONHASHSEED", "")
+    _require(hash_seed.isascii() and hash_seed.isdigit(), "PYTHONHASHSEED is absent or malformed")
+
+
+def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> None:
+    expected: dict[str, str] = {}
+    expected_directories: set[str] = set()
+    for raw_relative, raw_digest in inventory.items():
+        _require(isinstance(raw_relative, str), "snapshot inventory path is not text")
+        relative = _safe_relative(raw_relative, "snapshot inventory path")
+        _require(_sha256_string(raw_digest), f"snapshot inventory digest is malformed: {relative}")
+        rendered = str(relative)
+        _require(rendered not in expected, f"duplicate snapshot inventory path: {rendered}")
+        expected[rendered] = str(raw_digest)
+        for parent in relative.parents:
+            if parent != Path("."):
+                expected_directories.add(str(parent))
+    for required in (
+        str(PACKAGE_RELATIVE / "worker.py"),
+        str(PACKAGE_RELATIVE / "train_entry.py"),
+        str(PACKAGE_RELATIVE / "train.slurm"),
+        "scripts/__init__.py",
+        "scripts/train.py",
+    ):
+        _require(required in expected, f"snapshot inventory omits lifecycle source: {required}")
+
+    root_fd = _open_directory(snapshot_root, "snapshot root")
+    actual: dict[str, str] = {}
+    actual_directories: set[str] = set()
+
+    def walk(directory_fd: int, prefix: Path) -> None:
+        _require(stat.S_IMODE(os.fstat(directory_fd).st_mode) == 0o555, f"snapshot directory mode differs: {prefix}")
+        for name in sorted(os.listdir(directory_fd)):
+            _require(name not in {"", ".", ".."} and "/" not in name, "invalid snapshot entry")
+            relative = prefix / name if prefix != Path(".") else Path(name)
+            rendered = str(relative)
+            entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(entry.st_mode):
+                _require(stat.S_IMODE(entry.st_mode) == 0o555, f"snapshot directory mode differs: {rendered}")
+                _require(rendered in expected_directories, f"snapshot has an extra directory: {rendered}")
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=directory_fd)
+                try:
+                    _require(_identity(entry) == _identity(os.fstat(child)), f"snapshot directory swapped: {rendered}")
+                    actual_directories.add(rendered)
+                    walk(child, relative)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(entry.st_mode):
+                _require(stat.S_IMODE(entry.st_mode) == 0o444, f"snapshot file mode differs: {rendered}")
+                _require(rendered in expected, f"snapshot has an unclaimed file: {rendered}")
+                descriptor = os.open(name, _FILE_FLAGS, dir_fd=directory_fd)
+                try:
+                    payload, opened = _read_stable(descriptor, f"snapshot file {rendered}")
+                finally:
+                    os.close(descriptor)
+                _require(_identity(entry) == _identity(opened), f"snapshot file swapped: {rendered}")
+                digest = hashlib.sha256(payload).hexdigest()
+                _require(digest == expected[rendered], f"snapshot bytes differ: {rendered}")
+                actual[rendered] = digest
+            else:
+                raise EntryContractError(f"snapshot contains symlink/special file: {rendered}")
+
+    try:
+        walk(root_fd, Path("."))
+    finally:
+        os.close(root_fd)
+    _require(actual == expected, "snapshot file coverage differs from inventory")
+    _require(actual_directories == expected_directories, "snapshot directory coverage differs from inventory")
+
+
+def _verify_interpreter_contract(value: object) -> None:
+    _require(isinstance(value, Mapping), "submission interpreter contract is absent")
+    _require(set(value) == INTERPRETER_CONTRACT_FIELDS, "submission interpreter fields differ")
+    _require(
+        value.get("lexical_executable") == str(PINNED_PYTHON)
+        and os.path.normpath(os.path.abspath(sys.executable)) == str(PINNED_PYTHON),
+        "train-entry interpreter binding differs",
+    )
+    lexical_info = PINNED_PYTHON.lstat()
+    _require(stat.S_ISLNK(lexical_info.st_mode), "pinned lexical interpreter is not the sealed venv symlink")
+    lexical_target = os.readlink(PINNED_PYTHON) if stat.S_ISLNK(lexical_info.st_mode) else None
+    _require(value.get("lexical_symlink_target") == lexical_target, "interpreter symlink binding differs")
+    resolved = PINNED_PYTHON.resolve(strict=True)
+    _require(value.get("resolved_executable") == str(resolved), "resolved interpreter path differs")
+    descriptor, info = _open_regular(resolved, "resolved pinned interpreter")
+    try:
+        payload, stable = _read_stable(descriptor, "resolved pinned interpreter")
+    finally:
+        os.close(descriptor)
+    _require(_identity(info) == _identity(stable), "resolved interpreter changed")
+    _require(
+        value.get("resolved_executable_sha256") == hashlib.sha256(payload).hexdigest()
+        and value.get("resolved_executable_size") == info.st_size,
+        "resolved interpreter identity differs",
+    )
+    _require(value.get("base_executable") == str(getattr(sys, "_base_executable", "")), "base interpreter differs")
+    _require(
+        value.get("venv_site_packages") == str(PINNED_SITE_DIRECTORIES[0])
+        and value.get("base_site_packages") == str(PINNED_SITE_DIRECTORIES[1]),
+        "site-package binding differs",
+    )
+    _require(
+        value.get("python_version") == f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "Python version binding differs",
+    )
+
+
+def configure_verified_import_paths(snapshot_root: Path) -> None:
+    suffix = [str(snapshot_root), *(str(path) for path in PINNED_SITE_DIRECTORIES)]
+    _require(not any(item in sys.path for item in suffix), "verified import root was pre-injected")
+    for directory in PINNED_SITE_DIRECTORIES:
+        info = directory.lstat()
+        _require(stat.S_ISDIR(info.st_mode), f"pinned site path is not a literal directory: {directory}")
+    sys.path.extend(suffix)
+    _require(sys.path[-len(suffix):] == suffix, "verified import path suffix differs")
+
+
+def bootstrap_submission(
+    submission_root: Path,
+    submission_sha256: str,
+) -> tuple[Path, dict[str, Any]]:
+    _require(_sha256_string(submission_sha256), "submission SHA256 is malformed")
+    submission = _absolute(submission_root, "submission root")
+    submission_fd = _open_directory(submission, "submission root")
+    os.close(submission_fd)
+    contract_path = submission / "SUBMISSION_CONTRACT.json"
+    contract, digest = _read_json_artifact(contract_path, "submission contract", mode=0o444)
+    _require(digest == submission_sha256, "submission contract bytes differ")
+    _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
+    _require(contract.get("schema_version") == 1, "submission contract schema differs")
+    _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1", "campaign differs")
+    _require(contract.get("formal_validation") is False, "formal-validation label differs")
+    _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
+    _require(contract.get("submission_root") == str(submission), "submission root binding differs")
+    snapshot = _absolute(str(contract.get("snapshot_root", "")), "snapshot root")
+    _require(snapshot == REPOSITORY_ROOT, "entry snapshot root binding differs")
+    try:
+        snapshot.relative_to(submission)
+    except ValueError as exc:
+        raise EntryContractError("snapshot root escapes submission root") from exc
+    _verify_interpreter_contract(contract.get("orchestration_interpreter"))
+    for prefix in ("", "snapshot_"):
+        for flavor in ("full_output", "scientific_output"):
+            _require(
+                contract.get(f"{prefix}{flavor}_fingerprint_before")
+                == contract.get(f"{prefix}{flavor}_fingerprint_after"),
+                f"submission {prefix}{flavor} fingerprint drifted",
+            )
+    inventory = contract.get("snapshot_inventory")
+    _require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
+    _require(_stable_hash(inventory) == contract.get("snapshot_inventory_sha256"), "snapshot inventory hash differs")
+    _verify_snapshot_tree(snapshot, inventory)
+    configure_verified_import_paths(snapshot)
+    return submission, contract
+
+
+def _load_campaign() -> ModuleType:
+    path = PACKAGE_DIR / "campaign.py"
+    _regular_nonsymlink(path, "campaign verifier")
+    name = "_treewm_exp23_campaign_for_train_entry"
+    spec = importlib.util.spec_from_file_location(name, path)
+    _require(spec is not None and spec.loader is not None, "cannot load campaign verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def reject_forbidden_environment(
+    launch_environment: Mapping[str, Any],
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    environment = os.environ if environ is None else environ
+    _require(STOP_ENVIRONMENT not in environment, f"{STOP_ENVIRONMENT} is forbidden")
+    _require("PYTHONPATH" not in environment, "PYTHONPATH is forbidden after isolated bootstrap")
+    allowed_treewm = {str(key) for key in launch_environment if str(key).startswith("TREEWM_")}
+    unexpected = sorted(
+        key
+        for key in environment
+        if key.startswith("TREEWM_") and key not in allowed_treewm
+    )
+    _require(not unexpected, "unexpected TREEWM environment: " + ", ".join(unexpected))
+    for name in ("RANK", "WORLD_SIZE", "LOCAL_RANK"):
+        _require(name not in environment, f"unexpected distributed environment: {name}")
+
+
+def validate_headless_runtime_environment(
+    launch_environment: Mapping[str, Any],
+    environment: Mapping[str, str],
+) -> None:
+    """Require the sealed launch and actual child to share exact headless GPU knobs."""
+    for name, value in HEADLESS_RUNTIME_ENVIRONMENT.items():
+        _require(
+            launch_environment.get(name) == value,
+            f"sealed headless runtime binding differs: {name}",
+        )
+        _require(
+            environment.get(name) == value,
+            f"trainer headless runtime binding differs: {name}",
+        )
+
+
+def verify_exact_invocation(
+    launch_path: Path,
+    trainer_args: Sequence[str],
+    *,
+    submission_root: Path,
+    bootstrap_contract: Mapping[str, Any] | None = None,
+    campaign: ModuleType | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[ModuleType, dict[str, Any], dict[str, Any]]:
+    """Re-derive and compare the complete launch before importing the trainer."""
+    environment = os.environ if environ is None else environ
+    snapshot_root = REPOSITORY_ROOT
+    package = _contained(PACKAGE_DIR, snapshot_root, "package")
+    _require(package == snapshot_root / PACKAGE_RELATIVE, "package root differs")
+    _directory_nonsymlink(submission_root, "submission root")
+    submission_root = _absolute(submission_root, "submission root")
+    launch_path = _contained(launch_path, submission_root, "launch path")
+    _require(
+        launch_path.parent == submission_root / "launches",
+        "launch path is outside the sealed launches directory",
+    )
+    launch, launch_file_sha256 = _read_json_artifact(
+        launch_path,
+        "launch path",
+        mode=0o444,
+    )
+
+    campaign = campaign or _load_campaign()
+    manifest, weight_lock = campaign.load_contract(snapshot_root)
+    protocol = campaign.verify_protocol_lock(PACKAGE_DIR)
+    cell_value = launch.get("cell")
+    _require(isinstance(cell_value, Mapping), "launch cell is absent")
+    index = cell_value.get("index")
+    _require(type(index) is int, "launch cell index is invalid")
+    _require(0 <= index < 20, "launch cell index is out of range")
+    _require(launch_path == submission_root / "launches" / f"cell-{index:02d}.json", "launch filename/index differs")
+    if bootstrap_contract is not None:
+        launches = bootstrap_contract.get("launches")
+        _require(isinstance(launches, list) and len(launches) == 20, "submission launch inventory differs")
+        row = launches[index]
+        _require(isinstance(row, Mapping) and set(row) == SUBMISSION_LAUNCH_FIELDS, "submission launch row fields differ")
+        _require(
+            row.get("index") == index
+            and row.get("path") == f"launches/cell-{index:02d}.json"
+            and row.get("launch_sha256") == launch.get("launch_sha256")
+            and row.get("launch_file_sha256") == launch_file_sha256,
+            "submission launch binding differs",
+        )
+        _require(
+            row.get("setting_id") == cell_value.get("setting")
+            and row.get("arm_id") == cell_value.get("arm")
+            and row.get("seed") == cell_value.get("seed"),
+            "submission launch cell identity differs",
+        )
+        for audit_name in (
+            "weight_audit_artifact_sha256",
+            "prefix_target_artifact_sha256",
+            "resolved_config_artifact_sha256",
+            "causal_parity_artifact_sha256",
+        ):
+            _require(
+                row.get(audit_name) == bootstrap_contract.get(audit_name),
+                f"submission launch {audit_name} differs",
+            )
+    cells = campaign.expand_matrix(manifest)
+    _require(0 <= index < len(cells), "launch cell index is out of range")
+    expected = campaign.trainer_command(
+        manifest,
+        weight_lock,
+        cells[index],
+        repo_root=snapshot_root,
+        package_protocol_sha256=protocol,
+    )
+    _require(launch == expected, "launch JSON differs from snapshot re-derivation")
+    launch_body = dict(launch)
+    claimed_launch_sha256 = launch_body.pop("launch_sha256", None)
+    _require(claimed_launch_sha256 == _stable_hash(launch_body), "launch self hash differs")
+    if bootstrap_contract is not None:
+        _require(
+            bootstrap_contract.get("package_protocol_sha256") == protocol
+            and bootstrap_contract.get("manifest_sha256") == campaign.manifest_sha256(manifest),
+            "submission protocol/manifest binding differs",
+        )
+    expected_audits = {
+        "weight_audit_artifact_sha256": manifest["weight_audit"]["artifact_sha256"],
+        "prefix_target_artifact_sha256": manifest["prefix_target_contract"]["artifact_sha256"],
+        "resolved_config_artifact_sha256": manifest["resolved_config_contract"]["artifact_sha256"],
+        "causal_parity_artifact_sha256": manifest["causal_parity_contract"]["artifact_sha256"],
+    }
+    hashes = launch.get("hashes")
+    _require(isinstance(hashes, Mapping), "launch hashes are invalid")
+    for name, value in expected_audits.items():
+        _require(hashes.get(name) == value, f"launch {name} differs")
+        if bootstrap_contract is not None:
+            _require(bootstrap_contract.get(name) == value, f"submission {name} differs")
+    if bootstrap_contract is not None:
+        _require(
+            bootstrap_contract.get("trainer_code_fingerprint") == hashes.get("source_sha256")
+            and bootstrap_contract.get("runtime_sha256") == hashes.get("runtime_sha256"),
+            "submission source/runtime binding differs",
+        )
+    argv = launch.get("argv")
+    _require(isinstance(argv, list) and len(argv) >= 3, "trainer argv is invalid")
+    _require(argv[0] == manifest["paths"]["python"], "trainer interpreter differs")
+    _require(argv[0] == str(PINNED_PYTHON), "trainer does not use pinned interpreter")
+    _regular_nonsymlink(Path(str(argv[1])), "direct trainer entrypoint")
+    _require(
+        Path(str(argv[1])) == snapshot_root / "scripts/train.py",
+        "direct trainer path differs",
+    )
+    _require(list(trainer_args) == argv[2:], "trainer arguments differ from sealed launch")
+    _require("resume=auto" in trainer_args, "sealed trainer invocation lacks resume=auto")
+    _require("train.steps=25000" in trainer_args, "sealed trainer invocation is not 25k")
+    _require(
+        not any(str(arg).startswith("TREEWM_STOP_AFTER_UPDATE") for arg in trainer_args),
+        "staged stop leaked into trainer arguments",
+    )
+    launch_environment = launch.get("environment")
+    _require(isinstance(launch_environment, Mapping), "launch environment is invalid")
+    validate_headless_runtime_environment(launch_environment, environment)
+    _require(
+        environment.get("PYTHONHASHSEED") == str(cell_value.get("seed")),
+        "trainer Python hash seed differs from sealed cell seed",
+    )
+    _require(
+        launch_environment.get("TREEWM_RESOLVED_CONFIG_SHA256")
+        == expected_audits["resolved_config_artifact_sha256"],
+        "resolved-config audit environment binding differs",
+    )
+    _require(
+        launch_environment.get("TREEWM_CAUSAL_PARITY_SHA256")
+        == expected_audits["causal_parity_artifact_sha256"],
+        "causal-parity audit environment binding differs",
+    )
+    reject_forbidden_environment(launch_environment, environment)
+    for key, value in launch_environment.items():
+        _require(
+            environment.get(str(key)) == str(value),
+            f"trainer environment differs: {key}",
+        )
+    return campaign, manifest, launch
+
+
+def _register_and_import_trainer() -> ModuleType:
+    """Register strict cadence and bridge any signal latched during imports."""
+    _require("scripts.train" not in sys.modules, "trainer was imported before signal bridge")
+    from treewm.utils import checkpoint as checkpoint_utils
+
+    checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE = frozenset(
+        {*checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE, OBJECTIVE}
+    )
+    original = checkpoint_utils.StopController
+
+    class BridgedStopController(original):  # type: ignore[misc, valid-type]
+        def install(self) -> None:
+            super().install()
+            pending = _EARLY_SIGNAL
+            if pending is not None:
+                self.request(signal.Signals(pending).name)
+
+    checkpoint_utils.StopController = BridgedStopController
+    from scripts import train
+
+    _require(
+        OBJECTIVE in train.TREEWM_V2_OBJECTIVES
+        and train.BOUNDED_PILOT_OBJECTIVES.get(OBJECTIVE) == 25_000
+        and OBJECTIVE in train.LATENT_GAUGE_OBJECTIVES,
+        "shared trainer does not contain the exact bounded Exp23 objective",
+    )
+    return train
+
+
+def _parse(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--launch", type=Path, required=True)
+    parser.add_argument("--submission-root", type=Path, required=True)
+    parser.add_argument("--submission-sha256", required=True)
+    parser.add_argument("--ready-fd", type=int, required=True)
+    parser.add_argument("trainer_args", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    if args.trainer_args and args.trainer_args[0] == "--":
+        args.trainer_args = args.trainer_args[1:]
+    _require(bool(args.trainer_args), "trainer arguments are absent")
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    assert_isolated_runtime()
+    _require(STOP_ENVIRONMENT not in os.environ, f"{STOP_ENVIRONMENT} is forbidden")
+    _require("PYTHONPATH" not in os.environ, "PYTHONPATH is forbidden after isolated bootstrap")
+    for distributed_name in ("RANK", "WORLD_SIZE", "LOCAL_RANK"):
+        _require(distributed_name not in os.environ, f"unexpected distributed environment: {distributed_name}")
+    args = _parse(argv)
+    install_early_signal_handlers()
+    submission_root, submission_contract = bootstrap_submission(
+        args.submission_root,
+        args.submission_sha256,
+    )
+    _campaign, _manifest, launch = verify_exact_invocation(
+        args.launch,
+        args.trainer_args,
+        submission_root=submission_root,
+        bootstrap_contract=submission_contract,
+    )
+    # The byte is sent only after the complete stdlib-only snapshot/submission audit
+    # and exact launch re-derivation. Signals were already latched safely above.
+    notify_worker_ready(args.ready_fd)
+    train = _register_and_import_trainer()
+    for module_name in ("treewm", "treewm.utils.checkpoint", "scripts.train"):
+        module = sys.modules.get(module_name)
+        path = Path(os.path.abspath(str(getattr(module, "__file__", ""))))
+        try:
+            path.relative_to(REPOSITORY_ROOT)
+        except ValueError as exc:
+            raise EntryContractError(f"{module_name} imported outside snapshot") from exc
+        _regular_nonsymlink(path, f"{module_name} imported module")
+
+    # Hydra now sees the same argv it would see under direct scripts/train.py.
+    sys.argv = [str(launch["argv"][1]), *args.trainer_args]
+    train.main()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except EntryContractError as exc:
+        print(f"Exp23 train-entry contract error: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2)

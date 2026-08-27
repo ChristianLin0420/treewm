@@ -186,6 +186,8 @@ class ChunkDataset(Dataset):
         cache_future_sets: bool = False,
         shared: "SharedSplit | None" = None,
         task_metric_dims: tuple[int, ...] | None = None,
+        task_goal_metric: str = "l2",
+        task_subgoals: tuple[tuple[int, int], ...] = (),
     ) -> None:
         if shared is not None:
             # Bind the memory-mapped arrays directly. ascontiguousarray would COPY them,
@@ -212,6 +214,20 @@ class ChunkDataset(Dataset):
         self.task_metric_dims = (
             self.xy_dims if task_metric_dims is None else tuple(task_metric_dims)
         )
+        if int(future_cfg.executable_prefix_steps) > 0:
+            if task_goal_metric not in {"l2", "onehot"}:
+                raise ValueError("task_goal_metric must be 'l2' or 'onehot'")
+            self.task_goal_metric = str(task_goal_metric)
+            self.task_subgoals = tuple(
+                (int(lower), int(upper)) for lower, upper in task_subgoals
+            )
+            if self.task_goal_metric == "onehot" and not self.task_subgoals:
+                raise ValueError("onehot task metrics require non-empty subgoals")
+            for lower, upper in self.task_subgoals:
+                if not 0 <= lower < upper <= len(self.task_metric_dims):
+                    raise ValueError(
+                        f"task subgoal {(lower, upper)} is outside task metric width"
+                    )
         self.obs_dim = self.obs.shape[1]
         self.act_dim = self.act.shape[1]
 
@@ -273,9 +289,20 @@ class ChunkDataset(Dataset):
     def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
         t = int(self.anchors[i])
         if self.future_recipe is not None:
-            item = self.future_recipe.build(
-                t, obs_norm=self.obs_norm, act_norm=self.act_norm, index=self.index
-            )
+            if int(self.cfg.executable_prefix_steps) > 0:
+                item = self.future_recipe.build(
+                    t,
+                    obs_norm=self.obs_norm,
+                    act_norm=self.act_norm,
+                    index=self.index,
+                    executable_prefix_steps=int(self.cfg.executable_prefix_steps),
+                )
+            else:
+                # Keep the disabled call path and reconstructed key set exact for
+                # legacy/v2/gauge consumers of the same immutable recipe.
+                item = self.future_recipe.build(
+                    t, obs_norm=self.obs_norm, act_norm=self.act_norm, index=self.index
+                )
         elif self._cache is None:
             item = self.builder.build(t)
         else:
@@ -283,7 +310,38 @@ class ChunkDataset(Dataset):
             if item is None:
                 item = self.builder.build(t)
                 self._cache[t] = item
-        return {k: torch.from_numpy(v) if isinstance(v, np.ndarray) else torch.tensor(v) for k, v in item.items()}
+        if int(self.cfg.executable_prefix_steps) > 0:
+            # Immutable normalizer/domain fields make every collated prefix batch
+            # self-describing. Disabled items retain their historical key set exactly.
+            item = dict(item)
+            item.update(
+                {
+                    "executable_action_mean": np.asarray(
+                        self.normalizer.act_mean, dtype=np.float32
+                    ).copy(),
+                    "executable_action_std": np.asarray(
+                        self.normalizer.act_std, dtype=np.float32
+                    ).copy(),
+                    "executable_observation_mean": np.asarray(
+                        self.normalizer.obs_mean, dtype=np.float32
+                    ).copy(),
+                    "executable_observation_std": np.asarray(
+                        self.normalizer.obs_std, dtype=np.float32
+                    ).copy(),
+                    "executable_task_metric_kind": np.int64(
+                        self.task_goal_metric == "onehot"
+                    ),
+                    "executable_task_subgoals": np.asarray(
+                        self.task_subgoals, dtype=np.int64
+                    ).reshape(-1, 2),
+                }
+            )
+        return {
+            key: torch.from_numpy(value)
+            if isinstance(value, np.ndarray)
+            else torch.tensor(value)
+            for key, value in item.items()
+        }
 
     # ------------------------------------------------------------------ helpers
 
@@ -318,6 +376,8 @@ def build_datasets(
     cache_root: str | None = None,
     data_manifest_sha256: str | None = None,
     task_metric_dims: tuple[int, ...] | None = None,
+    task_goal_metric: str = "l2",
+    task_subgoals: tuple[tuple[int, int], ...] = (),
     recipe_anchor_policy: str = "selected_seed",
     validation_sample_seed: int | None = None,
 ) -> tuple[Any, ChunkDataset, ChunkDataset, Normalizer]:
@@ -365,11 +425,13 @@ def build_datasets(
             max_anchors=max_train_anchors, seed=seed,
             cache_future_sets=cache_future_sets, shared=cache.train,
             task_metric_dims=task_metric_dims,
+            task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
         )
         val_ds = ChunkDataset(
             {}, normalizer, future_cfg, xy_dims=xy_dims,
             max_anchors=max_val_anchors, seed=validation_seed + 1, shared=cache.val,
             task_metric_dims=task_metric_dims,
+            task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
         )
         train_ds.cache_metrics = cache.assert_consumed_by(train_ds, val_ds)
         train_ds.manifest_sha256 = cache.source_manifest_sha256
@@ -398,10 +460,12 @@ def build_datasets(
             {}, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_train_anchors,
             seed=seed, cache_future_sets=cache_future_sets, shared=cache.train,
             task_metric_dims=task_metric_dims,
+            task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
         )
         val_ds = ChunkDataset(
             {}, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors,
             seed=validation_seed + 1, shared=cache.val, task_metric_dims=task_metric_dims,
+            task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
         )
         # Fails loudly if the arrays were copied rather than mapped.
         train_ds.cache_metrics = cache.assert_consumed_by(train_ds, val_ds)
@@ -426,10 +490,12 @@ def build_datasets(
     train_ds = ChunkDataset(
         train, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_train_anchors, seed=seed,
         cache_future_sets=cache_future_sets, task_metric_dims=task_metric_dims,
+        task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
     )
     val_ds = ChunkDataset(
         val, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors,
         seed=validation_seed + 1, task_metric_dims=task_metric_dims,
+        task_goal_metric=task_goal_metric, task_subgoals=task_subgoals,
     )
     return env, train_ds, val_ds, normalizer
 

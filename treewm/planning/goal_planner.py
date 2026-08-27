@@ -17,6 +17,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from treewm.models.treewm import horizon_mask
+from treewm.planning.action_execution import (
+    project_normalized_actions,
+    uniform_action_bounds,
+)
 from treewm.tree.expansion import TreeConfig
 from treewm.tree.frontier import GOAL_AWARE_SCORERS
 
@@ -214,6 +219,11 @@ class PlannerConfig:
     #   full    the whole predicted chunk
     execute_mode: str = "clipped"
     execute_steps: int = 16
+    # Existing objectives retain the historical [-1, 1] executor when these are null.
+    # A prospective objective that trains against applied actions must seal both values
+    # explicitly and verify them against the environment action space before training.
+    action_lower_bound: float | None = None
+    action_upper_bound: float | None = None
     max_env_steps: int = 500
     use_uncertainty: bool = False
     uncertainty_weight: float = 0.0
@@ -268,6 +278,22 @@ class GoalPlanner:
             torch.as_tensor(normalizer.obs_std, dtype=torch.float32, device=self.device)
             if normalizer is not None else None
         )
+        configured_lower = cfg.action_lower_bound
+        configured_upper = cfg.action_upper_bound
+        if (configured_lower is None) != (configured_upper is None):
+            raise ValueError("planner action bounds must be both null or both configured")
+        # Null is the exact historical planner policy. The executable-prefix objective
+        # is forbidden from using this fallback by its separate fail-closed validator.
+        self._sealed_action_bounds = configured_lower is not None
+        if self._sealed_action_bounds:
+            action_dim = int(model.cfg.action_dim)
+            bounds_like = np.empty(action_dim, dtype=np.float32)
+            self.action_lower_bound, self.action_upper_bound = uniform_action_bounds(
+                action_dim,
+                float(configured_lower),
+                float(configured_upper),
+                like=bounds_like,
+            )
         # Own stream: a diagnostic render must not change what the planner does.
         from treewm.utils.rng import make_generator
 
@@ -334,11 +360,61 @@ class GoalPlanner:
             dtype=torch.long,
             device=root_z.device,
         )
-        prefix = model.predict_children(
-            root_z,
-            torch.zeros(batch, dtype=torch.long, device=root_z.device),
-            horizon_override=horizon_override,
-        )
+        depth = torch.zeros(batch, dtype=torch.long, device=root_z.device)
+        if bool(getattr(self, "_sealed_action_bounds", False)):
+            if self.normalizer is None:
+                raise ValueError(
+                    "sealed executable action projection requires a normalizer"
+                )
+            # This is the same branch/action projection used by final execution and by
+            # the prospective training loss. It is opt-in so historical guard scores
+            # retain their original raw-normalized action path exactly.
+            branch = model.branch(root_z, depth)
+            action_mean = torch.as_tensor(
+                self.normalizer.act_mean,
+                dtype=torch.float32,
+                device=root_z.device,
+            )
+            action_std = torch.as_tensor(
+                self.normalizer.act_std,
+                dtype=torch.float32,
+                device=root_z.device,
+            )
+            lower = torch.as_tensor(
+                self.action_lower_bound,
+                dtype=torch.float32,
+                device=root_z.device,
+            )
+            upper = torch.as_tensor(
+                self.action_upper_bound,
+                dtype=torch.float32,
+                device=root_z.device,
+            )
+            projected = project_normalized_actions(
+                branch.action,
+                action_mean=action_mean,
+                action_std=action_std,
+                action_lower_bound=lower,
+                action_upper_bound=upper,
+            )
+            prefix_mask = horizon_mask(
+                horizon_override, model.horizons, int(model.cfg.h_max)
+            )
+            prefix = {
+                "latent": model.dynamics(
+                    root_z,
+                    projected.applied_normalized,
+                    prefix_mask,
+                    horizon_override,
+                    branch.embedding,
+                )
+            }
+        else:
+            prefix = model.predict_children(
+                root_z,
+                depth,
+                horizon_override=horizon_override,
+            )
         prefix_obs = model.decoder(prefix["latent"])
         prefix_branch_score = decoded_goal_scores(
             prefix_obs,
@@ -498,8 +574,24 @@ class GoalPlanner:
                 length = max(1, min(chunk_len, self.cfg.execute_steps))
             self.last_planned_chunk = chunk_len
             actions = chunk[:length].float().cpu().numpy()
-            actions = self.normalizer.denorm_act(actions)
-            actions = np.clip(actions, -1.0, 1.0)
+            if self._sealed_action_bounds:
+                projection = project_normalized_actions(
+                    actions,
+                    action_mean=np.asarray(
+                        self.normalizer.act_mean, dtype=np.float32
+                    ),
+                    action_std=np.asarray(
+                        self.normalizer.act_std, dtype=np.float32
+                    ),
+                    action_lower_bound=self.action_lower_bound,
+                    action_upper_bound=self.action_upper_bound,
+                )
+                actions = projection.applied_env
+            else:
+                # Exact historical path, including support for legacy normalizer
+                # adapters that expose only denorm_act.
+                actions = self.normalizer.denorm_act(actions)
+                actions = np.clip(actions, -1.0, 1.0)
 
         return PlanResult(
             actions=actions.astype(np.float32),

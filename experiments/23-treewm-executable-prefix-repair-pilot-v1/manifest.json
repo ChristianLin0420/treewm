@@ -1,0 +1,343 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
+  "classification": "bounded_prospective_matched_causal_repair_pilot",
+  "status": "sealed_launch_ready_unsubmitted",
+  "formal_validation": false,
+  "claim_policy": "This 20-cell 25k pilot is engineering evidence only; it is neither a formal result nor support for a 1M claim.",
+  "package_policy": {
+    "launch_surface": true,
+    "allowed_actions": ["verify_package", "render_matrix", "evaluate_supplied_report_bundle", "rerun_outcome_blind_weight_audit", "static_launch_test", "dry_run", "explicit_submit"],
+    "forbidden_actions": ["implicit_submit", "import_checkpoint", "import_optimizer", "select_at_midpoint", "drop_cell", "write_exp20_exp21_exp22", "consume_exp20_outcomes"],
+    "submission_policy": "No command submits unless submit.py is invoked with --submit under the pinned interpreter; --test-only and default dry-run are read-only and create neither snapshot nor job."
+  },
+  "method": {
+    "arm": "treewm",
+    "model_class": "TreeWM",
+    "experiment_config": "treewm_v2_grounded_executable_prefix_pilot_v1",
+    "objective_version": "treewm_v2_grounded_executable_prefix_pilot_v1",
+    "node_budget": 64,
+    "branch_factor": 4,
+    "base_recipe": "Exp20 GS",
+    "transition_mode": "grounded_execution_v2"
+  },
+  "design": {
+    "settings": ["antmaze-large", "scene", "puzzle-3x3", "puzzle-4x4-100m", "cube-quadruple-100m"],
+    "arms": ["GS", "GSEP"],
+    "seeds": [110, 111],
+    "expected_cells": 20,
+    "index_mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
+    "fresh_start_policy": "Every cell starts from scratch; no checkpoint, result, optimizer, or model initialization may be imported.",
+    "common_random_numbers": "Within each setting and seed, GS and GSEP use identical initialization seed, published-union data identity/order, validation sample seed, evaluation seed bank, and evaluation profile.",
+    "midpoint_policy": "No selection, promotion, dropping, early-stopping, or arm-dependent decision occurs at 5k or 12.5k; all cells continue to 25k.",
+    "analysis_boundaries": [5000, 25000],
+    "periodic_evaluation_boundaries": [12500, 25000]
+  },
+  "arms": [
+    {
+      "id": "GS",
+      "label": "gauge-separate-clip-monitor-only-prefix",
+      "executable_prefix_enabled": true,
+      "executable_prefix_weights": {"action": 0.0, "latent": 0.0, "endpoint": 0.0}
+    },
+    {
+      "id": "GSEP",
+      "label": "gauge-separate-clip-grounded-executable-prefix",
+      "executable_prefix_enabled": true,
+      "executable_prefix_weights": {"action": 0.033368419, "latent": 0.027645085, "endpoint": 0.011350645}
+    }
+  ],
+  "causal_contrast": {
+    "sole_resolved_config_difference": [
+      "losses.weights.executable_prefix_action",
+      "losses.weights.executable_prefix_latent",
+      "losses.weights.executable_prefix_endpoint"
+    ],
+    "zero_weight_control_policy": "In the outcome-blind controlled CPU reconstruction, GS materializes identical executable-prefix targets, action projection, losses, artifacts, and telemetry but contributes exactly zero effective objective weight.",
+    "required_parity": ["independently composed launch contract after deleting only run/W&B identity and the three weight-caused hashes/leaves", "independently loaded data and sampler identity", "controlled CPU scratch parameter bytes and RNG state before the audited forward", "controlled fixed-validation batch identity", "raw target/artifact hashes and telemetry values"],
+    "parity_failure_policy": "Reject the entire pilot before training."
+  },
+  "weight_audit": {
+    "lock": "weight_audit.lock.json",
+    "audit_source": "weight_audit.py",
+    "artifact_sha256": "130180ce9202e4a83bc59d6bdaf02131885bb1aa74d998de5bb29d43135f5b3e",
+    "rows_sha256": "1b9926c4893f90915b3ad87b6d6cd4b0dae0a70633ffb6599a90907b143a23f5",
+    "summary_sha256": "a5eb0de7846e8f58bcf15f6bbce9f92c76d3c3cf3c5778fb1b7eace6c2b10860",
+    "outcome_blind": true,
+    "weights_frozen_before_package_matrix": true
+  },
+  "prefix_target_contract": {
+    "lock": "prefix_target.lock.json",
+    "audit_source": "prefix_target_audit.py",
+    "artifact_sha256": "1540c3172984631396da826f322d958727f9c343d5c564697d3f1c7f77d43fe5",
+    "source_sha256": "6c3fca1b902642dca76007d54a37ce9ed2dfc0aae8b364b7eabee9a674dfbc0c",
+    "outcome_blind": true,
+    "validation_anchor_count_per_setting": 5120,
+    "batch_size": 256,
+    "validation_batches": 20,
+    "world_size": 1
+  },
+  "resolved_config_contract": {
+    "lock": "resolved_config.lock.json",
+    "audit_source": "resolved_config_audit.py",
+    "artifact_sha256": "e883e6d861a87bfe9462825db22e4584df7c2f572f647cd148ffa994e174a81b",
+    "source_sha256": "8d13ebc60f3ba574b8a5a800da915864b36f540f35a22aafeba89be6a92f4150",
+    "direct_entrypoint": "scripts/train.py",
+    "cell_count": 20,
+    "outcome_blind": true
+  },
+  "causal_parity_contract": {
+    "lock": "causal_parity.lock.json",
+    "audit_source": "causal_parity_audit.py",
+    "artifact_sha256": "a9991bb584f07ac304bd8b310ed11901a18f9f8b654d77b9122b7d203635ee89",
+    "source_sha256": "3820fb42561cae9b86ddd48186ed1eaee0258d4698bf6f9b521f0ea624eb401d",
+    "audit_manifest_input_sha256": "4a3b2d0790f68a7d2deadb856438bd38406f7bcfd33dd8ad03f619d393d04fa9",
+    "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+    "stdout_sha256": "4db23cc1623c420a914ee89a18e7142ded5729a7729dd686676d4344cabc2422",
+    "stdout_bytes": 91081,
+    "clean_and_adversarial_thread_replays_byte_identical": true,
+    "outcome_blind": true,
+    "package_protocol_claimed_by_audit": false
+  },
+  "core_binding": {
+    "executable_prefix_schema_version": 1,
+    "trainer_code_fingerprint": "1d2bf0889844b299eb7dfda65e3fed6554da962033ac28684ad6dd299ac5f535",
+    "trainer_sha256": "3fcfd8ac429a1fc98f3424bcba4665aeb05e0c49cee3cfad3dc44a3e05a29c29",
+    "executable_loss_sha256": "e2e1c9e7199bd8dbba5b1601e6c88945bff510e7c899226431ac7e7003be9392",
+    "action_projection_sha256": "b270ee8c557aba58f8351ed7f92784d079d04161ff0cc255c1d2fdb96ba4ca86",
+    "objective_config_sha256": "954a86bf01544add91dba2ad414e650dbc2af7a51598be317498c49b34282975",
+    "effective_tree_config_required": true,
+    "depth_contract": {"model_max_depth": 3, "tree_max_depth": 3},
+    "planner_prefix_contract": {"decoded_metric": "domain_raw", "execute_mode": "clipped", "execute_steps": 4, "require_first_edge_improvement": true, "min_first_edge_improvement": 0.0},
+    "action_bounds_contract": "Per-setting loss and planner bounds are derived from, equal to, and hash-bound to the actual environment Box in weight_audit.lock.json; absence or disagreement fails closed."
+  },
+  "scientific_contract": {
+    "optimizer_updates": 25000,
+    "scheduler_total_steps": 1000000,
+    "checkpoint_every_updates": 1000,
+    "validation_every_updates": 1000,
+    "diagnostics_every_updates": 1000,
+    "training_telemetry_every_updates": 50,
+    "visualization_every_updates": 25000,
+    "visualization_every_early_updates": 1000,
+    "visualization_early_until_updates": 2000,
+    "periodic_evaluation_every_updates": 12500,
+    "periodic_episodes_per_task": 1,
+    "final_episodes_per_task": 5,
+    "task_ids": [1, 2, 3, 4, 5],
+    "validation_sample_seed": 1701,
+    "evaluation_seed": 2718,
+    "evaluation_seed_protocol_sha256": "96001dcf77f1210ae3bac7c2250f7feafc7bf11cf2ba83627f04cbef87157398",
+    "data_loader_workers": 10,
+    "loader_thread_limit": 1,
+    "gain_loss_every": 1,
+    "gain_training_scorers": ["learned", "novelty_q"],
+    "model_max_depth": 3,
+    "tree_max_depth": 3,
+    "tree_scorer": "learned",
+    "keep_threshold": 0.5,
+    "task_split": "standard",
+    "world_lr": 0.00003,
+    "gain_lr": 0.0003,
+    "world_weight_decay": 0.001,
+    "gain_weight_decay": 0.0,
+    "model_dropout": 0.1,
+    "gradient_checkpointing": true,
+    "latent_gauge_enabled": true,
+    "latent_gauge_weight": 1.0,
+    "latent_gauge_epsilon": 1e-8,
+    "latent_gauge_min_reference_scale": 0.0001,
+    "separate_gain_grad_clip": true,
+    "separate_branch_transformer_grad_clip": true,
+    "world_grad_clip": 1.0,
+    "branch_transformer_grad_clip": 1.0,
+    "gain_grad_clip": 1.0,
+    "multistep_weight": 1.0,
+    "multistep_depth_weights": [1.0, 1.0, 1.0],
+    "scheduled_sampling_p": 0.25,
+    "scheduled_sampling_warmup": 5000,
+    "scheduled_sampling_granularity": "sequence",
+    "grounded_detach_self_fed_parent": true,
+    "grounded_select_weights": {"action": 1.0, "endpoint": 1.0, "horizon": 0.25},
+    "grounded_loss_weights": {"latent": 0.25, "action": 0.5, "horizon": 0.25, "endpoint": 0.5},
+    "future_sets": {
+      "recipe_anchor_policy": "published_union",
+      "num_neighbors": 24,
+      "query_multiplier": 6,
+      "time_exclusion": 50,
+      "include_self": true,
+      "metric_mode": "rms_v2",
+      "horizons": [4, 8, 16, 32, 64],
+      "h_max": 64,
+      "horizon_rule": "displacement",
+      "fixed_horizon": 32,
+      "cluster_method": "average",
+      "max_modes": 4,
+      "multi_step_depth": 3,
+      "retrieval_pool": 50000,
+      "cache": false,
+      "shared_cache": true,
+      "executable_prefix_steps": 4
+    },
+    "prefix_length_rule": "For every matched branch independently, p=min(4, logged selected continuation horizon); learned horizon is never used."
+  },
+  "acceptance": {
+    "scope": "GSEP must pass every absolute gate in all ten cells at both 5k and 25k. GS must pass structural, finite, target-completeness, target-parity, and zero-weight gates; its gauge, clipping saturation, calibration, method, and outcome values remain causal observations.",
+    "unchanged_exp20_candidate_gates": {
+      "min_recent_latent_gauge_ratio": 0.8,
+      "reference_update": 0,
+      "reference_sealed": 1.0,
+      "min_gradient_norm": 1e-8,
+      "gradient_recent_window_updates": 5000,
+      "gauge_recent_window_updates": 1000,
+      "gain_recent_window_updates": 5000,
+      "clip_coefficient_interval": "(0,1]",
+      "min_clip_coefficient": 0.05,
+      "max_recent_5k_fraction_below_min_clip": 0.25,
+      "max_validation_regret_fraction": 0.10,
+      "max_self_fed_validation_regret_fraction": 0.10,
+      "max_horizon_cross_entropy": 1.6094379124341003,
+      "horizon_cross_entropy_must_also_be_below_empirical_prior_entropy": true,
+      "horizon_label_fraction_sum_tolerance": 0.02,
+      "min_q_advantage": 0.0,
+      "min_gain_rank_correlation": 0.1,
+      "min_gain_pairwise_accuracy": 0.52,
+      "min_gain_eligible_decision_fraction": 0.2,
+      "min_gain_ordered_pair_count": 1.0,
+      "min_gain_pair_coverage_fraction": 0.01,
+      "min_support_recall": 0.5,
+      "min_support_precision": 0.25
+    },
+    "prefix_structural_gates": {
+      "schema_version": 1,
+      "all_required_train_and_fixed_validation_tags_finite": true,
+      "all_count_denominators_complete": true,
+      "raw_action_finite_fraction": 1.0,
+      "applied_action_finite_fraction": 1.0,
+      "logged_action_finite_fraction": 1.0,
+      "target_rule": "Before launch, independently source-derive and freeze the full branchwise length-vector/distribution and hmax64 mask contract. Actual runs bind the exact fixed-validation sampler summary and aggregate scalar denominators; prefix_steps_mean is descriptive and is never compared to 4.",
+      "control_effective_prefix_weights": [0.0, 0.0, 0.0]
+    },
+    "absolute_h4_calibration_gates": {
+      "action_raw_and_applied_rms_positive": true,
+      "action_raw_over_applied_rms_interval": [1.0, 2.0],
+      "max_action_clipped_fraction": 0.25,
+      "predicted_and_actual_task_displacement_rms_positive": true,
+      "predicted_over_actual_task_displacement_rms_interval": [0.5, 2.0],
+      "max_endpoint_error_over_actual_task_displacement": 1.0,
+      "domain_raw_or_hamming_guard_telemetry_finite": true
+    },
+    "paired_h4_calibration_gates_at_25k": {
+      "candidate_macro_endpoint_error_strictly_below_control": true,
+      "min_settings_candidate_two_seed_endpoint_error_below_control": 3,
+      "candidate_macro_action_distortion_not_above_control": true,
+      "candidate_macro_action_clipped_fraction_not_above_control": true,
+      "action_distortion_definition": "(raw_action_rms-applied_action_rms)/raw_action_rms"
+    },
+    "absolute_end_to_end_gates_at_25k": {
+      "min_total_successes_per_seed_across_settings": 1,
+      "min_mean_distance_reduction_per_seed": 0.0,
+      "min_settings_with_success_for_both_seeds": 1,
+      "min_settings_with_positive_progress_for_both_seeds": 3
+    },
+    "paired_end_to_end_gates_at_25k": {
+      "candidate_macro_success_not_below_control": true,
+      "candidate_macro_distance_reduction_not_below_control": true,
+      "at_least_one_macro_metric_strict": true,
+      "min_settings_candidate_two_seed_distance_reduction_not_below_control": 3
+    }
+  },
+  "report_contract": {
+    "gate_program": "gate.py",
+    "input": "one immutable JSON report bundle assembled only after all 20 terminal triplets verify; its root binds the live-verified package protocol, canonical manifest, trainer fingerprint, and all four outcome-blind audit artifacts; gate.py itself never reads live run directories",
+    "required_root_bindings": ["package_protocol_sha256", "manifest_sha256", "trainer_code_fingerprint", "weight_audit_artifact_sha256", "prefix_target_artifact_sha256", "resolved_config_artifact_sha256", "causal_parity_artifact_sha256"],
+    "outcome_blind_until": "All training, telemetry, and calibration gates are computed before final outcomes are opened.",
+    "decision": "accept only if structural, candidate absolute, paired calibration, candidate absolute outcome, and paired outcome gates all pass; otherwise reject"
+  },
+  "launch_contract": {
+    "schema_version": 1,
+    "array": "0-19%20",
+    "array_cells": 20,
+    "gpu_jobs": 20,
+    "gpu_per_cell": 1,
+    "scratch_to_updates": 25000,
+    "analysis_only_boundary_updates": 5000,
+    "terminal_final_evaluation": true,
+    "terminal_final_evaluation_total_episodes": 25,
+    "terminal_final_evaluation_episode_policy": "Exactly task IDs 1..5 x episode indices 0..4 using the bounded-objective legacy fallback seed eval.seed + 1000*task_index + episode_index; the protocol table published by the trainer is provenance only and is not the consumed seed schedule.",
+    "midpoint_selection": false,
+    "resume_policy": "Only the same cell's exact-resume checkpoint may be resumed after a durable USR1 requeue; no foreign state is accepted.",
+    "trainer_invocation_policy": "Each cell uses one uninterrupted scratch-to-25k scientific identity with resume=auto and no TREEWM_STOP_AFTER_UPDATE in any process or environment. Update 5k is retrospective telemetry analysis only, never a lifecycle stage.",
+    "dependency": "one CPU report-and-gate job with afterok on the complete 20-cell GPU array",
+    "source_snapshot": "immutable, read-only, nonsymlinked, byte-verified source/config/package snapshot bound to commit, runtime, protocol, manifest, audit, and resolved launch identities",
+    "fresh_namespace": true,
+    "actual_submit_performed": false
+  },
+  "paths": {
+    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
+    "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
+    "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
+    "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
+    "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1"
+  },
+  "compatible_v2_recipe_input": {
+    "campaign_id": "treewm-50task-1m-v2",
+    "objective_version": "treewm_v2_rms_rank_v1",
+    "campaign_protocol_sha256": "1ee9dd8a65ab5b01def3d55826efe34212628e9c1393259ef17e5d12665afc82",
+    "recipe_code_sha256": "4cb70b4421d3eae1a6e947e3b0359336bd64248897ffcf52d4a672ca4adcd30c",
+    "recipe_runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+    "read_only": true
+  },
+  "execution": {
+    "gpu_partitions": "polar4,polar3,polar,grizzly",
+    "cpu_partition": "cpu",
+    "array": "0-19%20",
+    "gpus_per_task": 1,
+    "cpus_per_task": 12,
+    "memory_per_task": "64G",
+    "walltime": "04:00:00",
+    "signal_seconds_before_end": 420,
+    "training_lifecycle": "one continuous scratch-to-25000 trainer identity with exact-resume only for genuine USR1 requeues; update 5000 is analysis-only",
+    "process_topology": "Slurm batch shell -> worker.py -> train_entry.py -> in-process scripts.train; no srun or midpoint stage process",
+    "control_python_flags": ["-I", "-S", "-B"],
+    "trainer_python_flags": ["-P", "-S", "-B"],
+    "sealed_trainer_environment": {"MUJOCO_GL": "egl", "XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+    "sbatch": "/usr/local/bin/sbatch",
+    "scancel": "/usr/local/bin/scancel",
+    "scontrol": "/usr/local/bin/scontrol"
+  },
+  "logging": {
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
+    "wandb_group": "treewm-executable-prefix-repair-pilot-v1",
+    "wandb_mode": "online"
+  },
+  "settings": [
+    {
+      "id": "antmaze-large", "env_config": "antmaze_large_navigate", "env_name": "antmaze-large-navigate-v0", "source_name": "antmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "9009f22bcf2007341a6e3040b5f8a325fdd542520e852c372b90cdd50cad9d6e", "calibration_sha256": "77d33a07fa5862150472b6bf8d97e3ed7e7c3a4c803fb0c3c121ebe7cb234a62", "source_manifest_sha256": "05f576ad5217bbaa6be42245f32e11b2cf6348d5a780fa1a78adeaa9861038d8", "future_recipe_sha256": "34087d2bab3b42f5fe96a2148a96975a757def976ec69bab2d9b206ffe953598", "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "scene", "env_config": "scene_play", "env_name": "scene-play-v0", "source_name": "scene-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 32, 33, 36, 38], "relative_endpoints": false, "max_episode_steps": 750,
+      "input_contract_sha256": "0fa8d6c363a88503133669d5715a549a9e4c2b70148d486bc25bda9090958f89", "calibration_sha256": "b2935ffac00eeb409e48066625760b8243d5a6f34fc83e18e1cea46b5c7a051e", "source_manifest_sha256": "adbfe7cfb9aa9f14f5859c15afe42541bb6c0922eb3abbe7f90a14c26fc60da0", "future_recipe_sha256": "8c345a6b855ab1bf378dc84839b0ce8728284cd3620e05336ec6e527d0e8af09", "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-3x3", "env_config": "puzzle_3x3_play", "env_name": "puzzle-3x3-play-v0", "source_name": "puzzle-3x3-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "39f7ca2799cf13f876f7bbe4991589f8bf967e4372d9484d21f3bd6dee778e6c", "calibration_sha256": "58263941d8902dfee9d4171ea13930ee8ca3f0ee5f1e316c4151ee28283ed4c7", "source_manifest_sha256": "95f1dbddecbfbc93147a74e4834e2193d00849b675a58283ff5912439812fe4d", "future_recipe_sha256": "58c0d8dc7ca10be57d971e1d30031736c972521c0e735cb01b0c2938185adae9", "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-4x4-100m", "env_config": "puzzle_4x4_play_100m", "env_name": "puzzle-4x4-play-v0", "source_name": "puzzle-4x4-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/puzzle-4x4-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52, 55, 56, 59, 60, 63, 64, 67, 68, 71, 72, 75, 76, 79, 80], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "7ba892f3e4b7eb11b1b1c9712bbf9d9237c66910b13c034f4fbe01c1c34e4883", "calibration_sha256": "03bc78c2b7948093dd752e01ec512338da83f2cf677b6c4fc5e7e900ab51ba18", "source_manifest_sha256": "062d4a9b63552d1be7da1e7c757cd301e437d11f43dc9905243b40e81a5ac792", "future_recipe_sha256": "819a452dc22c3d80fe44aad3848b1e6a11295863b80fe87ba0510f5a2f9a6ff3", "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    },
+    {
+      "id": "cube-quadruple-100m", "env_config": "cube_quadruple_play_100m", "env_name": "cube-quadruple-play-v0", "source_name": "cube-quadruple-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/cube-quadruple-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39, 46, 47, 48], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "cfd70e8f04c396e9ea88720d483e5190bed4ff1ae36b27e2da81b5324542e9a6", "calibration_sha256": "3240b1462484bca29e10e8d3c8a59a4df12c2989ab74066bd6484b038bba4928", "source_manifest_sha256": "1fd042302d3e1e3b211d1602ff7991a6c41b977e85b59a109d8799e49c20783a", "future_recipe_sha256": "42aec1a4b9de2b4c98efd0bb7b51edad0330f7241adf5ad148dfbbded0eeca5f", "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    }
+  ]
+}

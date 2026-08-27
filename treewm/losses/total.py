@@ -18,6 +18,7 @@ import torch
 
 from treewm.data.future_sets import gather_mode_targets
 from treewm.losses import controllability_losses as cl
+from treewm.losses import executable_prefix as epl
 from treewm.losses import support_losses as sl
 from treewm.losses import world_losses as wl
 from treewm.tree.matching import (
@@ -48,6 +49,11 @@ class LossWeights:
     # Opt-in only. V2's scale-invariant latent losses otherwise leave a shrinkable
     # encoder/decoder gauge; the dedicated bounded gauge objective pins this to 1.0.
     latent_gauge: float = 0.0
+    # Prospective executor-aligned repair. Kept as three first-class terms so the raw
+    # and effective gradient of each causal component remains independently auditable.
+    executable_prefix_action: float = 0.0
+    executable_prefix_latent: float = 0.0
+    executable_prefix_endpoint: float = 0.0
 
 
 @dataclass
@@ -70,6 +76,9 @@ class LossConfig:
             "uncertainty": True,
             "multistep": False,
             "latent_gauge": False,
+            "executable_prefix_action": False,
+            "executable_prefix_latent": False,
+            "executable_prefix_endpoint": False,
         }
     )
     control_objective: str = "future_set"  # future_set | contrastive | bootstrap
@@ -101,6 +110,11 @@ class LossConfig:
     # leave the term disabled and never execute this path.
     latent_gauge_epsilon: float = 1.0e-8
     latent_gauge_min_reference_scale: float = 1.0e-4
+    # Explicit environment-unit bounds for the canonical planner/training action
+    # projection. Null preserves old objectives and is rejected by the registered
+    # executable-prefix objective.
+    executable_action_lower_bound: float | None = None
+    executable_action_upper_bound: float | None = None
     # Track H2: relative weight of each recursive depth (empty -> uniform).
     multistep_depth_weights: tuple[float, ...] = ()
     redundancy_temperature: float = 0.25
@@ -412,6 +426,33 @@ def compute_branch_losses(
     branch = child["branch"]
 
     modes = gather_mode_targets(batch)
+    prefix_term_names = (
+        "executable_prefix_action",
+        "executable_prefix_latent",
+        "executable_prefix_endpoint",
+    )
+    prefix_enabled = tuple(
+        bool(loss_cfg.enabled.get(name, False)) for name in prefix_term_names
+    )
+    if any(prefix_enabled) and not all(prefix_enabled):
+        raise ValueError(
+            "executable-prefix action/latent/endpoint terms must be enabled together"
+        )
+    prefix_requested = all(prefix_enabled)
+    prefix_mode_fields = (
+        "executable_prefix_endpoint",
+        "executable_prefix_metric_endpoint",
+        "executable_prefix_action_mask",
+        "executable_prefix_horizon_idx",
+        "executable_prefix_len",
+    )
+    if prefix_requested:
+        missing_prefix = [name for name in prefix_mode_fields if name not in modes]
+        if missing_prefix:
+            raise KeyError(
+                "active executable-prefix objective is missing mode targets: "
+                + ", ".join(missing_prefix)
+            )
     b, c = modes["valid"].shape
     tgt_z = model.encode(modes["endpoint"])  # [B, C, D]
     tgt_q = model.q_of(tgt_z)  # [B, C, S, qd]
@@ -445,6 +486,11 @@ def compute_branch_losses(
                 if "metric_endpoint" in modes
                 else {}
             ),
+            **(
+                {name: modes[name] for name in prefix_mode_fields}
+                if prefix_requested
+                else {}
+            ),
         },
         branch_to_mode,
     )
@@ -453,6 +499,7 @@ def compute_branch_losses(
 
     losses: dict[str, torch.Tensor] = {}
     auxiliary_metrics: dict[str, float] = {}
+    prefix_artifacts: dict[str, torch.Tensor] = {}
     latent_gauge = getattr(model, "latent_gauge", None)
     if latent_gauge is not None:
         gauge_loss, gauge_metrics = latent_gauge(
@@ -548,6 +595,61 @@ def compute_branch_losses(
         auxiliary_metrics.update(recursive_metrics)
     if loss_cfg.on("reconstruction") and model.decoder is not None:
         losses["reconstruction"] = wl.reconstruction_loss(model.decoder, z, obs)
+
+    if prefix_requested:
+        required_batch_fields = (
+            "task_metric_dims",
+            "executable_action_mean",
+            "executable_action_std",
+            "executable_observation_mean",
+            "executable_observation_std",
+            "executable_task_metric_kind",
+            "executable_task_subgoals",
+        )
+        missing_batch = [name for name in required_batch_fields if name not in batch]
+        if missing_batch:
+            raise KeyError(
+                "active executable-prefix objective is missing batch metadata: "
+                + ", ".join(missing_batch)
+            )
+        lower_bound = loss_cfg.executable_action_lower_bound
+        upper_bound = loss_cfg.executable_action_upper_bound
+        if lower_bound is None or upper_bound is None:
+            raise ValueError(
+                "active executable-prefix objective requires sealed action bounds"
+            )
+        prefix_result = epl.executable_prefix_losses(
+            model,
+            parent_z=z,
+            parent_obs=obs,
+            branch_embedding=branch.embedding,
+            raw_predicted_action=branch.action,
+            target_action=tgt["actions"],
+            prefix_action_mask=tgt["executable_prefix_action_mask"],
+            prefix_horizon_idx=tgt["executable_prefix_horizon_idx"],
+            prefix_target_endpoint=tgt["executable_prefix_endpoint"],
+            prefix_target_metric_endpoint=tgt[
+                "executable_prefix_metric_endpoint"
+            ],
+            prefix_length=tgt["executable_prefix_len"],
+            matched=matched,
+            task_metric_dims=batch["task_metric_dims"],
+            action_mean=batch["executable_action_mean"],
+            action_std=batch["executable_action_std"],
+            observation_mean=batch["executable_observation_mean"],
+            observation_std=batch["executable_observation_std"],
+            task_metric_kind=batch["executable_task_metric_kind"],
+            task_subgoals=batch["executable_task_subgoals"],
+            action_lower_bound=float(lower_bound),
+            action_upper_bound=float(upper_bound),
+        )
+        losses["executable_prefix_action"] = prefix_result.action
+        losses["executable_prefix_latent"] = prefix_result.latent
+        losses["executable_prefix_endpoint"] = prefix_result.endpoint
+        auxiliary_metrics.update(prefix_result.metrics)
+        prefix_artifacts = {
+            name: value.detach() for name, value in prefix_result.artifacts.items()
+        }
 
     control_metrics: dict[str, float] = {}
     if loss_cfg.on("control"):
@@ -687,6 +789,7 @@ def compute_branch_losses(
         "matched": matched.detach(),
         "num_modes": batch["num_modes"],
         "future_diversity": batch["future_diversity"],
+        **prefix_artifacts,
     }
     if return_loss_terms:
         return total, metrics, artifacts, terms
