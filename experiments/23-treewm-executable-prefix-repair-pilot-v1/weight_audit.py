@@ -86,11 +86,10 @@ def stable_hash(value: object) -> str:
 
 
 def file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while block := handle.read(16 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+    _payload, digest = _authenticated_regular_bytes(
+        Path(path), None, f"SHA256 source {path}"
+    )
+    return digest
 
 
 def tensor_mapping_sha256(values: Mapping[str, Any]) -> str:
@@ -163,13 +162,18 @@ def _open_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
         descriptor = os.open(
             path.name,
             os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_CLOEXEC", 0),
             dir_fd=parent,
         )
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise AuditError(f"{label} is not a single-link regular file")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o444 == 0
+        ):
+            raise AuditError(f"{label} is not a readable single-link regular file")
         return descriptor, info
     except BaseException:
         if descriptor is not None:
@@ -295,6 +299,10 @@ def exact_checkpoint_run(output_root: Path, setting: str, seed: int) -> Path:
     tree_root = output_root / setting / "treewm"
     descriptor = _open_directory_components(tree_root, f"{setting} checkpoint run root")
     try:
+        root_info = os.fstat(descriptor)
+        root_mode = stat.S_IMODE(root_info.st_mode)
+        if not root_mode & 0o444 or not root_mode & 0o111:
+            raise AuditError(f"{setting}: checkpoint run root is not traversable")
         suffix = f"armgs-seed{seed}"
         candidates = sorted(name for name in os.listdir(descriptor) if name.endswith(suffix))
         if len(candidates) != 1:
@@ -358,26 +366,56 @@ def _open_checkpoint(run_dir: Path) -> tuple[int, os.stat_result]:
     run_descriptor = _open_directory_components(run_dir, "frozen checkpoint run")
     checkpoint_descriptor: int | None = None
     try:
+        run_info = os.fstat(run_descriptor)
+        run_mode = stat.S_IMODE(run_info.st_mode)
+        if (
+            run_info.st_uid != os.getuid()
+            or not run_mode & 0o444
+            or not run_mode & 0o111
+        ):
+            raise AuditError("frozen checkpoint run is not an owned traversable directory")
         directory_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_CLOEXEC", 0)
         )
+        checkpoints_named = os.stat(
+            "checkpoints", dir_fd=run_descriptor, follow_symlinks=False
+        )
         checkpoints = os.open("checkpoints", directory_flags, dir_fd=run_descriptor)
         try:
+            checkpoints_info = os.fstat(checkpoints)
+            checkpoints_mode = stat.S_IMODE(checkpoints_info.st_mode)
+            if (
+                _file_identity(checkpoints_info) != _file_identity(checkpoints_named)
+                or checkpoints_info.st_uid != os.getuid()
+                or not checkpoints_mode & 0o444
+                or not checkpoints_mode & 0o111
+            ):
+                raise AuditError("frozen checkpoints directory is unsafe or raced")
             checkpoint_descriptor = os.open(
                 "latest.pt",
                 os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
                 | getattr(os, "O_NOFOLLOW", 0)
                 | getattr(os, "O_CLOEXEC", 0),
                 dir_fd=checkpoints,
             )
+            if _file_identity(os.fstat(checkpoints)) != _file_identity(checkpoints_info):
+                raise AuditError("frozen checkpoints directory changed during open")
         finally:
             os.close(checkpoints)
         info = os.fstat(checkpoint_descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise AuditError("frozen checkpoint is not a single-link regular file")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o444 == 0
+        ):
+            raise AuditError("frozen checkpoint is not a readable owned single-link regular file")
+        if _file_identity(os.fstat(run_descriptor)) != _file_identity(run_info):
+            raise AuditError("frozen checkpoint run changed during open")
         return checkpoint_descriptor, info
     except BaseException:
         if checkpoint_descriptor is not None:
@@ -420,11 +458,31 @@ def load_frozen_checkpoint(
             if actual != expected_sha256:
                 raise AuditError("frozen checkpoint SHA256 differs from weight-audit lock")
             verified.flush()
+            private_before = os.fstat(verified.fileno())
+
+            def private_sha256() -> str:
+                private_digest = hashlib.sha256()
+                offset = 0
+                while block := os.pread(
+                    verified.fileno(), 16 * 1024 * 1024, offset
+                ):
+                    private_digest.update(block)
+                    offset += len(block)
+                if offset != private_before.st_size:
+                    raise AuditError("private checkpoint copy has a short read")
+                return private_digest.hexdigest()
+
+            if private_sha256() != actual:
+                raise AuditError("private checkpoint copy differs before torch.load")
             verified.seek(0)
             payload = torch_module.load(
                 verified, map_location="cpu", weights_only=False
             )
-            if os.fstat(verified.fileno()).st_size != copied:
+            private_after = os.fstat(verified.fileno())
+            if (
+                _file_identity(private_after) != _file_identity(private_before)
+                or private_sha256() != actual
+            ):
                 raise AuditError("private checkpoint copy changed during torch.load")
             return payload, actual
     finally:
@@ -470,8 +528,98 @@ def batch_sha256(batch: Mapping[str, Any]) -> str:
 
 def _find_cache_manifest(cache_root: Path, source_name: str, source_sha: str):
     matches = []
-    for path in sorted(cache_root.glob("*/manifest.json"), key=str):
-        payload = read_json(path)
+    root_fd = _open_directory_components(cache_root, "published cache root")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    candidates: list[tuple[Path, dict[str, Any]]] = []
+    try:
+        root_info = os.fstat(root_fd)
+        root_mode = stat.S_IMODE(root_info.st_mode)
+        if not root_mode & 0o444 or not root_mode & 0o111:
+            raise AuditError("published cache root is not traversable")
+        try:
+            with os.scandir(root_fd) as iterator:
+                entries = []
+                for entry in iterator:
+                    try:
+                        entries.append((entry.name, entry.stat(follow_symlinks=False)))
+                    except OSError as exc:
+                        raise AuditError(f"cannot stat published cache entry {entry.name}: {exc}") from exc
+        except OSError as exc:
+            raise AuditError(f"cannot enumerate published cache root: {exc}") from exc
+        for name, info in sorted(entries, key=lambda value: value[0]):
+            if stat.S_ISLNK(info.st_mode):
+                raise AuditError(f"published cache root contains symlink: {name}")
+            if stat.S_ISREG(info.st_mode):
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                raise AuditError(f"published cache root contains special entry: {name}")
+            mode = stat.S_IMODE(info.st_mode)
+            if not mode & 0o444 or not mode & 0o111:
+                raise AuditError(f"published cache directory is not traversable: {name}")
+            try:
+                directory_fd = os.open(name, directory_flags, dir_fd=root_fd)
+            except OSError as exc:
+                raise AuditError(f"cannot open published cache directory {name}: {exc}") from exc
+            try:
+                opened = os.fstat(directory_fd)
+                if _file_identity(opened) != _file_identity(info):
+                    raise AuditError(f"published cache directory raced: {name}")
+                try:
+                    manifest_info = os.stat(
+                        "manifest.json", dir_fd=directory_fd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    manifest_info = None
+                except OSError as exc:
+                    raise AuditError(f"cannot stat published cache manifest {name}: {exc}") from exc
+                if manifest_info is not None and not stat.S_ISREG(manifest_info.st_mode):
+                    raise AuditError(f"published cache manifest is not regular: {name}")
+                if manifest_info is not None:
+                    manifest_fd: int | None = None
+                    try:
+                        manifest_fd = os.open(
+                            "manifest.json",
+                            os.O_RDONLY
+                            | getattr(os, "O_NONBLOCK", 0)
+                            | getattr(os, "O_NOFOLLOW", 0)
+                            | getattr(os, "O_CLOEXEC", 0),
+                            dir_fd=directory_fd,
+                        )
+                        manifest_opened = os.fstat(manifest_fd)
+                        if (
+                            _file_identity(manifest_opened) != _file_identity(manifest_info)
+                            or manifest_opened.st_nlink != 1
+                            or not stat.S_IMODE(manifest_opened.st_mode) & 0o444
+                        ):
+                            raise AuditError(f"published cache manifest raced: {name}")
+                        chunks: list[bytes] = []
+                        while block := os.read(manifest_fd, 16 * 1024 * 1024):
+                            chunks.append(block)
+                        if _file_identity(os.fstat(manifest_fd)) != _file_identity(manifest_opened):
+                            raise AuditError(f"published cache manifest changed: {name}")
+                        payload = _parse_json_bytes(
+                            b"".join(chunks), f"published cache manifest {name}"
+                        )
+                    except OSError as exc:
+                        raise AuditError(f"cannot read published cache manifest {name}: {exc}") from exc
+                    finally:
+                        if manifest_fd is not None:
+                            os.close(manifest_fd)
+                    candidates.append((cache_root / name / "manifest.json", payload))
+                if _file_identity(os.fstat(directory_fd)) != _file_identity(opened):
+                    raise AuditError(f"published cache directory changed: {name}")
+            finally:
+                os.close(directory_fd)
+        if _file_identity(os.fstat(root_fd)) != _file_identity(root_info):
+            raise AuditError("published cache root changed during enumeration")
+    finally:
+        os.close(root_fd)
+    for path, payload in candidates:
         name = payload.get("dataset") or payload.get("dataset_name")
         if name == source_name and payload.get("source_manifest_sha256") == source_sha:
             matches.append((path, payload))
@@ -497,6 +645,9 @@ def load_read_only_datasets(cfg: Any, launch: Mapping[str, Any]):
     cache_root = Path(environment["TREEWM_CACHE"]).resolve()
     source_name = str(cfg.env.get("source_name", cfg.env.name))
     manifest_path, manifest = _find_cache_manifest(cache_root, source_name, source_sha)
+    require_manifest = read_json(manifest_path)
+    if require_manifest != manifest:
+        raise AuditError("published cache manifest changed after authenticated enumeration")
     if str(cfg.env.get("dataset_kind", "standard")) == "sharded_100m_full":
         from treewm.data.sharded_ogbench import _load_cache
 
@@ -505,6 +656,8 @@ def load_read_only_datasets(cfg: Any, launch: Mapping[str, Any]):
         from treewm.data.shared_cache import _cache_from_manifest
 
         cache = _cache_from_manifest(manifest_path.parent, manifest, was_hit=True)
+    if read_json(manifest_path) != manifest:
+        raise AuditError("published cache manifest changed while loading cache")
     if str(cache.source_manifest_sha256) != source_sha:
         raise AuditError("cache source identity differs from launch")
     normalizer = Normalizer.from_state_dict(cache.norm_stats)
@@ -833,12 +986,215 @@ def derive_weights(rows: list[dict[str, Any]]):
 
 
 def _run_fingerprint(run_dir: Path) -> str:
-    rows = []
-    for path in sorted(run_dir.rglob("*"), key=str):
-        stat = path.lstat()
+    """Hash a complete historical control-run tree without following symlinks.
+
+    Pre-existing symlinks strictly below ``wandb/`` are mutation-only provenance:
+    their own lstat metadata and exact ``readlink`` text are projected, but their
+    targets are never resolved, opened, traversed, or hashed.  Target-only content
+    outside this run tree is therefore deliberately out of projection.  Symlinks
+    anywhere else remain forbidden so every scientifically consumed manifest,
+    launch, checkpoint, and cache control stays nonsymlink/O_NOFOLLOW-authenticated
+    across the audit's before/after mutation boundary.
+    """
+
+    root_fd = _open_directory_components(run_dir, "weight-audit control run")
+    rows: list[list[Any]] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    path_flag = getattr(os, "O_PATH", 0)
+    if not path_flag:
+        os.close(root_fd)
+        raise AuditError("weight-audit symlink fingerprinting requires O_PATH")
+    symlink_flags = path_flag | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+    def require_directory(info: os.stat_result, relative: str) -> None:
+        mode = stat.S_IMODE(info.st_mode)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or not mode & 0o444
+            or not mode & 0o111
+        ):
+            raise AuditError(f"weight-audit control directory is not traversable: {relative}")
+
+    def walk(directory_fd: int, parent: str, before: os.stat_result) -> None:
+        require_directory(before, parent or ".")
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = []
+                for entry in iterator:
+                    try:
+                        children.append((entry.name, entry.stat(follow_symlinks=False)))
+                    except OSError as exc:
+                        raise AuditError(
+                            f"cannot stat weight-audit control entry {parent}/{entry.name}: {exc}"
+                        ) from exc
+        except OSError as exc:
+            raise AuditError(f"cannot enumerate weight-audit control directory {parent}: {exc}") from exc
+        for name, listed in sorted(children, key=lambda value: value[0]):
+            relative = name if not parent else f"{parent}/{name}"
+            if stat.S_ISLNK(listed.st_mode):
+                if not relative.startswith("wandb/"):
+                    raise AuditError(
+                        f"weight-audit control tree contains non-W&B symlink: {relative}"
+                    )
+                link_fd: int | None = None
+                try:
+                    link_fd = os.open(name, symlink_flags, dir_fd=directory_fd)
+                    opened = os.fstat(link_fd)
+                    if (
+                        not stat.S_ISLNK(opened.st_mode)
+                        or opened.st_uid != os.getuid()
+                        or opened.st_nlink != 1
+                        or _file_identity(opened) != _file_identity(listed)
+                    ):
+                        raise AuditError(f"weight-audit control symlink raced: {relative}")
+                    link_text = os.readlink(b"", dir_fd=link_fd)
+                    middle = os.fstat(link_fd)
+                    link_text_after = os.readlink(b"", dir_fd=link_fd)
+                    after = os.fstat(link_fd)
+                    named_after = os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    if (
+                        len(link_text) != opened.st_size
+                        or link_text_after != link_text
+                        or _file_identity(middle) != _file_identity(opened)
+                        or _file_identity(after) != _file_identity(opened)
+                        or _file_identity(named_after) != _file_identity(opened)
+                    ):
+                        raise AuditError(f"weight-audit control symlink changed: {relative}")
+                except OSError as exc:
+                    raise AuditError(
+                        f"cannot authenticate weight-audit control symlink {relative}: {exc}"
+                    ) from exc
+                finally:
+                    if link_fd is not None:
+                        os.close(link_fd)
+                rows.append(
+                    [
+                        relative,
+                        opened.st_dev,
+                        opened.st_ino,
+                        opened.st_mode,
+                        opened.st_uid,
+                        opened.st_gid,
+                        opened.st_nlink,
+                        opened.st_size,
+                        opened.st_mtime_ns,
+                        opened.st_ctime_ns,
+                        {"readlink_bytes_hex": link_text.hex()},
+                    ]
+                )
+            elif stat.S_ISDIR(listed.st_mode):
+                require_directory(listed, relative)
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise AuditError(f"cannot open weight-audit control directory {relative}: {exc}") from exc
+                try:
+                    opened = os.fstat(child_fd)
+                    if _file_identity(opened) != _file_identity(listed):
+                        raise AuditError(f"weight-audit control directory raced: {relative}")
+                    rows.append(
+                        [
+                            relative,
+                            opened.st_dev,
+                            opened.st_ino,
+                            opened.st_mode,
+                            opened.st_uid,
+                            opened.st_gid,
+                            opened.st_nlink,
+                            opened.st_size,
+                            opened.st_mtime_ns,
+                            opened.st_ctime_ns,
+                            None,
+                        ]
+                    )
+                    walk(child_fd, relative, opened)
+                    if _file_identity(os.fstat(child_fd)) != _file_identity(opened):
+                        raise AuditError(f"weight-audit control directory changed: {relative}")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(listed.st_mode):
+                if not stat.S_IMODE(listed.st_mode) & 0o444:
+                    raise AuditError(f"weight-audit control file is unreadable: {relative}")
+                try:
+                    child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise AuditError(f"cannot open weight-audit control file {relative}: {exc}") from exc
+                digest = hashlib.sha256()
+                try:
+                    opened = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or opened.st_uid != os.getuid()
+                        or opened.st_nlink != 1
+                        or _file_identity(opened) != _file_identity(listed)
+                    ):
+                        raise AuditError(f"weight-audit control file raced: {relative}")
+                    while block := os.read(child_fd, 16 * 1024 * 1024):
+                        digest.update(block)
+                    if _file_identity(os.fstat(child_fd)) != _file_identity(opened):
+                        raise AuditError(f"weight-audit control file changed: {relative}")
+                except OSError as exc:
+                    raise AuditError(f"cannot read weight-audit control file {relative}: {exc}") from exc
+                finally:
+                    os.close(child_fd)
+                rows.append(
+                    [
+                        relative,
+                        opened.st_dev,
+                        opened.st_ino,
+                        opened.st_mode,
+                        opened.st_uid,
+                        opened.st_gid,
+                        opened.st_nlink,
+                        opened.st_size,
+                        opened.st_mtime_ns,
+                        opened.st_ctime_ns,
+                        digest.hexdigest(),
+                    ]
+                )
+            else:
+                raise AuditError(f"weight-audit control tree contains special file: {relative}")
+        if _file_identity(os.fstat(directory_fd)) != _file_identity(before):
+            raise AuditError(f"weight-audit control directory changed: {parent or '.'}")
+
+    try:
+        opened_root = os.fstat(root_fd)
         rows.append(
-            [str(path.relative_to(run_dir)), stat.st_size, stat.st_mtime_ns, stat.st_mode]
+            [
+                "",
+                opened_root.st_dev,
+                opened_root.st_ino,
+                opened_root.st_mode,
+                opened_root.st_uid,
+                opened_root.st_gid,
+                opened_root.st_nlink,
+                opened_root.st_size,
+                opened_root.st_mtime_ns,
+                opened_root.st_ctime_ns,
+                None,
+            ]
         )
+        walk(root_fd, "", opened_root)
+        if _file_identity(os.fstat(root_fd)) != _file_identity(opened_root):
+            raise AuditError("weight-audit control root changed")
+    finally:
+        os.close(root_fd)
+    rows.sort(key=lambda row: str(row[0]))
     return stable_hash(rows)
 
 

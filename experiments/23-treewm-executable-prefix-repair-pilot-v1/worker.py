@@ -28,7 +28,7 @@ from typing import Any, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",
@@ -330,8 +330,15 @@ def sha256_string(value: object) -> bool:
 
 
 def lexical_exists(path: str | Path) -> bool:
-    """Existence of a directory entry, including a broken symlink."""
-    return os.path.lexists(os.fspath(path))
+    """Existence of a directory entry; only ENOENT means absent."""
+
+    try:
+        os.lstat(os.fspath(path))
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise LifecycleError(f"cannot determine whether {path} exists: {exc}") from exc
+    return True
 
 
 _DIRECTORY_FLAGS = (
@@ -763,8 +770,8 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
     actual_directories: set[str] = set()
 
     def walk(directory_fd: int, prefix: Path) -> None:
-        info = os.fstat(directory_fd)
-        require(stat.S_IMODE(info.st_mode) == 0o555, f"snapshot directory mode differs: {prefix}")
+        before = os.fstat(directory_fd)
+        require(stat.S_IMODE(before.st_mode) == 0o555, f"snapshot directory mode differs: {prefix}")
         try:
             names = sorted(os.listdir(directory_fd))
         except OSError as exc:
@@ -800,6 +807,10 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
                 actual[rendered] = digest
             else:
                 raise LifecycleError(f"snapshot contains symlink/special file: {rendered}")
+        require(
+            _stat_identity(os.fstat(directory_fd)) == _stat_identity(before),
+            f"snapshot directory changed while enumerating: {prefix}",
+        )
 
     try:
         walk(root_fd, Path("."))
@@ -807,6 +818,49 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
         os.close(root_fd)
     require(actual == expected, "snapshot file coverage differs from exact inventory")
     require(actual_directories == expected_directories, "snapshot directory coverage differs from exact inventory")
+
+
+def _verify_snapshot_location(snapshot_root: Path, submission_root: Path) -> None:
+    """Bind the sealed tree to its exact private, read-only namespace.
+
+    An actively malicious same-UID process is outside this launch threat model: it
+    could ptrace the worker or alter its memory after any filesystem check.  The
+    exact ownership/modes below, plus a second complete check immediately before
+    imports, detect accidental or concurrent path drift while no ambient snapshot
+    writer has been launched.
+    """
+
+    require(
+        snapshot_root == submission_root / "source-snapshot" / "repo",
+        "snapshot root is outside the exact source-snapshot namespace",
+    )
+    for path, mode, label in (
+        (submission_root, 0o700, "submission root"),
+        (submission_root / "source-snapshot", 0o555, "source-snapshot parent"),
+        (snapshot_root, 0o555, "snapshot root"),
+    ):
+        descriptor = _open_absolute_directory(path, label)
+        try:
+            info = os.fstat(descriptor)
+            require(
+                info.st_uid == os.getuid()
+                and info.st_gid == os.getgid()
+                and stat.S_IMODE(info.st_mode) == mode,
+                f"{label} ownership/mode differs",
+            )
+        finally:
+            os.close(descriptor)
+
+
+def _revalidate_snapshot_before_import(
+    snapshot_root: Path,
+    submission_root: Path,
+    contract: Mapping[str, Any],
+) -> None:
+    inventory = contract.get("snapshot_inventory")
+    require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
+    _verify_snapshot_location(snapshot_root, submission_root)
+    _verify_snapshot_tree(snapshot_root, inventory)
 
 
 def configure_verified_import_paths(snapshot_root: Path) -> None:
@@ -924,6 +978,7 @@ def bootstrap_submission(
     inventory = contract.get("snapshot_inventory")
     require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
     require(stable_hash(inventory) == contract.get("snapshot_inventory_sha256"), "snapshot inventory hash differs")
+    _verify_snapshot_location(snapshot, submission)
     _verify_snapshot_tree(snapshot, inventory)
     if configure_imports:
         configure_verified_import_paths(snapshot)
@@ -1069,6 +1124,11 @@ def load_launch_context(
         snapshot_root=snapshot_root,
     )
     package = contained(snapshot_root / PACKAGE_RELATIVE, snapshot_root, "Exp23 package", strict=True)
+    # This is the last filesystem action before loading executable snapshot bytes.
+    # No child or other ambient writer has been started by the worker at this point.
+    _revalidate_snapshot_before_import(
+        snapshot_root, submission_root, bootstrap_contract
+    )
     campaign = _load_campaign(snapshot_root)
     manifest, weight_lock = campaign.load_contract(snapshot_root)
     protocol = campaign.verify_protocol_lock(package)

@@ -798,7 +798,8 @@ def _seal_tree(root: Path) -> dict[str, str]:
 
 
 def _submission(root: Path) -> tuple[Path, str]:
-    snapshot = root / "snapshot"
+    root.chmod(0o700)
+    snapshot = root / "source-snapshot" / "repo"
     package = snapshot / worker.PACKAGE_RELATIVE
     scripts = snapshot / "scripts"
     package.mkdir(parents=True)
@@ -812,6 +813,7 @@ def _submission(root: Path) -> tuple[Path, str]:
     }.items():
         relative.write_bytes(payload)
     inventory = _seal_tree(snapshot)
+    snapshot.parent.chmod(0o555)
 
     launches = []
     audits = {
@@ -893,7 +895,7 @@ def test_bootstrap_rejects_snapshot_extra_and_swapped_site_binding(tmp_path: Pat
     root.mkdir()
     contract_path, digest = _submission(root)
     snapshot, submission, _ = worker.bootstrap_submission(root, digest)
-    assert snapshot == root / "snapshot" and submission == root
+    assert snapshot == root / "source-snapshot" / "repo" and submission == root
 
     snapshot.chmod(0o755)
     extra = snapshot / "unclaimed.py"
@@ -916,6 +918,22 @@ def test_bootstrap_rejects_snapshot_extra_and_swapped_site_binding(tmp_path: Pat
         worker.bootstrap_submission(root, swapped_digest)
 
 
+def test_preimport_revalidation_rejects_mutation_after_initial_snapshot_check(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "submission"
+    root.mkdir()
+    _, digest = _submission(root)
+    snapshot, submission, contract = worker.bootstrap_submission(root, digest)
+    source = snapshot / worker.PACKAGE_RELATIVE / "worker.py"
+    original = source.read_bytes()
+    source.chmod(0o644)
+    source.write_bytes(original + b"\n# deterministic between-check drift\n")
+    source.chmod(0o444)
+    with pytest.raises(worker.LifecycleError, match="bytes differ"):
+        worker._revalidate_snapshot_before_import(snapshot, submission, contract)
+
+
 def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Path) -> None:
     root = tmp_path / "submission"
     root.mkdir()
@@ -931,7 +949,7 @@ def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Pat
     completed = subprocess.run(
         [
             str(worker.PINNED_PYTHON), "-I", "-S", "-B",
-            str(root / "snapshot" / worker.PACKAGE_RELATIVE / "worker.py"),
+            str(root / "source-snapshot" / "repo" / worker.PACKAGE_RELATIVE / "worker.py"),
             "record-signal",
             "--submission-root", str(root),
             "--submission-sha256", digest,
@@ -953,7 +971,7 @@ def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Pat
 
     code = (
         "import pathlib,runpy;"
-        f"entry=runpy.run_path({str(root / 'snapshot' / worker.PACKAGE_RELATIVE / 'train_entry.py')!r});"
+        f"entry=runpy.run_path({str(root / 'source-snapshot' / 'repo' / worker.PACKAGE_RELATIVE / 'train_entry.py')!r});"
         "entry['assert_isolated_runtime']();"
         f"entry['bootstrap_submission'](pathlib.Path({str(root)!r}),{digest!r})"
     )

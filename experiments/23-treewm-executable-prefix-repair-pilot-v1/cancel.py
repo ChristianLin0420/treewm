@@ -48,6 +48,26 @@ def require(condition: bool, message: str) -> None:
         raise CancellationError(message)
 
 
+def _lstat_if_present(
+    path: str | Path, label: str | None = None
+) -> os.stat_result | None:
+    """Return one lexical entry, treating only ENOENT as absence."""
+
+    source = Path(path)
+    try:
+        return source.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CancellationError(
+            f"cannot determine whether {label or source} exists: {exc}"
+        ) from exc
+
+
+def _lexical_exists(path: str | Path, label: str | None = None) -> bool:
+    return _lstat_if_present(path, label) is not None
+
+
 def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in items:
@@ -57,27 +77,24 @@ def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    payload, _digest = _authenticated_regular_bytes(path, f"JSON artifact {path}")
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(
-                handle,
-                object_pairs_hook=_pairs,
-                parse_constant=lambda token: (_ for _ in ()).throw(
-                    CancellationError(f"non-finite JSON value in {path}: {token}")
-                ),
-            )
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                CancellationError(f"non-finite JSON value in {path}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CancellationError(f"cannot read {path}: {exc}") from exc
     require(isinstance(value, dict), f"JSON root is not an object: {path}")
     return value
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(16 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+    _payload, digest = _authenticated_regular_bytes(path, f"SHA256 source {path}")
+    return digest
 
 
 def _regular(path: Path, label: str) -> None:
@@ -90,6 +107,11 @@ def _regular(path: Path, label: str) -> None:
 
 def _directory(path: Path, label: str) -> None:
     lexical = path.absolute()
+    require(
+        lexical.is_absolute()
+        and all(part not in ("", ".", "..") for part in lexical.parts[1:]),
+        f"{label} is not an absolute normalized path",
+    )
     current = Path(lexical.anchor)
     for part in lexical.parts[1:]:
         current /= part
@@ -103,6 +125,183 @@ def _directory(path: Path, label: str) -> None:
     except OSError as exc:
         raise CancellationError(f"{label} is unavailable: {exc}") from exc
     require(stat.S_ISDIR(info.st_mode), f"{label} is not a nonsymlink directory")
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _open_directory_components(path: Path, label: str) -> int:
+    absolute = path.absolute()
+    require(
+        absolute.is_absolute()
+        and all(part not in ("", ".", "..") for part in absolute.parts[1:]),
+        f"{label} is not an absolute normalized path",
+    )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(absolute.anchor, flags)
+    except OSError as exc:
+        raise CancellationError(f"{label} root cannot be opened: {exc}") from exc
+    try:
+        for part in absolute.parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        permissions = stat.S_IMODE(info.st_mode)
+        require(
+            stat.S_ISDIR(info.st_mode)
+            and permissions & 0o444 != 0
+            and permissions & 0o111 != 0,
+            f"{label} is not a traversable nonsymlink directory",
+        )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _authenticated_regular_bytes(path: Path, label: str) -> tuple[bytes, str]:
+    parent_fd = _open_directory_components(path.parent, f"{label} parent")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+        before = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) & 0o444 != 0,
+            f"{label} is not a readable regular file",
+        )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        while block := os.read(descriptor, 16 * 1024 * 1024):
+            digest.update(block)
+            chunks.append(block)
+        after = os.fstat(descriptor)
+        require(_file_identity(after) == _file_identity(before), f"{label} changed while reading")
+        return b"".join(chunks), digest.hexdigest()
+    except OSError as exc:
+        raise CancellationError(f"{label} cannot be read without symlinks: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _secure_tree_rows(root: Path, label: str) -> list[dict[str, Any]]:
+    _directory(root, f"{label} root")
+    root_fd = _open_directory_components(root, f"{label} root")
+    rows: list[dict[str, Any]] = []
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+    def walk(directory_fd: int, parent: Path, before: os.stat_result) -> None:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = []
+                for entry in iterator:
+                    try:
+                        children.append((entry.name, entry.stat(follow_symlinks=False)))
+                    except OSError as exc:
+                        raise CancellationError(f"cannot stat {label} entry {parent / entry.name}: {exc}") from exc
+        except OSError as exc:
+            raise CancellationError(f"cannot enumerate {label} directory {parent}: {exc}") from exc
+        for name, listed in sorted(children, key=lambda value: value[0]):
+            relative = parent / name
+            require(not stat.S_ISLNK(listed.st_mode), f"{label} contains symlink: {relative}")
+            if stat.S_ISDIR(listed.st_mode):
+                permissions = stat.S_IMODE(listed.st_mode)
+                require(
+                    permissions & 0o444 != 0 and permissions & 0o111 != 0,
+                    f"{label} directory is not traversable: {relative}",
+                )
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise CancellationError(f"cannot open {label} directory {relative}: {exc}") from exc
+                try:
+                    opened = os.fstat(child_fd)
+                    require(_file_identity(opened) == _file_identity(listed), f"{label} directory raced: {relative}")
+                    require(opened.st_uid == os.getuid(), f"{label} directory owner differs: {relative}")
+                    rows.append({"path": str(relative), "kind": "directory", "mode": stat.S_IMODE(opened.st_mode)})
+                    walk(child_fd, relative, opened)
+                    require(_file_identity(os.fstat(child_fd)) == _file_identity(opened), f"{label} directory changed: {relative}")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(listed.st_mode):
+                require(stat.S_IMODE(listed.st_mode) & 0o444 != 0, f"{label} file is unreadable: {relative}")
+                try:
+                    child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise CancellationError(f"cannot open {label} file {relative}: {exc}") from exc
+                digest = hashlib.sha256()
+                try:
+                    opened = os.fstat(child_fd)
+                    require(_file_identity(opened) == _file_identity(listed), f"{label} file raced: {relative}")
+                    require(
+                        opened.st_uid == os.getuid() and opened.st_nlink == 1,
+                        f"{label} file ownership/link count differs: {relative}",
+                    )
+                    while block := os.read(child_fd, 16 * 1024 * 1024):
+                        digest.update(block)
+                    require(_file_identity(os.fstat(child_fd)) == _file_identity(opened), f"{label} file changed: {relative}")
+                except OSError as exc:
+                    raise CancellationError(f"cannot read {label} file {relative}: {exc}") from exc
+                finally:
+                    os.close(child_fd)
+                rows.append({"path": str(relative), "kind": "file", "mode": stat.S_IMODE(opened.st_mode), "sha256": digest.hexdigest()})
+            else:
+                raise CancellationError(f"{label} contains special file: {relative}")
+        require(_file_identity(os.fstat(directory_fd)) == _file_identity(before), f"{label} directory changed: {parent}")
+
+    try:
+        opened_root = os.fstat(root_fd)
+        require(opened_root.st_uid == os.getuid(), f"{label} root owner differs")
+        rows.append(
+            {
+                "path": "",
+                "kind": "root",
+                "mode": stat.S_IMODE(opened_root.st_mode),
+            }
+        )
+        walk(root_fd, Path(), opened_root)
+        require(_file_identity(os.fstat(root_fd)) == _file_identity(opened_root), f"{label} root changed")
+    finally:
+        os.close(root_fd)
+    rows.sort(key=lambda row: str(row["path"]))
+    return rows
 
 
 class _ReportCancelLock:
@@ -166,7 +365,7 @@ def stable_hash(value: object) -> str:
 
 def seal_json(path: Path, value: Mapping[str, Any]) -> str:
     payload = (json.dumps(dict(value), sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    if not path.parent.exists():
+    if not _lexical_exists(path.parent):
         path.parent.mkdir(mode=0o700)
         _fsync_directory(path.parent.parent)
     else:
@@ -212,8 +411,15 @@ def activate_isolated_runtime(manifest: Mapping[str, Any]) -> dict[str, Any]:
     venv_root = expected.parent.parent
     pyvenv = venv_root / "pyvenv.cfg"
     _regular(pyvenv, "pinned pyvenv.cfg")
+    pyvenv_payload, _pyvenv_digest = _authenticated_regular_bytes(
+        pyvenv, "pinned pyvenv.cfg"
+    )
     values: dict[str, str] = {}
-    for line in pyvenv.read_text(encoding="utf-8").splitlines():
+    try:
+        pyvenv_text = pyvenv_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CancellationError(f"pinned pyvenv.cfg is not UTF-8: {exc}") from exc
+    for line in pyvenv_text.splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
@@ -237,7 +443,7 @@ def activate_isolated_runtime(manifest: Mapping[str, Any]) -> dict[str, Any]:
             sys.path.append(str(path))
     return {
         "lexical_executable": str(expected),
-        "lexical_symlink_target": os.readlink(expected) if expected.is_symlink() else None,
+        "lexical_symlink_target": os.readlink(expected) if stat.S_ISLNK(info.st_mode) else None,
         "resolved_executable": str(target),
         "resolved_executable_sha256": file_sha256(target),
         "resolved_executable_size": target.stat().st_size,
@@ -249,7 +455,7 @@ def activate_isolated_runtime(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    descriptor = _open_directory_components(path, f"fsync directory {path}")
     try:
         os.fsync(descriptor)
     finally:
@@ -278,6 +484,7 @@ def scheduler_environment() -> dict[str, str]:
 
 def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     _directory(submission_root, "submission root")
+    submission_root = submission_root.absolute()
     receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
     contract_path = submission_root / "SUBMISSION_CONTRACT.json"
     _regular(receipt_path, "submission receipt")
@@ -287,7 +494,7 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     receipt = read_json(receipt_path)
     require(set(receipt) == RECEIPT_KEYS, "submission receipt schema differs")
     require(receipt["schema_version"] == 1 and receipt["status"] == "submitted", "submission receipt is not committed")
-    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch2", "submission receipt campaign differs")
+    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch3", "submission receipt campaign differs")
     require(Path(str(receipt["submission_root"])) == submission_root.absolute(), "receipt submission root differs")
     require(Path(str(receipt["snapshot_root"])).is_absolute(), "receipt snapshot root is not absolute")
     claimed = str(receipt["submission_sha256"])
@@ -329,9 +536,29 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     require(len(contract.get("launches") or []) == 20, "submission contract launch coverage differs")
     snapshot_root = Path(str(receipt["snapshot_root"]))
     _directory(snapshot_root, "snapshot root")
-    snapshot = snapshot_root.resolve(strict=True)
-    require(snapshot.is_relative_to(submission_root.resolve(strict=True)), "snapshot root escapes submission root")
+    snapshot = snapshot_root.absolute()
+    require(snapshot.is_relative_to(submission_root), "snapshot root escapes submission root")
     require(str(snapshot) == receipt["snapshot_root"], "snapshot root is not canonical")
+    require(
+        snapshot == submission_root / "source-snapshot" / "repo",
+        "snapshot root differs from exact source-snapshot namespace",
+    )
+    for path, mode, label in (
+        (submission_root, 0o700, "submission root"),
+        (submission_root / "source-snapshot", 0o555, "source-snapshot parent"),
+        (snapshot, 0o555, "snapshot root"),
+    ):
+        descriptor = _open_directory_components(path, label)
+        try:
+            info = os.fstat(descriptor)
+            require(
+                info.st_uid == os.getuid()
+                and info.st_gid == os.getgid()
+                and stat.S_IMODE(info.st_mode) == mode,
+                f"{label} ownership/mode differs",
+            )
+        finally:
+            os.close(descriptor)
     inventory = contract.get("snapshot_inventory")
     require(isinstance(inventory, Mapping) and inventory, "snapshot inventory is absent")
     normalized: dict[str, str] = {}
@@ -346,23 +573,21 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
         for relative in normalized
         for parent in list(Path(relative).parents)[:-1]
     }
-    require(snapshot.lstat().st_mode & 0o222 == 0, "snapshot root is writable")
     actual_files: set[str] = set()
     actual_dirs: set[str] = set()
-    for path in snapshot.rglob("*"):
-        info = path.lstat()
-        relative = str(path.relative_to(snapshot))
-        require(not stat.S_ISLNK(info.st_mode), f"snapshot contains symlink: {relative}")
-        if stat.S_ISREG(info.st_mode):
+    for row in _secure_tree_rows(snapshot, "sealed snapshot"):
+        relative = str(row["path"])
+        if row["kind"] == "root":
+            require(int(row["mode"]) == 0o555, "snapshot root mode differs")
+            continue
+        if row["kind"] == "file":
             actual_files.add(relative)
             require(relative in normalized, f"snapshot contains unclaimed file: {relative}")
-            require(info.st_mode & 0o222 == 0, f"snapshot file is writable: {relative}")
-            require(file_sha256(path) == normalized[relative], f"snapshot hash differs: {relative}")
-        elif stat.S_ISDIR(info.st_mode):
-            actual_dirs.add(relative)
-            require(info.st_mode & 0o222 == 0, f"snapshot directory is writable: {relative}")
+            require(int(row["mode"]) & 0o222 == 0, f"snapshot file is writable: {relative}")
+            require(row["sha256"] == normalized[relative], f"snapshot hash differs: {relative}")
         else:
-            raise CancellationError(f"snapshot contains special entry: {relative}")
+            actual_dirs.add(relative)
+            require(int(row["mode"]) & 0o222 == 0, f"snapshot directory is writable: {relative}")
     require(actual_files == set(normalized), "snapshot file coverage differs")
     require(actual_dirs == expected_dirs, "snapshot directory coverage differs")
     manifest_path = snapshot / PACKAGE_RELATIVE / "manifest.json"
@@ -371,8 +596,13 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     manifest = read_json(manifest_path)
     require(contract.get("manifest_sha256") == stable_hash(manifest), "snapshot manifest contract hash differs")
     protocol_path = snapshot / PACKAGE_RELATIVE / "protocol.sha256"
-    _regular(protocol_path, "snapshot protocol lock")
-    protocol = protocol_path.read_text(encoding="ascii").strip()
+    protocol_payload, _protocol_digest = _authenticated_regular_bytes(
+        protocol_path, "snapshot protocol lock"
+    )
+    try:
+        protocol = protocol_payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise CancellationError(f"snapshot protocol lock is not ASCII: {exc}") from exc
     require(SHA256.fullmatch(protocol) is not None and protocol == contract.get("package_protocol_sha256"), "snapshot protocol contract differs")
     interpreter = activate_isolated_runtime(manifest)
     require(contract.get("orchestration_interpreter") == interpreter, "cancellation interpreter contract differs")
@@ -406,7 +636,7 @@ def seal_latch(submission_root: Path, receipt: Mapping[str, Any]) -> dict[str, A
         "report_job_id": str(receipt["report_job_id"]),
     }
     path = submission_root / "CANCEL_REQUESTED.json"
-    if os.path.lexists(path):
+    if _lexical_exists(path):
         _regular(path, "cancellation latch")
         require(read_json(path) == value, "existing cancellation latch differs")
         return value

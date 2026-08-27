@@ -347,7 +347,8 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
     actual_directories: set[str] = set()
 
     def walk(directory_fd: int, prefix: Path) -> None:
-        _require(stat.S_IMODE(os.fstat(directory_fd).st_mode) == 0o555, f"snapshot directory mode differs: {prefix}")
+        before = os.fstat(directory_fd)
+        _require(stat.S_IMODE(before.st_mode) == 0o555, f"snapshot directory mode differs: {prefix}")
         for name in sorted(os.listdir(directory_fd)):
             _require(name not in {"", ".", ".."} and "/" not in name, "invalid snapshot entry")
             relative = prefix / name if prefix != Path(".") else Path(name)
@@ -377,6 +378,10 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
                 actual[rendered] = digest
             else:
                 raise EntryContractError(f"snapshot contains symlink/special file: {rendered}")
+        _require(
+            _identity(os.fstat(directory_fd)) == _identity(before),
+            f"snapshot directory changed while enumerating: {prefix}",
+        )
 
     try:
         walk(root_fd, Path("."))
@@ -384,6 +389,47 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
         os.close(root_fd)
     _require(actual == expected, "snapshot file coverage differs from inventory")
     _require(actual_directories == expected_directories, "snapshot directory coverage differs from inventory")
+
+
+def _verify_snapshot_location(snapshot_root: Path, submission_root: Path) -> None:
+    """Require the exact owned launch namespace before executable imports.
+
+    Same-UID malicious processes are trusted here (they could ptrace or alter this
+    process directly).  Exact permissions and immediate revalidation catch
+    accidental/concurrent drift while the worker has launched no ambient writer.
+    """
+
+    _require(
+        snapshot_root == submission_root / "source-snapshot" / "repo",
+        "snapshot root is outside the exact source-snapshot namespace",
+    )
+    for path, mode, label in (
+        (submission_root, 0o700, "submission root"),
+        (submission_root / "source-snapshot", 0o555, "source-snapshot parent"),
+        (snapshot_root, 0o555, "snapshot root"),
+    ):
+        descriptor = _open_directory(path, label)
+        try:
+            info = os.fstat(descriptor)
+            _require(
+                info.st_uid == os.getuid()
+                and info.st_gid == os.getgid()
+                and stat.S_IMODE(info.st_mode) == mode,
+                f"{label} ownership/mode differs",
+            )
+        finally:
+            os.close(descriptor)
+
+
+def _revalidate_snapshot_before_import(
+    snapshot_root: Path,
+    submission_root: Path,
+    contract: Mapping[str, Any],
+) -> None:
+    inventory = contract.get("snapshot_inventory")
+    _require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
+    _verify_snapshot_location(snapshot_root, submission_root)
+    _verify_snapshot_tree(snapshot_root, inventory)
 
 
 def _verify_interpreter_contract(value: object) -> None:
@@ -447,7 +493,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch2", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch3", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(contract.get("submission_root") == str(submission), "submission root binding differs")
@@ -468,6 +514,7 @@ def bootstrap_submission(
     inventory = contract.get("snapshot_inventory")
     _require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
     _require(_stable_hash(inventory) == contract.get("snapshot_inventory_sha256"), "snapshot inventory hash differs")
+    _verify_snapshot_location(snapshot, submission)
     _verify_snapshot_tree(snapshot, inventory)
     configure_verified_import_paths(snapshot)
     return submission, contract
@@ -547,7 +594,13 @@ def verify_exact_invocation(
         mode=0o444,
     )
 
-    campaign = campaign or _load_campaign()
+    if campaign is None:
+        # This is the final filesystem boundary before importing executable bytes.
+        # No snapshot writer is launched by the worker/entry bootstrap.
+        _revalidate_snapshot_before_import(
+            snapshot_root, submission_root, bootstrap_contract or {}
+        )
+        campaign = _load_campaign()
     manifest, weight_lock = campaign.load_contract(snapshot_root)
     protocol = campaign.verify_protocol_lock(PACKAGE_DIR)
     cell_value = launch.get("cell")

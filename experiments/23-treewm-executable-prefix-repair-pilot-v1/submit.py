@@ -32,7 +32,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -107,20 +107,165 @@ WEIGHT_AUDIT_SOURCE_FILES = {
 # Stdlib-only child bootstrap. ``-I -S`` prevents sitecustomize and every ``.pth``
 # file from running; the two hash-bound distribution roots are appended directly.
 ISOLATED_RUN_CODE = r"""
-import hashlib, json, os, runpy, stat, sys
+import hashlib, json, os, stat, sys
 root, vsite, bsite, expected_sha, expected_size, expected_python, inventory_json, script = sys.argv[1:9]
 if not (sys.flags.isolated and sys.flags.no_site): raise SystemExit('isolation flags absent')
 if os.path.normpath(os.path.abspath(sys.executable)) != expected_python: raise SystemExit('lexical interpreter differs')
 target = os.path.realpath(sys.executable)
-st = os.stat(target)
-if st.st_size != int(expected_size): raise SystemExit('interpreter size differs')
-h = hashlib.sha256()
-with open(target, 'rb') as fh:
-    for block in iter(lambda: fh.read(16 * 1024 * 1024), b''): h.update(block)
+def identity(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+def directory_mode(value, label):
+    mode = stat.S_IMODE(value.st_mode)
+    if not stat.S_ISDIR(value.st_mode) or not mode & 0o444 or not mode & 0o111:
+        raise SystemExit(label + ' is not a traversable directory')
+def execution_directory(value, label, sealed, root_entry=False):
+    mode = stat.S_IMODE(value.st_mode)
+    if not stat.S_ISDIR(value.st_mode) or value.st_uid != os.getuid():
+        raise SystemExit(label + ' type or owner differs')
+    if sealed:
+        if mode != 0o555: raise SystemExit(label + ' sealed mode differs')
+    elif root_entry:
+        if mode != 0o755: raise SystemExit(label + ' live-root mode differs')
+    elif mode & 0o500 != 0o500 or mode & 0o022 or mode & 0o7000:
+        raise SystemExit(label + ' live mode is unsafe')
+def execution_file(value, label, sealed):
+    mode = stat.S_IMODE(value.st_mode)
+    if (not stat.S_ISREG(value.st_mode) or value.st_uid != os.getuid()
+            or value.st_nlink != 1):
+        raise SystemExit(label + ' type, owner, or link count differs')
+    if sealed:
+        if mode != 0o444: raise SystemExit(label + ' sealed mode differs')
+    elif not mode & 0o400 or mode & 0o022 or mode & 0o7000:
+        raise SystemExit(label + ' live mode is unsafe')
+def stable_file(fd, before, label):
+    if not stat.S_ISREG(before.st_mode) or not stat.S_IMODE(before.st_mode) & 0o444:
+        raise SystemExit(label + ' is not a readable regular file')
+    digest = hashlib.sha256()
+    try:
+        while True:
+            block = os.read(fd, 16 * 1024 * 1024)
+            if not block: break
+            digest.update(block)
+        after = os.fstat(fd)
+    except OSError as exc:
+        raise SystemExit(label + ' cannot be read: ' + str(exc)) from exc
+    if identity(after) != identity(before): raise SystemExit(label + ' changed while hashing')
+    return digest.hexdigest()
+nofollow = getattr(os, 'O_NOFOLLOW', 0)
+cloexec = getattr(os, 'O_CLOEXEC', 0)
+directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | nofollow | cloexec
+file_flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | nofollow | cloexec
+try: interpreter_fd = os.open(target, file_flags)
+except OSError as exc: raise SystemExit('interpreter cannot be opened: ' + str(exc)) from exc
+try:
+    st = os.fstat(interpreter_fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size != int(expected_size): raise SystemExit('interpreter identity differs')
+    h = hashlib.sha256()
+    while True:
+        block = os.read(interpreter_fd, 16 * 1024 * 1024)
+        if not block: break
+        h.update(block)
+    if identity(os.fstat(interpreter_fd)) != identity(st): raise SystemExit('interpreter changed while hashing')
+finally: os.close(interpreter_fd)
 if h.hexdigest() != expected_sha: raise SystemExit('interpreter hash differs')
 if any('site-packages' in value for value in sys.path): raise SystemExit('site path loaded before bootstrap')
 for value in (root, vsite, bsite):
     if not os.path.isdir(value) or os.path.islink(value): raise SystemExit('bootstrap root unavailable')
+def open_directory(path, label):
+    absolute = os.path.abspath(path)
+    parts = absolute.split(os.sep)
+    if (not os.path.isabs(path) or os.path.normpath(path) != path
+            or any(part in ('.', '..') for part in parts)):
+        raise SystemExit(label + ' is not normalized')
+    descriptor = os.open(os.sep, directory_flags)
+    try:
+        for part in parts[1:]:
+            if not part: continue
+            child = os.open(part, directory_flags, dir_fd=descriptor)
+            os.close(descriptor); descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor); raise
+def scan_tree(directory_fd, parent, before, inventory):
+    directory_mode(before, 'snapshot directory ' + (parent or '.'))
+    try:
+        with os.scandir(directory_fd) as iterator:
+            children = [(entry.name, entry.stat(follow_symlinks=False)) for entry in iterator]
+    except OSError as exc:
+        raise SystemExit('snapshot directory cannot be enumerated: ' + (parent or '.') + ': ' + str(exc)) from exc
+    if len({name for name, _ in children}) != len(children): raise SystemExit('duplicate snapshot entry')
+    for name, listed in sorted(children):
+        if not isinstance(name, str) or name in ('', '.', '..') or '/' in name: raise SystemExit('unsafe snapshot entry name')
+        relative = name if not parent else parent + '/' + name
+        if stat.S_ISLNK(listed.st_mode): raise SystemExit('snapshot contains symlink: ' + relative)
+        if stat.S_ISDIR(listed.st_mode):
+            directory_mode(listed, 'snapshot directory ' + relative)
+            try: child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            except OSError as exc: raise SystemExit('snapshot directory cannot be opened: ' + relative + ': ' + str(exc)) from exc
+            try:
+                opened = os.fstat(child_fd)
+                if identity(opened) != identity(listed): raise SystemExit('snapshot directory raced: ' + relative)
+                if opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o555: raise SystemExit('unsafe snapshot directory')
+                actual_dirs.add(relative)
+                scan_tree(child_fd, relative, opened, inventory)
+                if identity(os.fstat(child_fd)) != identity(opened): raise SystemExit('snapshot directory changed: ' + relative)
+            finally: os.close(child_fd)
+        elif stat.S_ISREG(listed.st_mode):
+            if listed.st_mode & 0o222: raise SystemExit('unsafe snapshot file')
+            try: child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+            except OSError as exc: raise SystemExit('snapshot file cannot be opened: ' + relative + ': ' + str(exc)) from exc
+            try:
+                opened = os.fstat(child_fd)
+                if identity(opened) != identity(listed): raise SystemExit('snapshot file raced: ' + relative)
+                if opened.st_uid != os.getuid() or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o444: raise SystemExit('unsafe snapshot file')
+                digest = stable_file(child_fd, opened, 'snapshot file ' + relative)
+            finally: os.close(child_fd)
+            if relative not in inventory: raise SystemExit('unclaimed snapshot file')
+            if digest != inventory[relative]: raise SystemExit('snapshot file hash differs')
+            actual_files.add(relative)
+        else: raise SystemExit('snapshot contains special file: ' + relative)
+    if identity(os.fstat(directory_fd)) != identity(before): raise SystemExit('snapshot directory changed: ' + (parent or '.'))
+def verify_execution_target(root_fd, parts, expected_directories, expected_file, expected_digest, sealed):
+    current_fd = root_fd
+    opened_directories = []
+    relative_parts = []
+    try:
+        for index, part in enumerate(parts[:-1]):
+            listed = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            child_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if identity(opened) != identity(listed): raise SystemExit('pre-import target directory raced: ' + part)
+                execution_directory(opened, 'pre-import target directory ' + part, sealed)
+                relative_parts.append(part)
+                expected = ('/'.join(relative_parts), identity(opened))
+                if index >= len(expected_directories) or expected_directories[index] != expected:
+                    raise SystemExit('pre-import target directory identity differs: ' + part)
+            except BaseException:
+                os.close(child_fd); raise
+            opened_directories.append((current_fd, part, child_fd, opened))
+            current_fd = child_fd
+        if len(opened_directories) != len(expected_directories): raise SystemExit('pre-import target directory coverage differs')
+        listed_file = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+        file_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+        try:
+            opened_file = os.fstat(file_fd)
+            if identity(opened_file) != identity(listed_file): raise SystemExit('pre-import target script raced')
+            execution_file(opened_file, 'pre-import target script', sealed)
+            if identity(opened_file) != expected_file: raise SystemExit('pre-import target script identity differs')
+            digest = stable_file(file_fd, opened_file, 'pre-import target script')
+            named_file = os.stat(parts[-1], dir_fd=current_fd, follow_symlinks=False)
+            if identity(named_file) != identity(opened_file): raise SystemExit('pre-import target script name changed')
+            if digest != expected_digest: raise SystemExit('pre-import target script hash differs')
+        finally: os.close(file_fd)
+        for parent_fd, name, child_fd, before in reversed(opened_directories):
+            if identity(os.fstat(child_fd)) != identity(before): raise SystemExit('pre-import target directory changed: ' + name)
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if identity(named) != identity(before): raise SystemExit('pre-import target directory name changed: ' + name)
+    finally:
+        for _parent_fd, _name, child_fd, _before in reversed(opened_directories): os.close(child_fd)
+sealed_context = bool(inventory_json)
 if inventory_json:
     inventory = json.loads(inventory_json)
     if not isinstance(inventory, dict) or not inventory: raise SystemExit('snapshot inventory absent')
@@ -132,33 +277,136 @@ if inventory_json:
         if not isinstance(digest, str) or len(digest) != 64: raise SystemExit('invalid inventory hash')
         expected_files.add(relative)
         expected_dirs.update('/'.join(parts[:index]) for index in range(1, len(parts)))
-    if os.stat(root).st_mode & 0o222: raise SystemExit('snapshot root writable')
     actual_files, actual_dirs = set(), set()
-    for directory, names, files in os.walk(root, followlinks=False):
-        for name in names:
-            path = os.path.join(directory, name)
-            info = os.lstat(path)
-            relative = os.path.relpath(path, root)
-            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o222: raise SystemExit('unsafe snapshot directory')
-            actual_dirs.add(relative)
-        for name in files:
-            path = os.path.join(directory, name)
-            info = os.lstat(path)
-            relative = os.path.relpath(path, root)
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222: raise SystemExit('unsafe snapshot file')
-            if relative not in inventory: raise SystemExit('unclaimed snapshot file')
-            digest = hashlib.sha256()
-            with open(path, 'rb') as fh:
-                for block in iter(lambda: fh.read(16 * 1024 * 1024), b''): digest.update(block)
-            if digest.hexdigest() != inventory[relative]: raise SystemExit('snapshot file hash differs')
-            actual_files.add(relative)
+    named_root = os.lstat(root)
+    try: root_fd = open_directory(root, 'snapshot root')
+    except OSError as exc: raise SystemExit('snapshot root cannot be opened: ' + str(exc)) from exc
+    try:
+        opened_root = os.fstat(root_fd)
+        if identity(opened_root) != identity(named_root): raise SystemExit('snapshot root raced')
+        if opened_root.st_uid != os.getuid() or stat.S_IMODE(opened_root.st_mode) != 0o555: raise SystemExit('snapshot root unsafe')
+        scan_tree(root_fd, '', opened_root, inventory)
+        if identity(os.fstat(root_fd)) != identity(opened_root): raise SystemExit('snapshot root changed')
+    finally: os.close(root_fd)
     if actual_files != expected_files or actual_dirs != expected_dirs: raise SystemExit('snapshot coverage differs')
-sys.path.insert(0, root)
-sys.path.extend((vsite, bsite))
-if os.path.islink(script) or not stat.S_ISREG(os.stat(script).st_mode): raise SystemExit('target script invalid')
-if os.path.commonpath((os.path.realpath(script), os.path.realpath(root))) != os.path.realpath(root): raise SystemExit('target script escapes root')
-sys.argv = [script, *sys.argv[9:]]
-runpy.run_path(script, run_name='__main__')
+root_real = os.path.abspath(root)
+script_absolute = os.path.abspath(script)
+if os.path.commonpath((script_absolute, root_real)) != root_real: raise SystemExit('target script escapes root')
+script_relative = os.path.relpath(script_absolute, root_real)
+parts = script_relative.split(os.sep)
+if not parts or any(part in ('', '.', '..') for part in parts): raise SystemExit('target script path invalid')
+try: directory_fd = open_directory(root_real, 'target root')
+except OSError as exc: raise SystemExit('target root cannot be reopened: ' + str(exc)) from exc
+descriptors = [directory_fd]
+directory_records = []
+target_directory_identities = []
+try:
+    target_root_opened = os.fstat(directory_fd)
+    execution_directory(target_root_opened, 'target root', sealed_context, True)
+    if inventory_json and identity(target_root_opened) != identity(opened_root): raise SystemExit('target root differs after inventory')
+    target_relative_parts = []
+    for part in parts[:-1]:
+        listed_directory = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+        child_directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+        try:
+            opened_directory = os.fstat(child_directory_fd)
+            if identity(opened_directory) != identity(listed_directory): raise SystemExit('target directory raced: ' + part)
+            execution_directory(opened_directory, 'target directory ' + part, sealed_context)
+        except BaseException:
+            os.close(child_directory_fd); raise
+        directory_records.append((directory_fd, part, child_directory_fd, opened_directory))
+        target_relative_parts.append(part)
+        target_directory_identities.append(('/'.join(target_relative_parts), identity(opened_directory)))
+        directory_fd = child_directory_fd
+        descriptors.append(directory_fd)
+    script_listed = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+    script_fd = os.open(parts[-1], file_flags, dir_fd=directory_fd)
+    try:
+        script_before = os.fstat(script_fd)
+        if identity(script_before) != identity(script_listed): raise SystemExit('target script raced before read')
+        execution_file(script_before, 'target script', sealed_context)
+        script_digest = hashlib.sha256()
+        script_chunks = []
+        while True:
+            block = os.read(script_fd, 16 * 1024 * 1024)
+            if not block: break
+            script_digest.update(block); script_chunks.append(block)
+        if identity(os.fstat(script_fd)) != identity(script_before): raise SystemExit('target script changed while reading')
+        script_named_after = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+        if identity(script_named_after) != identity(script_before): raise SystemExit('target script name changed while reading')
+    finally: os.close(script_fd)
+    for parent_fd, name, child_fd, directory_before in reversed(directory_records):
+        if identity(os.fstat(child_fd)) != identity(directory_before): raise SystemExit('target directory changed while reading: ' + name)
+        named_directory = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if identity(named_directory) != identity(directory_before): raise SystemExit('target directory name changed while reading: ' + name)
+    if identity(os.fstat(descriptors[0])) != identity(target_root_opened): raise SystemExit('target root changed while reading script')
+finally:
+    for descriptor in reversed(descriptors): os.close(descriptor)
+if inventory_json and inventory.get(script_relative) != script_digest.hexdigest(): raise SystemExit('target script inventory differs')
+# Revalidate the complete immutable import surface immediately before exposing it
+# to Python.  The same-UID malicious-process case is outside this contract (such a
+# process can ptrace this interpreter); the descriptor-pinned sys.path also prevents
+# an accidental pathname replacement after this boundary from redirecting imports.
+try: import_root_fd = open_directory(root_real, 'pre-import snapshot root')
+except OSError as exc: raise SystemExit('pre-import snapshot root cannot be opened: ' + str(exc)) from exc
+site_fds = []
+try:
+    import_root_opened = os.fstat(import_root_fd)
+    execution_directory(import_root_opened, 'pre-import snapshot root', sealed_context, True)
+    if identity(import_root_opened) != identity(target_root_opened): raise SystemExit('execution root changed before import')
+    verify_execution_target(import_root_fd, parts, target_directory_identities,
+                            identity(script_before), script_digest.hexdigest(), sealed_context)
+    if inventory_json:
+        actual_files, actual_dirs = set(), set()
+        scan_tree(import_root_fd, '', import_root_opened, inventory)
+        if actual_files != expected_files or actual_dirs != expected_dirs: raise SystemExit('pre-import snapshot coverage differs')
+        if identity(os.fstat(import_root_fd)) != identity(import_root_opened): raise SystemExit('snapshot root changed during pre-import validation')
+    for site_label, site_path in (('venv site-packages', vsite), ('base site-packages', bsite)):
+        # The frozen environment paths may use the cluster's trusted /lustre/fsw
+        # alias.  Bind that alias once to its canonical target identity, then use
+        # only the component-open canonical directory fd for imports.
+        try:
+            site_named = os.stat(site_path, follow_symlinks=True)
+            site_canonical = os.path.realpath(site_path)
+        except OSError as exc: raise SystemExit(site_label + ' cannot be stated: ' + str(exc)) from exc
+        try: site_fd = open_directory(site_canonical, site_label)
+        except OSError as exc: raise SystemExit(site_label + ' cannot be opened: ' + str(exc)) from exc
+        site_fds.append([site_fd, site_label, None])
+        site_opened = os.fstat(site_fd)
+        site_fds[-1][2] = site_opened
+        if identity(site_opened) != identity(site_named): raise SystemExit(site_label + ' raced before import')
+        if site_opened.st_uid != os.getuid() or stat.S_IMODE(site_opened.st_mode) & 0o022: raise SystemExit(site_label + ' ownership/mode is unsafe')
+    pinned_root = '/proc/self/fd/' + str(import_root_fd)
+    pinned_script = os.path.join(pinned_root, *parts)
+    sys.path.insert(0, pinned_root)
+    sys.path.extend('/proc/self/fd/' + str(item[0]) for item in site_fds)
+    sys.argv = [script, *sys.argv[9:]]
+    namespace = {'__name__': '__main__', '__file__': pinned_script, '__cached__': None,
+                 '__loader__': None, '__package__': '',
+                 '__treewm_execution_root_fd__': import_root_fd,
+                 '__treewm_execution_root_identity__': identity(import_root_opened),
+                 '__treewm_execution_root_sealed__': sealed_context,
+                 '__treewm_execution_script_relative__': script_relative,
+                 '__treewm_execution_script_sha256__': script_digest.hexdigest(),
+                 '__treewm_execution_directory_identities__': tuple(target_directory_identities),
+                 '__treewm_execution_script_identity__': identity(script_before)}
+    execution_error = None
+    try: exec(compile(b''.join(script_chunks), pinned_script, 'exec'), namespace, namespace)
+    except BaseException as exc: execution_error = exc
+    if identity(os.fstat(import_root_fd)) != identity(import_root_opened): raise SystemExit('execution root changed during execution')
+    try: named_execution_root_fd = open_directory(root_real, 'post-execution root')
+    except OSError as exc: raise SystemExit('post-execution root cannot be opened: ' + str(exc)) from exc
+    try:
+        if identity(os.fstat(named_execution_root_fd)) != identity(import_root_opened): raise SystemExit('named execution root changed during execution')
+    finally: os.close(named_execution_root_fd)
+    verify_execution_target(import_root_fd, parts, target_directory_identities,
+                            identity(script_before), script_digest.hexdigest(), sealed_context)
+    for site_fd, site_label, site_before in site_fds:
+        if identity(os.fstat(site_fd)) != identity(site_before): raise SystemExit(site_label + ' changed during execution')
+    if execution_error is not None: raise execution_error
+finally:
+    for site_fd, _site_label, _site_before in reversed(site_fds): os.close(site_fd)
+    os.close(import_root_fd)
 """
 
 ISOLATED_AUDIT_CODE = r"""
@@ -206,6 +454,26 @@ def require(condition: bool, message: str) -> None:
         raise SubmissionError(message)
 
 
+def _lstat_if_present(
+    path: str | Path, label: str | None = None
+) -> os.stat_result | None:
+    """Return one lexical entry, treating only ENOENT as absence."""
+
+    source = Path(path)
+    try:
+        return source.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SubmissionError(
+            f"cannot determine whether {label or source} exists: {exc}"
+        ) from exc
+
+
+def _lexical_exists(path: str | Path, label: str | None = None) -> bool:
+    return _lstat_if_present(path, label) is not None
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -221,11 +489,14 @@ def stable_hash(value: object) -> str:
 
 
 def file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while block := handle.read(16 * 1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+    source = Path(path)
+    digest, _payload = _hash_relative_regular(
+        source.parent,
+        Path(source.name),
+        f"SHA256 source {source}",
+        capture=False,
+    )
+    return digest
 
 
 def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -238,16 +509,22 @@ def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def read_json(path: str | Path) -> dict[str, Any]:
     source = Path(path)
+    _digest, payload = _hash_relative_regular(
+        source.parent,
+        Path(source.name),
+        f"JSON artifact {source}",
+        capture=True,
+    )
+    assert payload is not None
     try:
-        with source.open("r", encoding="utf-8") as handle:
-            value = json.load(
-                handle,
-                object_pairs_hook=_pairs,
-                parse_constant=lambda token: (_ for _ in ()).throw(
-                    SubmissionError(f"non-finite JSON value in {source}: {token}")
-                ),
-            )
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                SubmissionError(f"non-finite JSON value in {source}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SubmissionError(f"cannot read JSON {source}: {exc}") from exc
     require(isinstance(value, dict), f"JSON root is not an object: {source}")
     return value
@@ -264,6 +541,11 @@ def _regular_nonsymlink(path: Path, label: str) -> os.stat_result:
 
 def _directory_nonsymlink(path: Path, label: str) -> Path:
     lexical = path.absolute()
+    require(
+        lexical.is_absolute()
+        and all(part not in ("", ".", "..") for part in lexical.parts[1:]),
+        f"{label} is not an absolute normalized path",
+    )
     current = Path(lexical.anchor)
     for part in lexical.parts[1:]:
         current /= part
@@ -273,11 +555,15 @@ def _directory_nonsymlink(path: Path, label: str) -> Path:
             raise SubmissionError(f"{label} path component is unavailable: {current}: {exc}") from exc
         require(not stat.S_ISLNK(component.st_mode), f"{label} has a symlink path component: {current}")
     try:
-        info = path.lstat()
+        info = lexical.lstat()
     except OSError as exc:
         raise SubmissionError(f"{label} is unavailable: {exc}") from exc
     require(stat.S_ISDIR(info.st_mode), f"{label} is not a nonsymlink directory")
-    return path.resolve(strict=True)
+    # Keep the lexical path.  ``resolve`` would reopen the already-checked
+    # components and could follow a symlink installed between the lstat walk and
+    # the resolution.  Security-sensitive consumers open this path one component
+    # at a time with O_NOFOLLOW below.
+    return lexical
 
 
 def _safe_relative(value: str | Path, label: str) -> Path:
@@ -294,20 +580,19 @@ def _safe_relative(value: str | Path, label: str) -> Path:
 def _contained_regular_no_symlinks(root: Path, relative: Path, label: str) -> Path:
     """Reject a symlink at every path component, not merely at the leaf."""
 
-    root_resolved = _directory_nonsymlink(root, f"{label} root")
-    current = root
-    for index, part in enumerate(relative.parts):
+    safe_relative = _safe_relative(relative, label)
+    root_lexical = _directory_nonsymlink(root, f"{label} root")
+    current = root_lexical
+    for index, part in enumerate(safe_relative.parts):
         current = current / part
         try:
             info = current.lstat()
         except OSError as exc:
             raise SubmissionError(f"{label} is unavailable: {exc}") from exc
-        if index + 1 == len(relative.parts):
+        if index + 1 == len(safe_relative.parts):
             require(stat.S_ISREG(info.st_mode), f"{label} is not a regular nonsymlink file")
         else:
             require(stat.S_ISDIR(info.st_mode), f"{label} has a symlink/non-directory parent: {current}")
-    resolved = current.resolve(strict=True)
-    require(resolved.is_relative_to(root_resolved), f"{label} escapes repository containment")
     return current
 
 
@@ -388,27 +673,85 @@ def _verify_external_audit_inputs(
     )
 
 
-def _open_relative_regular(root: Path, relative: Path, label: str) -> tuple[int, os.stat_result]:
-    """Open a repository file through O_NOFOLLOW directory descriptors."""
+def _open_absolute_directory_components(path: Path, label: str) -> tuple[int, os.stat_result]:
+    """Open an absolute lexical directory without ever resolving a component."""
 
+    lexical = path.absolute()
+    require(
+        lexical.is_absolute()
+        and all(part not in ("", ".", "..") for part in lexical.parts[1:]),
+        f"{label} is not an absolute normalized path",
+    )
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
-    descriptors: list[int] = []
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
     try:
-        descriptor = os.open(root, directory_flags)
-        descriptors.append(descriptor)
-        for part in relative.parts[:-1]:
-            descriptor = os.open(part, directory_flags, dir_fd=descriptor)
-            descriptors.append(descriptor)
-        source_fd = os.open(relative.name, os.O_RDONLY | nofollow, dir_fd=descriptor)
-        info = os.fstat(source_fd)
-        if not stat.S_ISREG(info.st_mode):
-            os.close(source_fd)
-            raise SubmissionError(f"{label} is not a regular file")
-        return source_fd, info
+        descriptor = os.open(lexical.anchor, flags)
+        for part in lexical.parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        _require_tree_directory_mode(info, label)
+        result = descriptor
+        descriptor = None
+        return result, info
     except OSError as exc:
         raise SubmissionError(f"{label} is unavailable or symlinked: {exc}") from exc
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _open_relative_regular(root: Path, relative: Path, label: str) -> tuple[int, os.stat_result]:
+    """Open a repository file through O_NOFOLLOW directory descriptors."""
+
+    safe_relative = _safe_relative(relative, label)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptors: list[int] = []
+    source_fd: int | None = None
+    try:
+        descriptor, _root_info = _open_absolute_directory_components(root, f"{label} root")
+        descriptors.append(descriptor)
+        for part in safe_relative.parts[:-1]:
+            descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+            descriptors.append(descriptor)
+            directory_info = os.fstat(descriptor)
+            _require_tree_directory_mode(directory_info, f"{label} parent directory")
+            require(
+                directory_info.st_uid == os.getuid(),
+                f"{label} parent directory owner differs",
+            )
+        source_fd = os.open(
+            safe_relative.name,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | nofollow
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=descriptor,
+        )
+        info = os.fstat(source_fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o444 == 0:
+            raise SubmissionError(f"{label} is not a regular file")
+        result = source_fd
+        source_fd = None
+        return result, info
+    except OSError as exc:
+        raise SubmissionError(f"{label} is unavailable or symlinked: {exc}") from exc
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
         for descriptor in reversed(descriptors):
             os.close(descriptor)
 
@@ -447,6 +790,465 @@ def _hash_relative_regular(
     )
     require(identity(after) == identity(before), f"{label} changed while hashing")
     return digest.hexdigest(), b"".join(chunks) if chunks is not None else None
+
+
+def _tree_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    """Identity/metadata which must remain stable during one protected traversal."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _require_tree_directory_mode(info: os.stat_result, label: str) -> None:
+    require(stat.S_ISDIR(info.st_mode), f"{label} is not a directory")
+    permissions = stat.S_IMODE(info.st_mode)
+    require(
+        permissions & 0o444 != 0 and permissions & 0o111 != 0,
+        f"{label} is not traversable",
+    )
+
+
+def _read_stable_regular_fd(
+    descriptor: int,
+    before: os.stat_result,
+    label: str,
+    *,
+    hash_content: bool,
+) -> str | None:
+    require(stat.S_ISREG(before.st_mode), f"{label} is not a regular file")
+    require(stat.S_IMODE(before.st_mode) & 0o444 != 0, f"{label} is not readable")
+    digest = hashlib.sha256() if hash_content else None
+    try:
+        if digest is not None:
+            while block := os.read(descriptor, 16 * 1024 * 1024):
+                digest.update(block)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise SubmissionError(f"{label} could not be read or restated: {exc}") from exc
+    require(
+        _tree_stat_identity(after) == _tree_stat_identity(before),
+        f"{label} changed while traversing",
+    )
+    return None if digest is None else digest.hexdigest()
+
+
+def _secure_tree_rows(
+    root: Path,
+    label: str,
+    *,
+    hash_files: bool = True,
+) -> tuple[os.stat_result, list[dict[str, Any]]]:
+    """Enumerate a complete nonsymlink tree through directory descriptors.
+
+    Unlike ``Path.rglob``/``os.walk``, an unreadable directory cannot be silently
+    omitted.  Each child is opened relative to its already-open parent, every file
+    hash is read from that exact inode, and parent/child metadata must remain stable
+    across the traversal.
+    """
+
+    resolved = _directory_nonsymlink(root, f"{label} root")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec
+    file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | cloexec
+    try:
+        root_named = resolved.lstat()
+    except OSError as exc:
+        raise SubmissionError(f"{label} root cannot be stated: {exc}") from exc
+    root_fd, root_opened = _open_absolute_directory_components(resolved, f"{label} root")
+    rows: list[dict[str, Any]] = []
+
+    def walk(directory_fd: int, relative_parent: Path, opened: os.stat_result) -> None:
+        _require_tree_directory_mode(opened, f"{label} directory {relative_parent or Path('.')}")
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = []
+                for entry in iterator:
+                    try:
+                        child_info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise SubmissionError(
+                            f"{label} entry cannot be stated: {relative_parent / entry.name}: {exc}"
+                        ) from exc
+                    children.append((entry.name, child_info))
+        except OSError as exc:
+            raise SubmissionError(
+                f"{label} directory cannot be enumerated: {relative_parent or Path('.')}: {exc}"
+            ) from exc
+        require(
+            len({name for name, _info in children}) == len(children),
+            f"{label} directory enumeration contains duplicate names: {relative_parent}",
+        )
+        for name, listed in sorted(children, key=lambda value: value[0]):
+            require(
+                isinstance(name, str) and name not in ("", ".", "..") and "/" not in name,
+                f"{label} contains an unsafe entry name",
+            )
+            relative = relative_parent / name
+            require(not stat.S_ISLNK(listed.st_mode), f"{label} contains symlink: {relative}")
+            if stat.S_ISDIR(listed.st_mode):
+                _require_tree_directory_mode(listed, f"{label} directory {relative}")
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise SubmissionError(f"{label} directory cannot be opened: {relative}: {exc}") from exc
+                try:
+                    child_opened = os.fstat(child_fd)
+                    require(
+                        _tree_stat_identity(child_opened) == _tree_stat_identity(listed),
+                        f"{label} directory raced before open: {relative}",
+                    )
+                    require(
+                        child_opened.st_uid == os.getuid(),
+                        f"{label} directory owner differs: {relative}",
+                    )
+                    rows.append(
+                        {
+                            "path": str(relative),
+                            "kind": "directory",
+                            "mode": stat.S_IMODE(child_opened.st_mode),
+                            "size": child_opened.st_size,
+                            "mtime_ns": child_opened.st_mtime_ns,
+                        }
+                    )
+                    walk(child_fd, relative, child_opened)
+                    child_after = os.fstat(child_fd)
+                    require(
+                        _tree_stat_identity(child_after) == _tree_stat_identity(child_opened),
+                        f"{label} directory changed while traversing: {relative}",
+                    )
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(listed.st_mode):
+                require(
+                    stat.S_IMODE(listed.st_mode) & 0o444 != 0,
+                    f"{label} file is not readable: {relative}",
+                )
+                try:
+                    child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise SubmissionError(f"{label} file cannot be opened: {relative}: {exc}") from exc
+                try:
+                    child_opened = os.fstat(child_fd)
+                    require(
+                        _tree_stat_identity(child_opened) == _tree_stat_identity(listed),
+                        f"{label} file raced before open: {relative}",
+                    )
+                    require(
+                        child_opened.st_uid == os.getuid()
+                        and child_opened.st_nlink == 1,
+                        f"{label} file ownership/link count differs: {relative}",
+                    )
+                    digest = _read_stable_regular_fd(
+                        child_fd,
+                        child_opened,
+                        f"{label} file {relative}",
+                        hash_content=hash_files,
+                    )
+                finally:
+                    os.close(child_fd)
+                row: dict[str, Any] = {
+                    "path": str(relative),
+                    "kind": "file",
+                    "mode": stat.S_IMODE(child_opened.st_mode),
+                    "size": child_opened.st_size,
+                    "mtime_ns": child_opened.st_mtime_ns,
+                }
+                if digest is not None:
+                    row["sha256"] = digest
+                rows.append(row)
+            else:
+                raise SubmissionError(f"{label} contains special file: {relative}")
+        try:
+            after = os.fstat(directory_fd)
+        except OSError as exc:
+            raise SubmissionError(f"{label} directory cannot be restated: {relative_parent}: {exc}") from exc
+        require(
+            _tree_stat_identity(after) == _tree_stat_identity(opened),
+            f"{label} directory changed while enumerating: {relative_parent or Path('.')}",
+        )
+
+    try:
+        require(
+            _tree_stat_identity(root_opened) == _tree_stat_identity(root_named),
+            f"{label} root raced before open",
+        )
+        require(root_opened.st_uid == os.getuid(), f"{label} root owner differs")
+        walk(root_fd, Path(), root_opened)
+        root_after = os.fstat(root_fd)
+        require(
+            _tree_stat_identity(root_after) == _tree_stat_identity(root_opened),
+            f"{label} root changed while traversing",
+        )
+        rebound_fd, rebound = _open_absolute_directory_components(
+            resolved, f"{label} root revalidation"
+        )
+        try:
+            require(
+                _tree_stat_identity(rebound) == _tree_stat_identity(root_opened),
+                f"{label} root pathname changed while traversing",
+            )
+        finally:
+            os.close(rebound_fd)
+    finally:
+        os.close(root_fd)
+    rows.sort(key=lambda row: str(row["path"]))
+    return root_opened, rows
+
+
+def _open_relative_directory(root: Path, relative: Path, label: str) -> tuple[int, os.stat_result]:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | getattr(os, "O_CLOEXEC", 0)
+    descriptors: list[int] = []
+    opened: int | None = None
+    try:
+        descriptor, _root_info = _open_absolute_directory_components(root, f"{label} root")
+        descriptors.append(descriptor)
+        for part in relative.parts:
+            require(part not in ("", ".", ".."), f"{label} has an unsafe relative path")
+            descriptor = os.open(part, flags, dir_fd=descriptor)
+            descriptors.append(descriptor)
+        opened = os.dup(descriptor)
+        info = os.fstat(opened)
+        require(stat.S_ISDIR(info.st_mode), f"{label} is not a directory")
+        result = opened
+        opened = None
+        return result, info
+    except OSError as exc:
+        raise SubmissionError(f"{label} is unavailable or symlinked: {exc}") from exc
+    finally:
+        if opened is not None:
+            os.close(opened)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _seal_tree_read_only(root: Path, label: str) -> None:
+    """Seal a private tree through exact fds; never chmod a pathname target."""
+
+    _root_info, rows = _secure_tree_rows(root, label)
+    for row in (value for value in rows if value["kind"] == "file"):
+        relative = _safe_relative(str(row["path"]), f"{label} file")
+        descriptor, opened = _open_relative_regular(root, relative, f"{label} file {relative}")
+        try:
+            require(opened.st_nlink == 1, f"{label} file has external hard links: {relative}")
+            os.fchmod(descriptor, 0o444)
+            sealed = os.fstat(descriptor)
+            require(
+                (sealed.st_dev, sealed.st_ino) == (opened.st_dev, opened.st_ino)
+                and stat.S_IMODE(sealed.st_mode) == 0o444,
+                f"{label} file seal raced: {relative}",
+            )
+        except OSError as exc:
+            raise SubmissionError(f"{label} file cannot be sealed: {relative}: {exc}") from exc
+        finally:
+            os.close(descriptor)
+    directories = sorted(
+        (value for value in rows if value["kind"] == "directory"),
+        key=lambda value: len(Path(str(value["path"])).parts),
+        reverse=True,
+    )
+    for row in directories:
+        relative = _safe_relative(str(row["path"]), f"{label} directory")
+        descriptor, opened = _open_relative_directory(
+            root, relative, f"{label} directory {relative}"
+        )
+        try:
+            os.fchmod(descriptor, 0o555)
+            sealed = os.fstat(descriptor)
+            require(
+                (sealed.st_dev, sealed.st_ino) == (opened.st_dev, opened.st_ino)
+                and stat.S_IMODE(sealed.st_mode) == 0o555,
+                f"{label} directory seal raced: {relative}",
+            )
+        except OSError as exc:
+            raise SubmissionError(f"{label} directory cannot be sealed: {relative}: {exc}") from exc
+        finally:
+            os.close(descriptor)
+    descriptor, opened = _open_relative_directory(root, Path(), f"{label} root")
+    try:
+        os.fchmod(descriptor, 0o555)
+        sealed = os.fstat(descriptor)
+        require(
+            (sealed.st_dev, sealed.st_ino) == (opened.st_dev, opened.st_ino)
+            and stat.S_IMODE(sealed.st_mode) == 0o555,
+            f"{label} root seal raced",
+        )
+    except OSError as exc:
+        raise SubmissionError(f"{label} root cannot be sealed: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _restore_private_tree_modes(root: Path, label: str) -> list[str]:
+    """Restore a private temporary tree without ever following a symlink.
+
+    Directories are made owner-traversable before descriptor enumeration, so a
+    nested mode-000 directory cannot be skipped.  Unsafe entries are left for safe
+    unlink by ``rmtree`` and returned to the caller, which must fail the operation.
+    """
+
+    anomalies: list[str] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    path_only = getattr(os, "O_PATH", 0)
+    require(path_only != 0, f"{label} requires O_PATH for race-safe cleanup")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    path_flags = path_only | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+    def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino, left.st_uid) == (
+            right.st_dev,
+            right.st_ino,
+            right.st_uid,
+        )
+
+    def restore_mode(
+        parent_fd: int,
+        name: str,
+        listed: os.stat_result,
+        mode: int,
+        relative: Path,
+    ) -> os.stat_result:
+        """Change the mode of the exact O_PATH-pinned inode.
+
+        Linux does not expose ``fchmodat2(AT_EMPTY_PATH)`` through :mod:`os` on the
+        pinned Python.  ``/proc/self/fd/<n>`` is a stable reference to the already
+        opened inode; unlike a user-controlled pathname it cannot be rename-swapped.
+        Symlinks and foreign/hard-linked files are rejected before the chmod.
+        """
+
+        pinned: int | None = None
+        try:
+            pinned = os.open(name, path_flags, dir_fd=parent_fd)
+            opened = os.fstat(pinned)
+            require(same_inode(opened, listed), f"{label} entry raced: {relative}")
+            require(opened.st_uid == os.getuid(), f"{label} entry owner differs: {relative}")
+            require(
+                stat.S_ISDIR(opened.st_mode) or stat.S_ISREG(opened.st_mode),
+                f"{label} entry is not restorable: {relative}",
+            )
+            if stat.S_ISREG(opened.st_mode):
+                require(opened.st_nlink == 1, f"{label} file has external hard links: {relative}")
+            os.chmod(f"/proc/self/fd/{pinned}", mode)
+            restored = os.fstat(pinned)
+            require(
+                same_inode(restored, opened) and stat.S_IMODE(restored.st_mode) == mode,
+                f"{label} entry mode restoration raced: {relative}",
+            )
+            return restored
+        except OSError as exc:
+            raise SubmissionError(
+                f"{label} entry permissions cannot be restored: {relative}: {exc}"
+            ) from exc
+        finally:
+            if pinned is not None:
+                os.close(pinned)
+
+    def walk(directory_fd: int, parent: Path) -> None:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = []
+                for entry in iterator:
+                    try:
+                        children.append((entry.name, entry.stat(follow_symlinks=False)))
+                    except OSError as exc:
+                        raise SubmissionError(
+                            f"{label} entry cannot be stated: {parent / entry.name}: {exc}"
+                        ) from exc
+        except OSError as exc:
+            raise SubmissionError(f"{label} cannot enumerate {parent}: {exc}") from exc
+        for name, listed in sorted(children, key=lambda value: value[0]):
+            relative = parent / name
+            if listed.st_uid != os.getuid():
+                anomalies.append(f"wrong-owner:{relative}")
+                continue
+            if stat.S_ISLNK(listed.st_mode):
+                anomalies.append(f"symlink:{relative}")
+                continue
+            if stat.S_ISDIR(listed.st_mode):
+                try:
+                    restored = restore_mode(
+                        directory_fd, name, listed, 0o700, relative
+                    )
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise SubmissionError(
+                        f"{label} directory permissions cannot be restored: {relative}: {exc}"
+                    ) from exc
+                try:
+                    opened = os.fstat(child_fd)
+                    require(
+                        stat.S_ISDIR(opened.st_mode) and same_inode(opened, restored),
+                        f"{label} directory raced during restoration: {relative}",
+                    )
+                    walk(child_fd, relative)
+                    os.fchmod(child_fd, 0o700)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(listed.st_mode):
+                if listed.st_nlink != 1:
+                    anomalies.append(f"hardlink:{relative}")
+                    continue
+                restore_mode(directory_fd, name, listed, 0o600, relative)
+            else:
+                anomalies.append(f"special:{relative}")
+        os.fchmod(directory_fd, 0o700)
+
+    parent_fd = _open_relative_directory(root.parent, Path(), f"parent of {label} root")[0]
+    root_path_fd: int | None = None
+    try:
+        try:
+            named_root = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+            root_path_fd = os.open(root.name, path_flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise SubmissionError(f"{label} root cannot be pinned: {exc}") from exc
+        opened_path_root = os.fstat(root_path_fd)
+        require(
+            stat.S_ISDIR(opened_path_root.st_mode)
+            and opened_path_root.st_uid == os.getuid()
+            and _tree_stat_identity(opened_path_root) == _tree_stat_identity(named_root),
+            f"{label} root is unsafe",
+        )
+        os.chmod(f"/proc/self/fd/{root_path_fd}", 0o700)
+        restored_root = os.fstat(root_path_fd)
+        require(
+            same_inode(restored_root, opened_path_root)
+            and stat.S_IMODE(restored_root.st_mode) == 0o700,
+            f"{label} root mode restoration raced",
+        )
+        try:
+            root_fd = os.open(root.name, directory_flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise SubmissionError(f"{label} root cannot be opened for restoration: {exc}") from exc
+        try:
+            opened_root = os.fstat(root_fd)
+            require(
+                stat.S_ISDIR(opened_root.st_mode) and same_inode(opened_root, restored_root),
+                f"{label} root raced during restoration",
+            )
+            walk(root_fd, Path())
+            os.fchmod(root_fd, 0o700)
+        finally:
+            os.close(root_fd)
+    finally:
+        if root_path_fd is not None:
+            os.close(root_path_fd)
+        os.close(parent_fd)
+    return anomalies
 
 
 def _read_inventory_json(
@@ -557,11 +1359,25 @@ def verify_submit_interpreter(
 
 def interpreter_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
     python = Path(verify_submit_interpreter(manifest))
+    python_info = _lstat_if_present(python, "pinned Python")
+    require(
+        python_info is not None
+        and (stat.S_ISLNK(python_info.st_mode) or stat.S_ISREG(python_info.st_mode)),
+        "pinned Python changed type after interpreter verification",
+    )
     venv_root = python.parent.parent
     pyvenv = venv_root / "pyvenv.cfg"
     _regular_nonsymlink(pyvenv, "pinned pyvenv.cfg")
+    _pyvenv_digest, pyvenv_payload = _hash_relative_regular(
+        pyvenv.parent, Path(pyvenv.name), "pinned pyvenv.cfg", capture=True
+    )
+    assert pyvenv_payload is not None
     values: dict[str, str] = {}
-    for line in pyvenv.read_text(encoding="utf-8").splitlines():
+    try:
+        pyvenv_text = pyvenv_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SubmissionError(f"pinned pyvenv.cfg is not UTF-8: {exc}") from exc
+    for line in pyvenv_text.splitlines():
         if "=" in line:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
@@ -582,7 +1398,9 @@ def interpreter_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
     require(base_executable.resolve(strict=True) == target, "base interpreter target differs")
     return {
         "lexical_executable": str(python),
-        "lexical_symlink_target": os.readlink(python) if python.is_symlink() else None,
+        "lexical_symlink_target": (
+            os.readlink(python) if stat.S_ISLNK(python_info.st_mode) else None
+        ),
         "resolved_executable": str(target),
         "resolved_executable_sha256": file_sha256(target),
         "resolved_executable_size": info.st_size,
@@ -741,7 +1559,7 @@ def _ephemeral_child_environment(
 
     temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch2-{os.getuid()}-", dir=temporary_parent
+        prefix=f"treewm-exp23-launch3-{os.getuid()}-", dir=temporary_parent
     ) as raw_root:
         root = Path(raw_root)
         root_info = root.lstat()
@@ -759,36 +1577,9 @@ def _ephemeral_child_environment(
 def _output_tree_fingerprint(manifest: Mapping[str, Any]) -> str:
     """Hash every entry and byte beneath the prospective output root."""
     run_root = Path(str(manifest["paths"]["run_root"]))
-    rows: list[dict[str, Any]] = []
-    if not os.path.lexists(run_root):
+    if not _lexical_exists(run_root):
         return stable_hash({"exists": False, "entries": []})
-    root = _directory_nonsymlink(run_root, "run root")
-    for path in sorted(root.rglob("*")):
-        info = path.lstat()
-        relative = str(path.relative_to(root))
-        require(not stat.S_ISLNK(info.st_mode), f"output tree contains symlink: {relative}")
-        if stat.S_ISREG(info.st_mode):
-            rows.append(
-                {
-                    "path": relative,
-                    "kind": "file",
-                    "mode": stat.S_IMODE(info.st_mode),
-                    "size": info.st_size,
-                    "mtime_ns": info.st_mtime_ns,
-                    "sha256": file_sha256(path),
-                }
-            )
-        elif stat.S_ISDIR(info.st_mode):
-            rows.append(
-                {
-                    "path": relative,
-                    "kind": "directory",
-                    "mode": stat.S_IMODE(info.st_mode),
-                    "mtime_ns": info.st_mtime_ns,
-                }
-            )
-        else:
-            raise SubmissionError(f"output tree contains special file: {relative}")
+    _root_info, rows = _secure_tree_rows(run_root, "output tree")
     return stable_hash(rows)
 
 
@@ -798,34 +1589,49 @@ def _scientific_output_fingerprint(manifest: Mapping[str, Any]) -> str:
     run_root = Path(str(manifest["paths"]["run_root"]))
     rows: list[dict[str, Any]] = []
     for setting in manifest["design"]["settings"]:
-        path = run_root / str(setting)
-        if not os.path.lexists(path):
+        setting_relative = _safe_relative(str(setting), "scientific setting")
+        require(len(setting_relative.parts) == 1, "scientific setting is not one path component")
+        path = run_root / setting_relative
+        if not _lexical_exists(path):
             rows.append({"setting": setting, "missing": True})
             continue
-        _directory_nonsymlink(path, f"scientific setting output {setting}")
-        for child in sorted(path.rglob("*")):
-            info = child.lstat()
-            require(not stat.S_ISLNK(info.st_mode), f"scientific output contains symlink: {child}")
-            if stat.S_ISREG(info.st_mode):
-                rows.append({"path": str(child.relative_to(run_root)), "sha256": file_sha256(child), "size": info.st_size})
-            elif stat.S_ISDIR(info.st_mode):
-                rows.append({"path": str(child.relative_to(run_root)), "kind": "directory"})
-            else:
-                raise SubmissionError(f"scientific output contains special file: {child}")
+        root_info, setting_rows = _secure_tree_rows(
+            path, f"scientific setting output {setting}"
+        )
+        rows.append(
+            {
+                "path": str(setting_relative),
+                "kind": "directory",
+                "mode": stat.S_IMODE(root_info.st_mode),
+                "size": root_info.st_size,
+                "mtime_ns": root_info.st_mtime_ns,
+            }
+        )
+        for row in setting_rows:
+            rows.append(
+                {
+                    **row,
+                    "path": str(setting_relative / str(row["path"])),
+                }
+            )
     return stable_hash(rows)
 
 
 def _namespace_is_fresh(manifest: Mapping[str, Any], submission_root: Path) -> bool:
     run_root = Path(str(manifest["paths"]["run_root"]))
-    if submission_root.exists():
+    if _lexical_exists(submission_root):
         return False
-    if not run_root.exists():
+    if not _lexical_exists(run_root):
         return True
-    if run_root.is_symlink() or not run_root.is_dir():
+    try:
+        _root_info, rows = _secure_tree_rows(
+            run_root, "prospective output namespace", hash_files=False
+        )
+    except SubmissionError:
         return False
     # An empty run root is harmless.  Any prior scientific setting, terminal marker,
     # receipt, or cancellation latch makes this prospective namespace non-fresh.
-    return next(run_root.iterdir(), None) is None
+    return not rows
 
 
 def _parse_audit_stdout(raw: bytes, prefix: str, label: str) -> dict[str, Any]:
@@ -1296,7 +2102,10 @@ def verify_inventory_sources(repo_root: Path, inventory: Mapping[str, str]) -> N
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    _directory_nonsymlink(path, f"fsync directory {path}")
+    descriptor, _info = _open_relative_directory(
+        path, Path(), f"fsync directory {path}"
+    )
     try:
         os.fsync(descriptor)
     finally:
@@ -1368,10 +2177,10 @@ class _TransactionLock:
 
 def _mkdir_chain_no_symlinks(path: Path, *, leaf_mode: int = 0o700) -> Path:
     destination = path.absolute()
-    require(not os.path.lexists(destination), f"directory claim already exists: {destination}")
+    require(not _lexical_exists(destination), f"directory claim already exists: {destination}")
     missing: list[Path] = []
     current = destination
-    while not os.path.lexists(current):
+    while not _lexical_exists(current):
         missing.append(current)
         require(current.parent != current, "cannot claim filesystem root")
         current = current.parent
@@ -1401,12 +2210,16 @@ def _copy_verified(
     destination: Path,
     expected_sha256: str,
 ) -> None:
-    source_fd, _opened = _open_relative_regular(
+    source_fd, source_opened = _open_relative_regular(
         source_root, relative, f"snapshot source {relative}"
     )
     target_fd: int | None = None
     try:
-        target_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        target_fd = os.open(
+            destination,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         digest = hashlib.sha256()
         while block := os.read(source_fd, 16 * 1024 * 1024):
             digest.update(block)
@@ -1415,18 +2228,30 @@ def _copy_verified(
                 written = os.write(target_fd, view)
                 require(written > 0, f"short snapshot write: {destination}")
                 view = view[written:]
+        source_after = os.fstat(source_fd)
+        require(
+            _tree_stat_identity(source_after) == _tree_stat_identity(source_opened),
+            f"snapshot source changed while copying: {relative}",
+        )
         os.fsync(target_fd)
         require(digest.hexdigest() == expected_sha256, f"snapshot source bytes changed: {relative}")
+        target_opened = os.fstat(target_fd)
+        os.lseek(target_fd, 0, os.SEEK_SET)
+        copied_digest = _read_stable_regular_fd(
+            target_fd,
+            target_opened,
+            f"copied snapshot file {relative}",
+            hash_content=True,
+        )
+        require(copied_digest == expected_sha256, f"copied snapshot bytes differ: {relative}")
     finally:
         os.close(source_fd)
         if target_fd is not None:
             os.close(target_fd)
-    require(file_sha256(destination) == expected_sha256, f"copied snapshot bytes differ: {destination}")
 
 
 def verify_snapshot_files(snapshot_root: Path, inventory: Mapping[str, str]) -> None:
-    root = _directory_nonsymlink(snapshot_root, "snapshot root")
-    root_info = snapshot_root.lstat()
+    root_info, rows = _secure_tree_rows(snapshot_root, "snapshot")
     require(root_info.st_mode & 0o222 == 0, "snapshot root is writable")
     expected = set(inventory)
     expected_directories = {
@@ -1436,18 +2261,15 @@ def verify_snapshot_files(snapshot_root: Path, inventory: Mapping[str, str]) -> 
     }
     actual: set[str] = set()
     actual_directories: set[str] = set()
-    for path in root.rglob("*"):
-        info = path.lstat()
-        relative = str(path.relative_to(root))
-        require(not stat.S_ISLNK(info.st_mode), f"snapshot contains symlink: {relative}")
-        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), f"snapshot contains special file: {relative}")
-        if stat.S_ISREG(info.st_mode):
+    for row in rows:
+        relative = str(row["path"])
+        if row["kind"] == "file":
             actual.add(relative)
             require(relative in inventory, f"snapshot has an unclaimed file: {relative}")
-            require(file_sha256(path) == inventory[relative], f"snapshot byte drift: {relative}")
-            require(info.st_mode & 0o222 == 0, f"snapshot file is writable: {relative}")
+            require(row["sha256"] == inventory[relative], f"snapshot byte drift: {relative}")
+            require(int(row["mode"]) & 0o222 == 0, f"snapshot file is writable: {relative}")
         else:
-            require(info.st_mode & 0o222 == 0, f"snapshot directory is writable: {relative}")
+            require(int(row["mode"]) & 0o222 == 0, f"snapshot directory is writable: {relative}")
             actual_directories.add(relative)
     require(actual == expected, "snapshot file coverage differs from exact union")
     require(actual_directories == expected_directories, "snapshot directory coverage differs from exact union")
@@ -1456,9 +2278,14 @@ def verify_snapshot_files(snapshot_root: Path, inventory: Mapping[str, str]) -> 
 def create_source_snapshot(
     repo_root: Path, destination: Path, inventory: Mapping[str, str]
 ) -> Path:
-    require(not destination.exists(), "snapshot destination already exists")
+    require(not _lexical_exists(destination), "snapshot destination already exists")
     parent = destination.parent
     _mkdir_chain_no_symlinks(parent)
+    parent_before = parent.lstat()
+    require(
+        stat.S_ISDIR(parent_before.st_mode) and parent_before.st_uid == os.getuid(),
+        "snapshot parent is not a private owned directory",
+    )
     temporary = parent / f".repo.tmp.{os.getpid()}.{time.time_ns()}"
     temporary.mkdir(mode=0o700)
     _fsync_directory(parent)
@@ -1467,33 +2294,59 @@ def create_source_snapshot(
             relative = _safe_relative(raw_relative, "snapshot inventory path")
             _mkdir_parents_nonsymlink(temporary, relative.parent)
             _copy_verified(repo_root, relative, temporary / relative, digest)
-        for path in temporary.rglob("*"):
-            if path.is_file():
-                path.chmod(0o444)
-        directories = sorted(
-            (path for path in temporary.rglob("*") if path.is_dir()),
-            key=lambda item: len(item.parts),
-            reverse=True,
-        )
-        for directory in directories:
-            directory.chmod(0o555)
-        temporary.chmod(0o555)
+        _seal_tree_read_only(temporary, "temporary source snapshot")
         os.replace(temporary, destination)
         _fsync_directory(parent)
-        parent.chmod(0o555)
+        parent_fd, parent_opened = _open_relative_directory(
+            parent.parent, Path(parent.name), "source-snapshot parent"
+        )
+        try:
+            require(
+                (
+                    parent_opened.st_dev,
+                    parent_opened.st_ino,
+                    parent_opened.st_uid,
+                    parent_opened.st_gid,
+                    stat.S_IMODE(parent_opened.st_mode),
+                )
+                == (
+                    parent_before.st_dev,
+                    parent_before.st_ino,
+                    parent_before.st_uid,
+                    parent_before.st_gid,
+                    0o700,
+                ),
+                "source-snapshot parent raced before sealing",
+            )
+            os.fchmod(parent_fd, 0o555)
+            parent_sealed = os.fstat(parent_fd)
+            require(
+                (parent_sealed.st_dev, parent_sealed.st_ino)
+                == (parent_opened.st_dev, parent_opened.st_ino)
+                and stat.S_IMODE(parent_sealed.st_mode) == 0o555,
+                "source-snapshot parent sealing raced",
+            )
+        finally:
+            os.close(parent_fd)
         _fsync_directory(parent.parent)
     except BaseException:
-        if temporary.exists():
-            for path in temporary.rglob("*"):
-                try:
-                    path.chmod(0o700 if path.is_dir() else 0o600)
-                except OSError:
-                    pass
+        if _lexical_exists(temporary):
+            cleanup_anomalies: list[str] = []
             try:
-                temporary.chmod(0o700)
+                cleanup_anomalies = _restore_private_tree_modes(
+                    temporary, "failed temporary source snapshot"
+                )
                 shutil.rmtree(temporary)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                raise SubmissionError(
+                    f"failed source-snapshot cleanup could not complete: {cleanup_exc}"
+                ) from cleanup_exc
+            require(not _lexical_exists(temporary), "failed source-snapshot temporary tree survived cleanup")
+            require(
+                not cleanup_anomalies,
+                "failed source-snapshot cleanup found unsafe entries: "
+                + ",".join(cleanup_anomalies),
+            )
         raise
     verify_snapshot_files(destination, inventory)
     return destination
@@ -1501,7 +2354,7 @@ def create_source_snapshot(
 
 def exclusive_json(path: Path, value: Mapping[str, Any], *, mode: int = 0o444) -> str:
     payload = (json.dumps(dict(value), sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    if not path.parent.exists():
+    if not _lexical_exists(path.parent):
         path.parent.mkdir(parents=True, exist_ok=False)
         _fsync_directory(path.parent.parent)
     else:
@@ -1697,7 +2550,7 @@ def _assert_live_transaction(submission_root: Path, *, ready: bool = False) -> N
     if not ready:
         forbidden.append(submission_root / "journal" / "0005_READY_TO_COMMIT.json")
     require(
-        not any(os.path.lexists(path) for path in forbidden),
+        not any(_lexical_exists(path) for path in forbidden),
         "submission transaction acquired a terminal/cancellation marker",
     )
 
@@ -1856,35 +2709,21 @@ def _restore_snapshot_test_permissions(task_root: Path) -> None:
     root = task_root.absolute()
     require(
         root.parent == temporary_parent
-        and root.name.startswith(f"treewm-exp23-launch2-snapshot-test-{os.getuid()}-"),
+        and root.name.startswith(f"treewm-exp23-launch3-snapshot-test-{os.getuid()}-"),
         "refusing to restore permissions outside a snapshot-test temporary tree",
     )
-    if not os.path.lexists(root):
+    if not _lexical_exists(root):
         return
     info = root.lstat()
     require(
         stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(),
         "snapshot-test temporary root is unsafe",
     )
-    for directory, names, files in os.walk(root, topdown=False, followlinks=False):
-        current = Path(directory)
-        for name in files:
-            path = current / name
-            child = path.lstat()
-            require(
-                stat.S_ISREG(child.st_mode) and child.st_uid == os.getuid(),
-                f"snapshot-test temporary file is unsafe: {path}",
-            )
-            path.chmod(0o600)
-        for name in names:
-            path = current / name
-            child = path.lstat()
-            require(
-                stat.S_ISDIR(child.st_mode) and child.st_uid == os.getuid(),
-                f"snapshot-test temporary directory is unsafe: {path}",
-            )
-            path.chmod(0o700)
-        current.chmod(0o700)
+    anomalies = _restore_private_tree_modes(root, "snapshot-test temporary tree")
+    require(
+        not anomalies,
+        "snapshot-test temporary tree contains unsafe entries: " + ",".join(anomalies),
+    )
 
 
 def snapshot_test(
@@ -1924,7 +2763,7 @@ def snapshot_test(
     task_root: Path | None = None
     copied: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch2-snapshot-test-{os.getuid()}-",
+        prefix=f"treewm-exp23-launch3-snapshot-test-{os.getuid()}-",
         dir=temporary_parent,
     ) as raw_task_root:
         task_root = Path(raw_task_root)
@@ -1941,7 +2780,10 @@ def snapshot_test(
             verify_snapshot_files(snapshot_root, inventory)
         finally:
             _restore_snapshot_test_permissions(task_root)
-    require(task_root is not None and not task_root.exists(), "snapshot-test temporary tree survived cleanup")
+    require(
+        task_root is not None and not _lexical_exists(task_root),
+        "snapshot-test temporary tree survived cleanup",
+    )
     require(copied is not None, "snapshot-test copied preflight is absent")
 
     source_after = campaign.source_contract(root)
@@ -2240,8 +3082,8 @@ def _submit_campaign_impl(
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch2-{token}-train"
-    report_name = f"exp23-launch2-{token}-report"
+    train_name = f"exp23-launch3-{token}-train"
+    report_name = f"exp23-launch3-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
@@ -2420,7 +3262,7 @@ def _submit_campaign_locked(
             raise
         claimed_by_this_process = False
         claimed_path = submission_root / "journal" / "0000_CLAIMED.json"
-        if os.path.lexists(claimed_path):
+        if _lexical_exists(claimed_path):
             try:
                 claimed_by_this_process = read_json(claimed_path).get("claim_token") == claim_token
             except BaseException:
@@ -2438,7 +3280,7 @@ def _submit_campaign_locked(
                 contract_path = submission_root / "SUBMISSION_CONTRACT.json"
                 contract_sha256 = (
                     file_sha256(contract_path)
-                    if os.path.lexists(contract_path)
+                    if _lexical_exists(contract_path)
                     and stat.S_ISREG(contract_path.lstat().st_mode)
                     else None
                 )
@@ -2446,15 +3288,15 @@ def _submit_campaign_locked(
                     "schema_version": 1,
                     "record": "outer_aborted",
                     "error": repr(exc),
-                    "receipt_committed": os.path.lexists(receipt),
+                    "receipt_committed": _lexical_exists(receipt),
                     "known_job_ids": list(getattr(exc, "job_ids", ())),
                     "job_ids_by_role": role_ids,
                     "claim_token": claim_token,
                     "submission_sha256": contract_sha256,
                 }
-                if os.path.lexists(abort_path):
+                if _lexical_exists(abort_path):
                     require(read_json(abort_path) == value, "outer abort journal differs")
-                elif not os.path.lexists(receipt):
+                elif not _lexical_exists(receipt):
                     exclusive_json(abort_path, value)
             except BaseException:
                 pass
@@ -2640,7 +3482,21 @@ def _recover_transaction_locked(
     manifest = read_json(snapshot_root / PACKAGE_RELATIVE / "manifest.json")
     recovered_interpreter = activate_isolated_runtime(manifest)
     require(contract.get("manifest_sha256") == stable_hash(manifest), "recovery manifest binding differs")
-    require(contract.get("package_protocol_sha256") == (snapshot_root / PACKAGE_RELATIVE / "protocol.sha256").read_text(encoding="ascii").strip(), "recovery protocol-lock text differs")
+    _protocol_digest, protocol_payload = _hash_relative_regular(
+        snapshot_root,
+        PACKAGE_RELATIVE / "protocol.sha256",
+        "recovery protocol lock",
+        capture=True,
+    )
+    assert protocol_payload is not None
+    try:
+        recovered_protocol = protocol_payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise SubmissionError(f"recovery protocol lock is not ASCII: {exc}") from exc
+    require(
+        contract.get("package_protocol_sha256") == recovered_protocol,
+        "recovery protocol-lock text differs",
+    )
     campaign = load_campaign(snapshot_root)
     weight_lock = campaign.read_json(snapshot_root / PACKAGE_RELATIVE / "weight_audit.lock.json")
     campaign.validate_manifest(manifest, weight_lock, snapshot_root)
@@ -2666,7 +3522,7 @@ def _recover_transaction_locked(
     )
 
     receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
-    if os.path.lexists(receipt_path):
+    if _lexical_exists(receipt_path):
         _regular_nonsymlink(receipt_path, "committed submission receipt")
         receipt = read_json(receipt_path)
         require(set(receipt) == RECEIPT_FIELDS, "committed receipt schema differs")
@@ -2685,10 +3541,10 @@ def _recover_transaction_locked(
         return {**receipt, "status": "submitted", "recovery": "already_committed", "scheduler_calls": 0}
 
     ready_path = submission_root / "journal" / "0005_READY_TO_COMMIT.json"
-    if os.path.lexists(ready_path):
+    if _lexical_exists(ready_path):
         require(
             not any(
-                os.path.lexists(submission_root / "journal" / name)
+                _lexical_exists(submission_root / "journal" / name)
                 for name in ("9999_ABORTED.json", "9998_OUTER_ABORTED.json", "9000_RECOVERY_CANCELLED.json")
             ),
             "durable READY conflicts with an aborted/cancelled transaction",
@@ -2710,12 +3566,12 @@ def _recover_transaction_locked(
                 and str(submitted.get("job_id")) == str(receipt[receipt_key]),
                 f"ready receipt {role} ID differs from durable submission journal",
             )
-        require(not os.path.lexists(submission_root / "CANCEL_REQUESTED.json"), "cancelled transaction cannot be committed")
+        require(not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"), "cancelled transaction cannot be committed")
         exclusive_json(receipt_path, receipt)
         return {**receipt, "recovery": "committed_from_durable_ready_record", "scheduler_calls": 0}
 
     prior_recovery_path = submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
-    if os.path.lexists(prior_recovery_path):
+    if _lexical_exists(prior_recovery_path):
         prior = read_json(prior_recovery_path)
         require(
             prior.get("record") == "recovery_cancelled"
@@ -2736,8 +3592,8 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch2-{token}-train"
-    report_name = f"exp23-launch2-{token}-report"
+    train_name = f"exp23-launch3-{token}-train"
+    report_name = f"exp23-launch3-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
     role_names = {"train": train_name, "report": report_name}
     journal_paths = {
@@ -2747,7 +3603,7 @@ def _recover_transaction_locked(
     aborted_ids_by_role: dict[str, list[str]] = {"train": [], "report": []}
     aborted: dict[str, Any] | None = None
     aborted_path = submission_root / "journal" / "9999_ABORTED.json"
-    if os.path.lexists(aborted_path):
+    if _lexical_exists(aborted_path):
         aborted = read_json(aborted_path)
         require(
             set(aborted)
@@ -2775,7 +3631,7 @@ def _recover_transaction_locked(
         )
         aborted_ids_by_role = _validated_abort_role_ids(aborted, "abort")
     outer_path = submission_root / "journal" / "9998_OUTER_ABORTED.json"
-    if os.path.lexists(outer_path):
+    if _lexical_exists(outer_path):
         outer = read_json(outer_path)
         require(
             set(outer)
@@ -2807,7 +3663,7 @@ def _recover_transaction_locked(
     for role, name in role_names.items():
         known: list[str] = list(aborted_ids_by_role[role])
         journal_path = journal_paths[role]
-        if os.path.lexists(journal_path):
+        if _lexical_exists(journal_path):
             record = read_json(journal_path)
             expected_record = f"{role}_submitted"
             require(record.get("record") == expected_record, f"recovery {role} journal record differs")
@@ -2837,7 +3693,7 @@ def _recover_transaction_locked(
         "job_ids_by_role": ids_by_role,
         "recovery": True,
     }
-    if not os.path.lexists(submission_root / "CANCEL_REQUESTED.json"):
+    if not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"):
         exclusive_json(submission_root / "CANCEL_REQUESTED.json", latch)
     cancellation = None
     cancellation_error = None
@@ -2860,7 +3716,7 @@ def _recover_transaction_locked(
     }
     if reconciliation_errors or cancellation_error:
         incomplete_path = submission_root / "journal" / "8999_RECOVERY_INCOMPLETE.json"
-        if not os.path.lexists(incomplete_path):
+        if not _lexical_exists(incomplete_path):
             append_journal(submission_root, 8999, "RECOVERY_INCOMPLETE", recovery_record)
         detail = "; ".join(
             f"{role}: {error}" for role, error in sorted(reconciliation_errors.items())
@@ -2869,7 +3725,7 @@ def _recover_transaction_locked(
             detail += ("; " if detail else "") + f"scancel: {cancellation_error}"
         raise SubmissionError("recovery is incomplete: " + detail)
     recovery_path = submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
-    if os.path.lexists(recovery_path):
+    if _lexical_exists(recovery_path):
         require(read_json(recovery_path) == {"schema_version": 1, "record": "recovery_cancelled", **recovery_record}, "recovery journal differs")
     else:
         append_journal(submission_root, 9000, "RECOVERY_CANCELLED", recovery_record)
@@ -2984,7 +3840,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.submission_root is not None
             else Path(str(manifest["paths"]["run_root"])) / "state" / "submission"
         )
-        if args.submit and os.path.lexists(submission_root):
+        if args.submit and _lexical_exists(submission_root):
             recovered = recover_transaction(repo_root, submission_root)
             print(json.dumps(recovered, sort_keys=True, indent=2, allow_nan=False))
             return 0 if recovered.get("status") == "submitted" else 2

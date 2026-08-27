@@ -1,23 +1,25 @@
-# Exp23 executable-prefix repair pilot v1 launch2
+# Exp23 executable-prefix repair pilot v1 launch3
 
-This is the sealed, launch-capable but unsubmitted launch2 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch3 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch2`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch2` namespace and
-`exp23-launch2-*` run names. No launch2 submission, snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch3`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch3` namespace,
+`outputs/.exp23-6e55bb3083712144.transaction.lock`, and `exp23-launch3-*` run names.
+No launch3 submission, snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
 verifying this package.
 
-The original identity is permanently negative provenance. Its preserved 137-file
-read-only source snapshot was independently byte-matched, 137/137, to commit
-`85cd77de2d5956944008b4b2b16267858828fa84`; the journal itself contains no git
-provenance. The attempt aborted before the submission contract because its isolated
-audit inputs were unavailable.
-It produced no submission SHA, job ID, receipt, scientific run, checkpoint, W&B run,
-or optimizer update. Its exact protocol, manifest, inventory, claim, fingerprint, and
-journal hashes are sealed in `manifest.superseded_launch`; its namespace, identity,
-snapshot, and state are forbidden as launch2 inputs and cannot be reused or resumed.
+Launch1 and launch2 are permanently ordered negative provenance. Each preserved
+read-only source snapshot was independently byte-matched 137/137 to its recorded
+commit; neither journal itself claims git provenance. Launch1 aborted before the
+submission contract because its isolated audit inputs were unavailable. Launch2 also
+aborted before the contract: its causal replay incorrectly included the newly created
+controlled `state/submission` tree in an output fingerprint. Neither attempt produced a
+submission SHA, contract, job ID, receipt, scientific run, checkpoint, W&B run, or
+optimizer update. Their exact protocols, manifests, inventories, claims, fingerprints,
+and journals are sealed in order in `manifest.superseded_launches`; neither namespace,
+identity, snapshot, nor state may be reused or resumed by launch3.
 
 ## Scientific design
 
@@ -99,7 +101,7 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-Any launch2 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch3 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` is included as an exact supplemental import
 file with the empty-file SHA-256 recorded in `campaign.SNAPSHOT_IMPORT_FILES`.

@@ -8,10 +8,12 @@ import inspect
 import json
 import os
 from pathlib import Path
+import socket
 import stat
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -56,6 +58,68 @@ def prefix_target_audit():
     return load("prefix_target_audit")
 
 
+@pytest.fixture(scope="module")
+def causal_parity_audit():
+    return load("causal_parity_audit")
+
+
+@pytest.fixture(scope="module")
+def worker():
+    return load("worker")
+
+
+def bind_causal_execution_context(
+    causal_parity_audit,
+    monkeypatch,
+    execution_fd: int,
+    expected_root_fd: int,
+    sealed: bool,
+    source: Path,
+):
+    monkeypatch.setattr(
+        causal_parity_audit, "BOOTSTRAP_EXECUTION_ROOT_FD", execution_fd
+    )
+    monkeypatch.setattr(
+        causal_parity_audit,
+        "BOOTSTRAP_EXECUTION_ROOT_IDENTITY",
+        causal_parity_audit._tree_stat_identity(os.fstat(expected_root_fd)),
+    )
+    monkeypatch.setattr(
+        causal_parity_audit, "BOOTSTRAP_EXECUTION_ROOT_SEALED", sealed
+    )
+    monkeypatch.setattr(
+        causal_parity_audit,
+        "BOOTSTRAP_EXECUTION_SCRIPT_RELATIVE",
+        causal_parity_audit.AUDIT_SOURCE_RELATIVE.as_posix(),
+    )
+    monkeypatch.setattr(
+        causal_parity_audit,
+        "BOOTSTRAP_EXECUTION_SCRIPT_SHA256",
+        hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+    relative = causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    source_root = source.parents[len(relative.parts) - 1]
+    directory_identities = tuple(
+        (
+            Path(*relative.parts[:index]).as_posix(),
+            causal_parity_audit._tree_stat_identity(
+                (source_root / Path(*relative.parts[:index])).lstat()
+            ),
+        )
+        for index in range(1, len(relative.parts))
+    )
+    monkeypatch.setattr(
+        causal_parity_audit,
+        "BOOTSTRAP_EXECUTION_DIRECTORY_IDENTITIES",
+        directory_identities,
+    )
+    monkeypatch.setattr(
+        causal_parity_audit,
+        "BOOTSTRAP_EXECUTION_SCRIPT_IDENTITY",
+        causal_parity_audit._tree_stat_identity(source.lstat()),
+    )
+
+
 def interpreter_identity(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     python = Path(manifest["paths"]["python"])
@@ -77,6 +141,15 @@ def interpreter_identity(submit):
         "resolved_executable_sha256": submit.file_sha256(target),
         "resolved_executable_size": target.stat().st_size,
     }
+
+
+def test_launch3_transaction_lock_path_is_exact(submit):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    run_root = Path(manifest["paths"]["run_root"])
+    submission_root = run_root / "state" / "submission"
+    expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
+    assert submit._transaction_lock_path(submission_root) == expected
+    assert expected.name == ".exp23-6e55bb3083712144.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -161,6 +234,688 @@ def test_isolated_child_reverifies_exact_read_only_snapshot(submit, tmp_path):
     root.chmod(0o755)
     rejected = subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert rejected.returncode != 0
+
+
+def test_isolated_bootstrap_causal_self_hash_uses_bound_snapshot_fd(
+    submit, causal_parity_audit, tmp_path
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "snapshot"
+    source = root / causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    source.parent.mkdir(parents=True)
+    source_text = (PACKAGE / "causal_parity_audit.py").read_text(encoding="utf-8")
+    source.write_text(
+        source_text.replace(
+            'if __name__ == "__main__":\n    raise SystemExit(main())\n',
+            'if __name__ == "__main__":\n    print(file_sha256(Path(__file__)))\n',
+        ),
+        encoding="utf-8",
+    )
+    inventory = {str(source.relative_to(root)): submit.file_sha256(source)}
+    directories = [root, source.parent, *source.parent.parents]
+    directories = [path for path in directories if path == root or path.is_relative_to(root)]
+    try:
+        source.chmod(0o444)
+        for directory in sorted(set(directories), key=lambda path: len(path.parts), reverse=True):
+            directory.chmod(0o555)
+        command = submit.isolated_python_command(
+            [identity["lexical_executable"], str(source)],
+            root,
+            identity,
+            intercept_python_children=False,
+            snapshot_inventory=inventory,
+        )
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == inventory[
+            str(causal_parity_audit.AUDIT_SOURCE_RELATIVE)
+        ]
+    finally:
+        for directory in directories:
+            directory.chmod(0o755)
+
+
+def test_isolated_bootstrap_causal_self_hash_accepts_exact_live_root(
+    submit, causal_parity_audit, tmp_path
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "live-repository"
+    source = root / causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    source.parent.mkdir(parents=True)
+    source_text = (PACKAGE / "causal_parity_audit.py").read_text(encoding="utf-8")
+    source.write_text(
+        source_text.replace(
+            'if __name__ == "__main__":\n    raise SystemExit(main())\n',
+            'if __name__ == "__main__":\n    print(file_sha256(Path(__file__)))\n',
+        ),
+        encoding="utf-8",
+    )
+    expected = submit.file_sha256(source)
+    command = submit.isolated_python_command(
+        [identity["lexical_executable"], str(source)],
+        root,
+        identity,
+        intercept_python_children=False,
+        snapshot_inventory=None,
+    )
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    ("surface", "unsafe_mode"),
+    (
+        ("root", 0o775),
+        ("root", 0o757),
+        ("directory", 0o775),
+        ("directory", 0o757),
+        ("file", 0o664),
+        ("file", 0o646),
+    ),
+)
+def test_isolated_bootstrap_rejects_unsafe_live_target_modes(
+    submit, tmp_path, surface, unsafe_mode
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "live-root"
+    target = root / "nested" / "main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('UNSAFE_TARGET_EXECUTED')\n", encoding="utf-8")
+    changed = {"root": root, "directory": target.parent, "file": target}[surface]
+    safe_mode = stat.S_IMODE(changed.stat().st_mode)
+    changed.chmod(unsafe_mode)
+    try:
+        command = submit.isolated_python_command(
+            [identity["lexical_executable"], str(target)],
+            root,
+            identity,
+            intercept_python_children=False,
+            snapshot_inventory=None,
+        )
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode != 0
+        assert "UNSAFE_TARGET_EXECUTED" not in completed.stdout
+    finally:
+        changed.chmod(safe_mode)
+
+
+@pytest.mark.parametrize(
+    ("sealed", "surface", "changed_mode"),
+    (
+        (False, "directory", 0o700),
+        (False, "file", 0o600),
+        (True, "file", 0o644),
+    ),
+)
+def test_isolated_bootstrap_revalidates_target_after_system_exit(
+    submit, tmp_path, sealed, surface, changed_mode
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "execution-root"
+    target = root / "nested" / "main.py"
+    target.parent.mkdir(parents=True)
+    expression = "__file__" if surface == "file" else "os.path.dirname(__file__)"
+    target.write_text(
+        "import os\n"
+        f"os.chmod({expression}, {changed_mode})\n"
+        "print('POST_EXEC_MUTATION_RAN', flush=True)\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    inventory = None
+    directories = [
+        path
+        for path in (root, target.parent, *target.parent.parents)
+        if path == root or path.is_relative_to(root)
+    ]
+    if sealed:
+        inventory = {str(target.relative_to(root)): submit.file_sha256(target)}
+        target.chmod(0o444)
+        for directory in sorted(
+            set(directories), key=lambda path: len(path.parts), reverse=True
+        ):
+            directory.chmod(0o555)
+    try:
+        command = submit.isolated_python_command(
+            [identity["lexical_executable"], str(target)],
+            root,
+            identity,
+            intercept_python_children=False,
+            snapshot_inventory=inventory,
+        )
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.stdout.strip() == "POST_EXEC_MUTATION_RAN"
+        assert completed.returncode != 0, completed.stderr
+        assert "target" in completed.stderr
+    finally:
+        target.chmod(0o644)
+        for directory in directories:
+            directory.chmod(0o755)
+
+
+def test_isolated_bootstrap_rejects_live_root_swap_before_import(
+    submit, tmp_path, monkeypatch
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "live-root"
+    replacement = tmp_path / "replacement"
+    root.mkdir()
+    replacement.mkdir()
+    source = "print('SWAPPED_ROOT_EXECUTED')\n"
+    (root / "main.py").write_text(source, encoding="utf-8")
+    (replacement / "main.py").write_text(source, encoding="utf-8")
+    marker = tmp_path / "script-read"
+    gate = tmp_path / "continue"
+    needle = "try: import_root_fd = open_directory(root_real, 'pre-import snapshot root')"
+    assert submit.ISOLATED_RUN_CODE.count(needle) == 1
+    raced_bootstrap = submit.ISOLATED_RUN_CODE.replace(
+        needle,
+        "import time\n"
+        "with open(sys.argv[9], 'w', encoding='utf-8') as stream: stream.write('ready')\n"
+        "while not os.path.exists(sys.argv[10]): time.sleep(0.01)\n"
+        + needle,
+    )
+    monkeypatch.setattr(submit, "ISOLATED_RUN_CODE", raced_bootstrap)
+    command = submit.isolated_python_command(
+        [
+            identity["lexical_executable"],
+            str(root / "main.py"),
+            str(marker),
+            str(gate),
+        ],
+        root,
+        identity,
+        intercept_python_children=False,
+        snapshot_inventory=None,
+    )
+    process = subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    authenticated = tmp_path / "authenticated-root"
+    try:
+        deadline = time.monotonic() + 5.0
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), process.communicate(timeout=1)[1]
+        root.rename(authenticated)
+        replacement.rename(root)
+        gate.write_text("continue", encoding="ascii")
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode != 0, (stdout, stderr)
+        assert "execution root changed before import" in stderr
+        assert "SWAPPED_ROOT_EXECUTED" not in stdout
+    finally:
+        if process.poll() is None:
+            gate.write_text("continue", encoding="ascii")
+            process.kill()
+            process.communicate()
+
+
+def test_isolated_bootstrap_rejects_live_nested_target_swap_before_import(
+    submit, tmp_path, monkeypatch
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "live-root"
+    target_directory = root / "outer" / "nested"
+    replacement = tmp_path / "replacement-nested"
+    target_directory.mkdir(parents=True)
+    replacement.mkdir()
+    source = "print('SWAPPED_NESTED_TARGET_EXECUTED')\n"
+    (target_directory / "main.py").write_text(source, encoding="utf-8")
+    (replacement / "main.py").write_text(source, encoding="utf-8")
+    marker = tmp_path / "script-read"
+    gate = tmp_path / "continue"
+    needle = "try: import_root_fd = open_directory(root_real, 'pre-import snapshot root')"
+    assert submit.ISOLATED_RUN_CODE.count(needle) == 1
+    raced_bootstrap = submit.ISOLATED_RUN_CODE.replace(
+        needle,
+        "import time\n"
+        "with open(sys.argv[9], 'w', encoding='utf-8') as stream: stream.write('ready')\n"
+        "while not os.path.exists(sys.argv[10]): time.sleep(0.01)\n"
+        + needle,
+    )
+    monkeypatch.setattr(submit, "ISOLATED_RUN_CODE", raced_bootstrap)
+    command = submit.isolated_python_command(
+        [
+            identity["lexical_executable"],
+            str(target_directory / "main.py"),
+            str(marker),
+            str(gate),
+        ],
+        root,
+        identity,
+        intercept_python_children=False,
+        snapshot_inventory=None,
+    )
+    process = subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    authenticated = tmp_path / "authenticated-nested"
+    try:
+        deadline = time.monotonic() + 5.0
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), process.communicate(timeout=1)[1]
+        target_directory.rename(authenticated)
+        replacement.rename(target_directory)
+        gate.write_text("continue", encoding="ascii")
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode != 0, (stdout, stderr)
+        assert "pre-import target directory" in stderr
+        assert "SWAPPED_NESTED_TARGET_EXECUTED" not in stdout
+    finally:
+        if process.poll() is None:
+            gate.write_text("continue", encoding="ascii")
+            process.kill()
+            process.communicate()
+
+
+def test_causal_source_hash_rejects_unsafe_snapshot_fd_forms_and_races(
+    causal_parity_audit, tmp_path, monkeypatch
+):
+    relative = causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    roots_to_restore: list[Path] = []
+
+    def sealed_root(name: str, payload: bytes = b"causal-source\n"):
+        root = tmp_path / name
+        target = root / relative
+        target.parent.mkdir(parents=True)
+        target.write_bytes(payload)
+        target.chmod(0o444)
+        directories = [
+            path
+            for path in (root, target.parent, *target.parent.parents)
+            if path == root or path.is_relative_to(root)
+        ]
+        for directory in sorted(set(directories), key=lambda path: len(path.parts), reverse=True):
+            directory.chmod(0o555)
+        roots_to_restore.extend(directories)
+        return root, target
+
+    root, target = sealed_root("bound")
+    wrong_root, _wrong_target = sealed_root("wrong")
+    symlink_root = tmp_path / "symlink-root"
+    symlink_root.mkdir()
+    (symlink_root / relative.parts[0]).symlink_to(
+        root / relative.parts[0], target_is_directory=True
+    )
+    symlink_root.chmod(0o555)
+    roots_to_restore.append(symlink_root)
+    root_fd = os.open(
+        root,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    relative_text = relative.as_posix()
+    bound_source = f"/proc/self/fd/{root_fd}/{relative_text}"
+    try:
+        monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", root)
+        bind_causal_execution_context(
+            causal_parity_audit, monkeypatch, root_fd, root_fd, True, target
+        )
+        assert causal_parity_audit.file_sha256(bound_source) == hashlib.sha256(
+            target.read_bytes()
+        ).hexdigest()
+
+        root.chmod(0o755)
+        try:
+            with pytest.raises(causal_parity_audit.ParityAuditError, match="mode differs"):
+                causal_parity_audit.file_sha256(bound_source)
+        finally:
+            root.chmod(0o555)
+        bind_causal_execution_context(
+            causal_parity_audit, monkeypatch, root_fd, root_fd, True, target
+        )
+
+        malformed = (
+            f"/proc/self/fd/{root_fd}",
+            f"/proc/self/fd/notdecimal/{relative_text}",
+            f"/proc/self/fd/0{root_fd}/{relative_text}",
+            f"/proc/self/fd/{root_fd}/../{relative_text}",
+            f"/proc/self/fd/{root_fd}//{relative_text}",
+            f"/proc/self/fd/{root_fd}/wrong.py",
+            f"/proc/{os.getpid()}/fd/{root_fd}/{relative_text}",
+        )
+        for value in malformed:
+            with pytest.raises(causal_parity_audit.ParityAuditError):
+                causal_parity_audit.file_sha256(value)
+
+        closed_fd = os.dup(root_fd)
+        bind_causal_execution_context(
+            causal_parity_audit, monkeypatch, closed_fd, root_fd, True, target
+        )
+        os.close(closed_fd)
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="unavailable"):
+            causal_parity_audit.file_sha256(
+                f"/proc/self/fd/{closed_fd}/{relative_text}"
+            )
+
+        file_fd = os.open(target, os.O_RDONLY)
+        try:
+            bind_causal_execution_context(
+                causal_parity_audit, monkeypatch, file_fd, root_fd, True, target
+            )
+            with pytest.raises(causal_parity_audit.ParityAuditError, match="type, owner, or mode"):
+                causal_parity_audit.file_sha256(
+                    f"/proc/self/fd/{file_fd}/{relative_text}"
+                )
+        finally:
+            os.close(file_fd)
+
+        wrong_fd = os.open(wrong_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            bind_causal_execution_context(
+                causal_parity_audit, monkeypatch, wrong_fd, root_fd, True, target
+            )
+            with pytest.raises(causal_parity_audit.ParityAuditError, match="identity differs"):
+                causal_parity_audit.file_sha256(
+                    f"/proc/self/fd/{wrong_fd}/{relative_text}"
+                )
+        finally:
+            os.close(wrong_fd)
+
+        reused_token = os.dup(root_fd)
+        os.close(reused_token)
+        replacement_fd = os.open(
+            wrong_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        reused_is_replacement = replacement_fd == reused_token
+        if not reused_is_replacement:
+            os.dup2(replacement_fd, reused_token, inheritable=False)
+        try:
+            bind_causal_execution_context(
+                causal_parity_audit,
+                monkeypatch,
+                reused_token,
+                root_fd,
+                True,
+                target,
+            )
+            with pytest.raises(causal_parity_audit.ParityAuditError, match="identity differs"):
+                causal_parity_audit.file_sha256(
+                    f"/proc/self/fd/{reused_token}/{relative_text}"
+                )
+        finally:
+            os.close(reused_token)
+            if not reused_is_replacement:
+                os.close(replacement_fd)
+
+        monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", symlink_root)
+        symlink_fd = os.open(
+            symlink_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            bind_causal_execution_context(
+                causal_parity_audit,
+                monkeypatch,
+                symlink_fd,
+                symlink_fd,
+                True,
+                target,
+            )
+            with pytest.raises(causal_parity_audit.ParityAuditError, match="cannot open"):
+                causal_parity_audit.file_sha256(
+                    f"/proc/self/fd/{symlink_fd}/{relative_text}"
+                )
+        finally:
+            os.close(symlink_fd)
+
+        monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", root)
+        bind_causal_execution_context(
+            causal_parity_audit, monkeypatch, root_fd, root_fd, True, target
+        )
+        real_read = causal_parity_audit.os.read
+        mutated = False
+
+        def replace_named_source(descriptor, size):
+            nonlocal mutated
+            block = real_read(descriptor, size)
+            if block and not mutated:
+                mutated = True
+                target.parent.chmod(0o755)
+                target.rename(target.with_suffix(".authenticated"))
+                target.write_bytes(b"replacement!!\n")
+                target.chmod(0o444)
+                target.parent.chmod(0o555)
+            return block
+
+        monkeypatch.setattr(causal_parity_audit.os, "read", replace_named_source)
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="changed while hashing"):
+            causal_parity_audit.file_sha256(bound_source)
+        assert mutated
+    finally:
+        os.close(root_fd)
+        for directory in roots_to_restore:
+            directory.chmod(0o755)
+
+
+def test_causal_source_directory_fstat_failures_do_not_leak_fds(
+    causal_parity_audit, tmp_path, monkeypatch
+):
+    def fd_count():
+        return len(os.listdir("/proc/self/fd"))
+
+    before = fd_count()
+    real_open = os.open
+    real_fstat = os.fstat
+    tracked: set[int] = set()
+
+    def track_component_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None:
+            tracked.add(descriptor)
+        return descriptor
+
+    def fail_tracked_fstat(descriptor):
+        if descriptor in tracked:
+            raise OSError("injected component fstat failure")
+        return real_fstat(descriptor)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(causal_parity_audit.os, "open", track_component_open)
+        patch.setattr(causal_parity_audit.os, "fstat", fail_tracked_fstat)
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="cannot open"):
+            causal_parity_audit._open_absolute_directory(tmp_path, "test directory")
+    assert fd_count() == before
+
+    relative = causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    root = tmp_path / "live"
+    source = root / relative
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"fd-leak-test\n")
+    monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", root)
+    root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    bind_causal_execution_context(
+        causal_parity_audit, monkeypatch, root_fd, root_fd, False, source
+    )
+    root_info = os.fstat(root_fd)
+    before = fd_count()
+    tracked.clear()
+
+    def expected_root(_path, _label):
+        return os.dup(root_fd), root_info
+
+    with monkeypatch.context() as patch:
+        patch.setattr(causal_parity_audit, "_open_absolute_directory", expected_root)
+        patch.setattr(causal_parity_audit.os, "open", track_component_open)
+        patch.setattr(causal_parity_audit.os, "fstat", fail_tracked_fstat)
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="cannot open"):
+            causal_parity_audit.file_sha256(
+                f"/proc/self/fd/{root_fd}/{relative.as_posix()}"
+            )
+    assert fd_count() == before
+    os.close(root_fd)
+
+
+def test_causal_live_source_hash_rejects_writable_permissions(
+    causal_parity_audit, tmp_path, monkeypatch
+):
+    relative = causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    root = tmp_path / "live"
+    source = root / relative
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"live-causal-source\n")
+    monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", root)
+    root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    fd_source = f"/proc/self/fd/{root_fd}/{relative.as_posix()}"
+    try:
+        bind_causal_execution_context(
+            causal_parity_audit, monkeypatch, root_fd, root_fd, False, source
+        )
+        assert causal_parity_audit.file_sha256(fd_source) == hashlib.sha256(
+            source.read_bytes()
+        ).hexdigest()
+        for path, unsafe_mode, safe_mode in (
+            (root, 0o775, 0o755),
+            (source.parent, 0o775, 0o755),
+            (source, 0o664, 0o644),
+        ):
+            bind_causal_execution_context(
+                causal_parity_audit, monkeypatch, root_fd, root_fd, False, source
+            )
+            path.chmod(unsafe_mode)
+            try:
+                with pytest.raises(causal_parity_audit.ParityAuditError):
+                    causal_parity_audit.file_sha256(fd_source)
+            finally:
+                path.chmod(safe_mode)
+    finally:
+        os.close(root_fd)
+
+
+@pytest.mark.parametrize("surface", ("root", "directory", "file"))
+def test_causal_live_source_hash_rejects_mode_change_during_read(
+    causal_parity_audit, tmp_path, monkeypatch, surface
+):
+    relative = causal_parity_audit.AUDIT_SOURCE_RELATIVE
+    root = tmp_path / surface
+    source = root / relative
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"live-causal-mode-race\n")
+    monkeypatch.setattr(causal_parity_audit, "PROJECT_ROOT", root)
+    target = {"root": root, "directory": source.parent, "file": source}[surface]
+    changed_mode = {"root": 0o700, "directory": 0o700, "file": 0o600}[surface]
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    fd_source = f"/proc/self/fd/{root_fd}/{relative.as_posix()}"
+    real_read = causal_parity_audit.os.read
+    mutated = False
+    bind_causal_execution_context(
+        causal_parity_audit, monkeypatch, root_fd, root_fd, False, source
+    )
+
+    def change_mode(descriptor, size):
+        nonlocal mutated
+        block = real_read(descriptor, size)
+        if block and not mutated:
+            mutated = True
+            target.chmod(changed_mode)
+        return block
+
+    monkeypatch.setattr(causal_parity_audit.os, "read", change_mode)
+    try:
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="changed while hashing"):
+            causal_parity_audit.file_sha256(fd_source)
+        assert mutated
+    finally:
+        os.close(root_fd)
+        target.chmod(original_mode)
+
+
+@pytest.mark.parametrize("surface", ("snapshot", "venv-site"))
+def test_isolated_bootstrap_pins_import_surfaces_after_preimport_validation(
+    submit, tmp_path, surface
+):
+    identity = interpreter_identity(submit)
+    root = tmp_path / "snapshot"
+    vsite = tmp_path / "venv-site"
+    bsite = tmp_path / "base-site"
+    for directory in (root, vsite, bsite):
+        directory.mkdir()
+    identity["venv_site_packages"] = str(vsite)
+    identity["base_site_packages"] = str(bsite)
+    marker = tmp_path / "target-started"
+    gate = tmp_path / "continue-import"
+    main_source = (
+        "import os, sys, time\n"
+        "with open(sys.argv[1], 'w', encoding='utf-8') as stream: stream.write('ready')\n"
+        "while not os.path.exists(sys.argv[2]): time.sleep(0.01)\n"
+        "import exp23_unclaimed_swap_helper_7fd3\n"
+    )
+    main = root / "main.py"
+    main.write_text(main_source, encoding="utf-8")
+    inventory = {"main.py": submit.file_sha256(main)}
+    main.chmod(0o444)
+    root.chmod(0o555)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    if surface == "snapshot":
+        (replacement / "main.py").write_text(main_source, encoding="utf-8")
+        (replacement / "main.py").chmod(0o444)
+    (replacement / "exp23_unclaimed_swap_helper_7fd3.py").write_text(
+        "print('HELPER=INJECTED')\n", encoding="utf-8"
+    )
+    (replacement / "exp23_unclaimed_swap_helper_7fd3.py").chmod(0o444)
+    replacement.chmod(0o555 if surface == "snapshot" else 0o755)
+    command = submit.isolated_python_command(
+        [identity["lexical_executable"], str(main), str(marker), str(gate)],
+        root,
+        identity,
+        intercept_python_children=False,
+        snapshot_inventory=inventory,
+    )
+    process = subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), process.communicate(timeout=1)[1]
+        if surface == "snapshot":
+            root.rename(tmp_path / "authenticated-snapshot")
+            replacement.rename(root)
+        else:
+            vsite.rename(tmp_path / "authenticated-venv-site")
+            replacement.rename(vsite)
+        gate.write_text("continue", encoding="ascii")
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode != 0, (stdout, stderr)
+        assert "HELPER=INJECTED" not in stdout
+    finally:
+        if process.poll() is None:
+            gate.write_text("continue", encoding="ascii")
+            process.kill()
+            process.communicate()
+        for directory in tmp_path.iterdir():
+            if directory.is_dir() and not directory.is_symlink():
+                directory.chmod(0o755)
 
 
 def test_snapshot_inventory_rejects_parent_symlink(submit, tmp_path):
@@ -862,6 +1617,410 @@ def test_prefix_audit_reuses_authenticated_weight_and_external_maps(
     assert "torch.load(" not in source
 
 
+def test_weight_leaf_and_checkpoint_fifo_reject_promptly(weight_audit, tmp_path):
+    fifo = tmp_path / "artifact.fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(weight_audit.AuditError):
+        weight_audit.file_sha256(fifo)
+
+    run = tmp_path / "run"
+    checkpoints = run / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    os.mkfifo(checkpoints / "latest.pt")
+    with pytest.raises(weight_audit.AuditError):
+        weight_audit._open_checkpoint(run)
+
+
+def test_weight_private_checkpoint_detects_loader_mutation(weight_audit, tmp_path):
+    run = tmp_path / "run"
+    checkpoint = run / "checkpoints" / "latest.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"AAAA")
+    expected = hashlib.sha256(b"AAAA").hexdigest()
+
+    class MutatingTorch:
+        @staticmethod
+        def load(handle, **_kwargs):
+            assert os.pwrite(handle.fileno(), b"BBBB", 0) == 4
+            os.fsync(handle.fileno())
+            return {"forged": True}
+
+    with pytest.raises(weight_audit.AuditError, match="changed during torch.load"):
+        weight_audit.load_frozen_checkpoint(run, expected, MutatingTorch)
+
+
+def test_weight_run_fingerprint_binds_root_inode(weight_audit, tmp_path):
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "payload").write_bytes(b"same")
+    before = weight_audit._run_fingerprint(root)
+    old = tmp_path / "old-run"
+    root.rename(old)
+    root.mkdir()
+    (old / "payload").rename(root / "payload")
+    after = weight_audit._run_fingerprint(root)
+    assert after != before
+
+
+def test_weight_run_fingerprint_projects_symlink_inode_and_text_not_target(
+    weight_audit, tmp_path
+):
+    run = tmp_path / "run"
+    outside = tmp_path / "outside"
+    outside_dir = outside / "directory"
+    run.mkdir()
+    wandb = run / "wandb"
+    wandb.mkdir()
+    outside_dir.mkdir(parents=True)
+    outside_file = outside / "file.bin"
+    outside_file.write_bytes(b"AAAA")
+    (outside_dir / "payload.bin").write_bytes(b"BBBB")
+    (wandb / "file-link").symlink_to("../../outside/file.bin")
+    (wandb / "directory-link").symlink_to(
+        "../../outside/directory", target_is_directory=True
+    )
+    (wandb / "external-absolute-link").symlink_to(outside_file)
+    (wandb / "dangling-link").symlink_to("missing-target")
+    inode_link = wandb / "same-text-new-inode"
+    inode_link.symlink_to("missing-same-target")
+
+    baseline = weight_audit._run_fingerprint(run)
+    assert weight_audit._run_fingerprint(run) == baseline
+
+    # A link is historical metadata, never an alternate content/import root.
+    outside_file.write_bytes(b"CCCC")
+    (outside_dir / "payload.bin").write_bytes(b"DDDD")
+    outside_dir.chmod(0)
+    try:
+        assert weight_audit._run_fingerprint(run) == baseline
+    finally:
+        outside_dir.chmod(0o755)
+
+    text_link = wandb / "dangling-link"
+    text_link.unlink()
+    text_link.symlink_to("different-missing-target")
+    assert weight_audit._run_fingerprint(run) != baseline
+
+    before_inode_swap = weight_audit._run_fingerprint(run)
+    held = os.open(inode_link, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        inode_link.unlink()
+        inode_link.symlink_to("missing-same-target")
+        assert weight_audit._run_fingerprint(run) != before_inode_swap
+    finally:
+        os.close(held)
+
+
+def test_weight_run_fingerprint_rejects_concurrent_symlink_replacement(
+    weight_audit, tmp_path, monkeypatch
+):
+    run = tmp_path / "run"
+    wandb = run / "wandb"
+    wandb.mkdir(parents=True)
+    link = wandb / "debug.log"
+    link.symlink_to("original-target")
+    real_readlink = weight_audit.os.readlink
+    attacked = False
+
+    def replace_after_open(path, *, dir_fd=None):
+        nonlocal attacked
+        if path == b"" and not attacked:
+            attacked = True
+            link.unlink()
+            link.symlink_to("replacement-target")
+        return real_readlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(weight_audit.os, "readlink", replace_after_open)
+    with pytest.raises(weight_audit.AuditError, match="symlink changed|directory changed"):
+        weight_audit._run_fingerprint(run)
+    assert attacked
+
+
+def test_weight_run_fingerprint_rejects_post_read_consumed_launch_symlink(
+    weight_audit, tmp_path
+):
+    run = tmp_path / "run"
+    run.mkdir()
+    launch = run / "GAUGE_PILOT_V2_LAUNCH.json"
+    payload = b'{"sealed":true}\n'
+    launch.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    assert weight_audit.read_json(
+        launch, expected_sha256=digest, label="synthetic consumed launch"
+    ) == {"sealed": True}
+    identical = tmp_path / "identical-launch.json"
+    identical.write_bytes(payload)
+    launch.unlink()
+    launch.symlink_to(identical)
+    with pytest.raises(weight_audit.AuditError, match="non-W&B symlink"):
+        weight_audit._run_fingerprint(run)
+
+
+def test_causal_output_projection_ignores_only_sealed_submission_state(
+    causal_parity_audit, tmp_path
+):
+    assert "_verify_output_projection_regression()" in inspect.getsource(
+        causal_parity_audit.run
+    )
+    absent = tmp_path / "absent"
+    baseline = causal_parity_audit._output_tree_fingerprint(absent)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert causal_parity_audit._output_tree_fingerprint(empty) == baseline
+
+    claimed = tmp_path / "claimed"
+    snapshot = claimed / "state" / "submission" / "source-snapshot" / "repo"
+    journal = claimed / "state" / "submission" / "journal"
+    snapshot.mkdir(parents=True)
+    journal.mkdir()
+    (snapshot / "sealed.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (journal / "0000_CLAIMED.json").write_text("{}\n", encoding="utf-8")
+    assert causal_parity_audit._output_tree_fingerprint(claimed) == baseline
+
+    unexpected_state = tmp_path / "unexpected-state"
+    (unexpected_state / "state" / "submission").mkdir(parents=True)
+    (unexpected_state / "state" / "scientific-write.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert causal_parity_audit._output_tree_fingerprint(unexpected_state) != baseline
+
+    scientific = tmp_path / "scientific"
+    cell = scientific / "antmaze-large" / "GS" / "seed110"
+    cell.mkdir(parents=True)
+    (cell / "metrics.jsonl").write_text("{}\n", encoding="utf-8")
+    assert causal_parity_audit._output_tree_fingerprint(scientific) != baseline
+
+    hostile = tmp_path / "hostile"
+    hostile_submission = hostile / "state" / "submission"
+    hostile_submission.mkdir(parents=True)
+    (hostile_submission / "escape").symlink_to(tmp_path / "outside")
+    with pytest.raises(causal_parity_audit.ParityAuditError, match="contains symlink"):
+        causal_parity_audit._output_tree_fingerprint(hostile)
+
+    invalid_submission = tmp_path / "invalid-submission"
+    (invalid_submission / "state").mkdir(parents=True)
+    (invalid_submission / "state" / "submission").write_text("bad\n", encoding="utf-8")
+    with pytest.raises(causal_parity_audit.ParityAuditError, match="root is not a directory"):
+        causal_parity_audit._output_tree_fingerprint(invalid_submission)
+
+
+def test_security_walkers_reject_unreadable_hidden_and_special_entries(
+    submit, causal_parity_audit, report, cancel, weight_audit, tmp_path
+):
+    walkers = (
+        (lambda root: submit._secure_tree_rows(root, "test tree"), submit.SubmissionError, True),
+        (causal_parity_audit._secure_output_rows, causal_parity_audit.ParityAuditError, True),
+        (lambda root: report._secure_tree_rows(root, "test tree", hash_files=True), report.ReportError, True),
+        (lambda root: cancel._secure_tree_rows(root, "test tree"), cancel.CancellationError, True),
+        (weight_audit._run_fingerprint, weight_audit.AuditError, True),
+    )
+    for walker_index, (walker, error, rejects_symlink) in enumerate(walkers):
+        unreadable = tmp_path / f"walker-{walker_index}-unreadable"
+        hidden = unreadable / ".hidden"
+        hidden.mkdir(parents=True)
+        (hidden / "escape").symlink_to(tmp_path / "outside")
+        hidden.chmod(0)
+        try:
+            with pytest.raises(error):
+                walker(unreadable)
+        finally:
+            hidden.chmod(0o700)
+
+        symlink_root = tmp_path / f"walker-{walker_index}-symlink"
+        symlink_root.mkdir()
+        (symlink_root / ".hidden-link").symlink_to(tmp_path / "outside")
+        if rejects_symlink:
+            with pytest.raises(error):
+                walker(symlink_root)
+        else:
+            walker(symlink_root)
+
+        fifo_root = tmp_path / f"walker-{walker_index}-fifo"
+        fifo_root.mkdir()
+        os.mkfifo(fifo_root / "blocked")
+        with pytest.raises(error):
+            walker(fifo_root)
+
+        socket_root = tmp_path / f"walker-{walker_index}-socket"
+        socket_root.mkdir()
+        endpoint = socket_root / "endpoint.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(str(endpoint))
+            with pytest.raises(error):
+                walker(socket_root)
+        finally:
+            server.close()
+
+        hardlink_root = tmp_path / f"walker-{walker_index}-hardlink"
+        hardlink_root.mkdir()
+        outside = tmp_path / f"walker-{walker_index}-outside-file"
+        outside.write_bytes(b"shared")
+        os.link(outside, hardlink_root / "shared")
+        with pytest.raises(error):
+            walker(hardlink_root)
+
+
+def test_security_existence_probes_reject_inaccessible_and_enotdir(
+    submit, causal_parity_audit, report, cancel, worker, tmp_path
+):
+    missing = tmp_path / "genuine-enoent"
+    assert not submit._lexical_exists(missing)
+    assert not causal_parity_audit._lexical_exists(missing, "missing test entry")
+    assert not report._lexical_exists(missing)
+    assert not cancel._lexical_exists(missing)
+    assert not worker.lexical_exists(missing)
+
+    blocked = tmp_path / "blocked"
+    hidden_run = blocked / "run"
+    (hidden_run / "setting").mkdir(parents=True)
+    (hidden_run / "setting" / "payload.bin").write_bytes(b"scientific")
+    blocked.chmod(0)
+    inaccessible_manifest = {
+        "paths": {"run_root": str(hidden_run)},
+        "design": {"settings": ["setting"]},
+    }
+    try:
+        with pytest.raises(submit.SubmissionError, match="determine whether"):
+            submit._output_tree_fingerprint(inaccessible_manifest)
+        with pytest.raises(submit.SubmissionError, match="determine whether"):
+            submit._scientific_output_fingerprint(inaccessible_manifest)
+        with pytest.raises(submit.SubmissionError, match="determine whether"):
+            submit._namespace_is_fresh(
+                inaccessible_manifest, tmp_path / "absent-submission"
+            )
+        with pytest.raises(causal_parity_audit.ParityAuditError, match="determine whether"):
+            causal_parity_audit._output_tree_fingerprint(hidden_run)
+        for probe, error in (
+            (report._lexical_exists, report.ReportError),
+            (cancel._lexical_exists, cancel.CancellationError),
+            (worker.lexical_exists, worker.LifecycleError),
+        ):
+            with pytest.raises(error, match="determine whether"):
+                probe(hidden_run)
+    finally:
+        blocked.chmod(0o755)
+
+    regular_parent = tmp_path / "regular-parent"
+    regular_parent.write_text("not a directory", encoding="utf-8")
+    enotdir_run = regular_parent / "run"
+    enotdir_manifest = {
+        "paths": {"run_root": str(enotdir_run)},
+        "design": {"settings": ["setting"]},
+    }
+    with pytest.raises(submit.SubmissionError, match="determine whether"):
+        submit._output_tree_fingerprint(enotdir_manifest)
+    with pytest.raises(submit.SubmissionError, match="determine whether"):
+        submit._scientific_output_fingerprint(enotdir_manifest)
+    with pytest.raises(submit.SubmissionError, match="determine whether"):
+        submit._namespace_is_fresh(enotdir_manifest, tmp_path / "still-absent")
+    with pytest.raises(causal_parity_audit.ParityAuditError, match="determine whether"):
+        causal_parity_audit._output_tree_fingerprint(enotdir_run)
+    for probe, error in (
+        (report._lexical_exists, report.ReportError),
+        (cancel._lexical_exists, cancel.CancellationError),
+        (worker.lexical_exists, worker.LifecycleError),
+    ):
+        with pytest.raises(error, match="determine whether"):
+            probe(enotdir_run)
+
+
+def test_security_type_checks_use_authenticated_lstat_and_strict_resolution(
+    submit, causal_parity_audit, report, cancel, tmp_path, monkeypatch
+):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    expected_python = Path(manifest["paths"]["python"])
+    expected_target = os.readlink(expected_python)
+    monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
+    identity = submit.interpreter_contract(manifest)
+    assert identity["lexical_symlink_target"] == expected_target
+    for function in (
+        submit.interpreter_contract,
+        report.activate_isolated_runtime,
+        cancel.activate_isolated_runtime,
+    ):
+        assert ".is_symlink(" not in inspect.getsource(function)
+
+    fake_project = tmp_path / "project"
+    fake_project.mkdir()
+    (fake_project / "scripts").write_text("not a directory", encoding="utf-8")
+    launch = {
+        "argv": ["python", str(fake_project / "scripts" / "train.py"), "x=y"]
+    }
+    with pytest.raises(causal_parity_audit.ParityAuditError, match="determine whether"):
+        causal_parity_audit._launch_pair_identity(launch, project_root=fake_project)
+    assert ".is_symlink(" not in inspect.getsource(causal_parity_audit)
+
+
+def test_content_fingerprints_catch_held_fd_same_size_mtime_mutation(
+    submit, causal_parity_audit, report, cancel, weight_audit, tmp_path
+):
+    run_root = tmp_path / "run"
+    setting = run_root / "setting"
+    setting.mkdir(parents=True)
+    payload = setting / "payload.bin"
+    payload.write_bytes(b"AAAA")
+    manifest = {
+        "paths": {"run_root": str(run_root)},
+        "design": {"settings": ["setting"]},
+    }
+
+    def fingerprints():
+        return {
+            "submit-full": submit._output_tree_fingerprint(manifest),
+            "submit-scientific": submit._scientific_output_fingerprint(manifest),
+            "causal": causal_parity_audit._output_tree_fingerprint(run_root),
+            "report": report.stable_hash(
+                report._secure_tree_rows(run_root, "test tree", hash_files=True)
+            ),
+            "cancel": cancel.stable_hash(cancel._secure_tree_rows(run_root, "test tree")),
+            "weight": weight_audit._run_fingerprint(run_root),
+        }
+
+    before = fingerprints()
+    original = payload.stat()
+    descriptor = os.open(payload, os.O_WRONLY)
+    try:
+        assert os.pwrite(descriptor, b"BBBB", 0) == 4
+        os.fsync(descriptor)
+        os.utime(payload, ns=(original.st_atime_ns, original.st_mtime_ns))
+        after = fingerprints()
+    finally:
+        os.close(descriptor)
+    assert set(before) == set(after)
+    assert all(after[name] != before[name] for name in before)
+
+
+def test_snapshot_cleanup_descends_mode_zero_without_chmodding_symlink_target(
+    submit, tmp_path
+):
+    root = tmp_path / "private"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    payload = nested / "payload"
+    payload.write_bytes(b"x")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    outside.chmod(0o640)
+    (nested / "escape").symlink_to(outside)
+    payload.chmod(0)
+    nested.chmod(0)
+    root.chmod(0)
+    anomalies = submit._restore_private_tree_modes(root, "test private tree")
+    assert anomalies == ["symlink:nested/escape"]
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o700
+    assert stat.S_IMODE(payload.stat().st_mode) == 0o600
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o640
+
+
+def test_isolated_bootstrap_uses_fd_stable_compiled_script(submit):
+    compile(submit.ISOLATED_RUN_CODE, "<isolated-run-code>", "exec")
+    assert "os.walk" not in submit.ISOLATED_RUN_CODE
+    assert "runpy.run_path" not in submit.ISOLATED_RUN_CODE
+
+
 def test_snapshot_test_uses_production_seal_and_removes_it(
     submit, tmp_path, monkeypatch
 ):
@@ -1146,6 +2305,67 @@ def test_event_parser_excludes_periodic_terminal_eval_collision(report, tmp_path
     assert parsed["scalars"]["train/loss_total"] == {50: 2.0}
 
 
+def _write_test_event(directory: Path, sampler: dict, scalar: float) -> Path:
+    from torch.utils.tensorboard import SummaryWriter
+
+    text = "<pre>" + json.dumps(sampler, sort_keys=True, indent=2) + "</pre>"
+    writer = SummaryWriter(str(directory))
+    writer.add_text("meta/fixed_validation_sample", text, 0)
+    writer.add_scalar("train/loss_total", scalar, 50)
+    writer.flush()
+    writer.close()
+    return next(directory.glob("events.out.tfevents.*"))
+
+
+def test_event_parser_is_bound_to_anonymous_private_fd(
+    report, tmp_path, monkeypatch
+):
+    from tensorboard.backend.event_processing import event_accumulator as accumulator_module
+
+    sampler = {"global_sample_size": 5120, "seed": 1701}
+    live = tmp_path / "live"
+    forged = tmp_path / "forged"
+    live.mkdir()
+    forged.mkdir()
+    _write_test_event(live, sampler, 1.0)
+    forged_bytes = _write_test_event(forged, sampler, 9.0).read_bytes()
+    real_accumulator = accumulator_module.EventAccumulator
+
+    class PathSwapAccumulator(real_accumulator):
+        def Reload(self):
+            # Recreate the predictable private pathname after the authenticated
+            # inode has been unlinked. The parser must remain pinned to its fd.
+            (Path(self.path) / "event-000.tfevents").write_bytes(forged_bytes)
+            return super().Reload()
+
+    monkeypatch.setattr(accumulator_module, "EventAccumulator", PathSwapAccumulator)
+    parsed = report.parse_event_files(live, sampler)
+    assert parsed["scalars"]["train/loss_total"] == {50: 1.0}
+
+
+@pytest.mark.parametrize("corrupt_hparams", [False, True])
+def test_event_parser_rejects_trailing_corrupt_tfrecord(
+    report, tmp_path, corrupt_hparams
+):
+    sampler = {"global_sample_size": 5120, "seed": 1701}
+    live = tmp_path / "live"
+    live.mkdir()
+    training = _write_test_event(live, sampler, 1.0)
+    target = training
+    if corrupt_hparams:
+        from torch.utils.tensorboard import SummaryWriter
+
+        hparams = live / "hparams"
+        writer = SummaryWriter(str(hparams))
+        writer.add_scalar("hparams/metric", 1.0, 0)
+        writer.close()
+        target = next(hparams.glob("events.out.tfevents.*"))
+    with target.open("ab") as handle:
+        handle.write(b"CORRUPT_TRAILING_RECORD")
+    with pytest.raises(report.ReportError, match="TFRecord"):
+        report.parse_event_files(live, sampler)
+
+
 def test_event_parser_rejects_symlink_hparams(report, tmp_path):
     from torch.utils.tensorboard import SummaryWriter
 
@@ -1268,7 +2488,7 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch2",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch3",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",

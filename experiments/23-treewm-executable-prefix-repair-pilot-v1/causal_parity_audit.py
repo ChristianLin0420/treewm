@@ -20,13 +20,33 @@ import json
 import os
 from pathlib import Path
 import random
+import stat
 import sys
+import tempfile
 from typing import Any, Mapping
 
 
 sys.dont_write_bytecode = True
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parents[1]
+AUDIT_SOURCE_RELATIVE = PACKAGE_DIR.relative_to(PROJECT_ROOT) / Path(__file__).name
+BOOTSTRAP_EXECUTION_ROOT_FD = globals().get("__treewm_execution_root_fd__")
+BOOTSTRAP_EXECUTION_ROOT_IDENTITY = globals().get(
+    "__treewm_execution_root_identity__"
+)
+BOOTSTRAP_EXECUTION_ROOT_SEALED = globals().get("__treewm_execution_root_sealed__")
+BOOTSTRAP_EXECUTION_SCRIPT_RELATIVE = globals().get(
+    "__treewm_execution_script_relative__"
+)
+BOOTSTRAP_EXECUTION_SCRIPT_SHA256 = globals().get(
+    "__treewm_execution_script_sha256__"
+)
+BOOTSTRAP_EXECUTION_DIRECTORY_IDENTITIES = globals().get(
+    "__treewm_execution_directory_identities__"
+)
+BOOTSTRAP_EXECUTION_SCRIPT_IDENTITY = globals().get(
+    "__treewm_execution_script_identity__"
+)
 FIXED_BATCH_SIZE = 16
 VALIDATION_SAMPLE_SEED = 1701
 PREFIX_TERMS = (
@@ -92,6 +112,28 @@ class ParityAuditError(RuntimeError):
     pass
 
 
+def _lstat_if_present(path: str | Path, label: str) -> os.stat_result | None:
+    """Return one lexical entry, treating only ENOENT as absence."""
+
+    try:
+        return Path(path).lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ParityAuditError(f"cannot determine whether {label} exists: {exc}") from exc
+
+
+def _lexical_exists(path: str | Path, label: str) -> bool:
+    return _lstat_if_present(path, label) is not None
+
+
+def _resolve_strict(path: str | Path, label: str) -> Path:
+    try:
+        return Path(path).resolve(strict=True)
+    except OSError as exc:
+        raise ParityAuditError(f"cannot resolve {label}: {exc}") from exc
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
 
@@ -100,12 +142,377 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("ascii")).hexdigest()
 
 
+def _open_absolute_directory(path: Path, label: str) -> tuple[int, os.stat_result]:
+    absolute = path.absolute()
+    if (
+        not absolute.is_absolute()
+        or any(part in ("", ".", "..") for part in absolute.parts[1:])
+        or os.fspath(absolute) != os.path.normpath(os.fspath(absolute))
+    ):
+        raise ParityAuditError(f"{label} is not an absolute normalized path")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(absolute.anchor, flags)
+        for part in absolute.parts[1:]:
+            listed = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+            child = os.open(part, flags, dir_fd=descriptor)
+            try:
+                opened = os.fstat(child)
+                if (
+                    not stat.S_ISDIR(listed.st_mode)
+                    or _tree_stat_identity(opened) != _tree_stat_identity(listed)
+                ):
+                    raise ParityAuditError(
+                        f"{label} component raced or is not a directory"
+                    )
+            except BaseException:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        result = descriptor
+        descriptor = None
+        return result, info
+    except OSError as exc:
+        raise ParityAuditError(f"cannot open {label} without symlinks: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _open_snapshot_fd_source(
+    raw: str,
+) -> tuple[
+    int,
+    os.stat_result,
+    int,
+    os.stat_result,
+    tuple[tuple[int, str, int, os.stat_result], ...],
+]:
+    """Open the exact causal source below a retained sealed snapshot-root fd."""
+
+    if (
+        not raw.startswith("/proc/self/fd/")
+        or raw.startswith("//")
+        or "//" in raw
+        or raw != os.path.normpath(raw)
+    ):
+        raise ParityAuditError("snapshot-fd hash source has an unsafe /proc spelling")
+    parts = raw.split("/")
+    if len(parts) < 6 or parts[:4] != ["", "proc", "self", "fd"]:
+        raise ParityAuditError("snapshot-fd hash source has an invalid prefix")
+    fd_token = parts[4]
+    if (
+        not fd_token
+        or not fd_token.isascii()
+        or not fd_token.isdecimal()
+        or (fd_token != "0" and fd_token.startswith("0"))
+    ):
+        raise ParityAuditError("snapshot-fd hash source has a noncanonical descriptor")
+    relative_parts = parts[5:]
+    if not relative_parts or any(part in ("", ".", "..") for part in relative_parts):
+        raise ParityAuditError("snapshot-fd hash source has an unsafe relative path")
+    relative = Path(*relative_parts)
+    if relative != AUDIT_SOURCE_RELATIVE:
+        raise ParityAuditError("snapshot-fd hash source is not the causal auditor")
+    expected_root_identity = BOOTSTRAP_EXECUTION_ROOT_IDENTITY
+    expected_directory_identities = BOOTSTRAP_EXECUTION_DIRECTORY_IDENTITIES
+    expected_script_identity = BOOTSTRAP_EXECUTION_SCRIPT_IDENTITY
+    expected_directory_paths = tuple(
+        Path(*relative.parts[:index]).as_posix()
+        for index in range(1, len(relative.parts))
+    )
+    if (
+        type(BOOTSTRAP_EXECUTION_ROOT_FD) is not int
+        or BOOTSTRAP_EXECUTION_ROOT_FD < 0
+        or int(fd_token, 10) != BOOTSTRAP_EXECUTION_ROOT_FD
+        or not isinstance(expected_root_identity, tuple)
+        or len(expected_root_identity) != 9
+        or not all(type(value) is int for value in expected_root_identity)
+        or type(BOOTSTRAP_EXECUTION_ROOT_SEALED) is not bool
+        or BOOTSTRAP_EXECUTION_SCRIPT_RELATIVE != relative.as_posix()
+        or not isinstance(BOOTSTRAP_EXECUTION_SCRIPT_SHA256, str)
+        or len(BOOTSTRAP_EXECUTION_SCRIPT_SHA256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in BOOTSTRAP_EXECUTION_SCRIPT_SHA256
+        )
+        or not isinstance(expected_directory_identities, tuple)
+        or len(expected_directory_identities) != len(expected_directory_paths)
+        or any(
+            not isinstance(record, tuple)
+            or len(record) != 2
+            or record[0] != expected_directory_paths[index]
+            or not isinstance(record[1], tuple)
+            or len(record[1]) != 9
+            or not all(type(value) is int for value in record[1])
+            for index, record in enumerate(expected_directory_identities)
+        )
+        or not isinstance(expected_script_identity, tuple)
+        or len(expected_script_identity) != 9
+        or not all(type(value) is int for value in expected_script_identity)
+    ):
+        raise ParityAuditError("snapshot-fd execution context is absent or malformed")
+
+    try:
+        root_fd = os.dup(int(fd_token, 10))
+    except (OSError, ValueError) as exc:
+        raise ParityAuditError(f"snapshot-root descriptor is unavailable: {exc}") from exc
+    expected_fd: int | None = None
+    descriptor: int | None = None
+    directory_chain: list[tuple[int, str, int, os.stat_result]] = []
+    root_transferred = False
+    try:
+        root_before = os.fstat(root_fd)
+        root_mode = stat.S_IMODE(root_before.st_mode)
+        sealed_context = BOOTSTRAP_EXECUTION_ROOT_SEALED
+        if (
+            not stat.S_ISDIR(root_before.st_mode)
+            or root_before.st_uid != os.getuid()
+            or root_mode != (0o555 if sealed_context else 0o755)
+        ):
+            raise ParityAuditError("snapshot-root descriptor type, owner, or mode differs")
+        if _tree_stat_identity(root_before) != expected_root_identity:
+            raise ParityAuditError("snapshot-root descriptor identity differs")
+        expected_fd, expected = _open_absolute_directory(
+            PROJECT_ROOT, "expected causal snapshot root"
+        )
+        if _tree_stat_identity(expected) != _tree_stat_identity(root_before):
+            raise ParityAuditError("snapshot-root descriptor identity differs")
+        os.close(expected_fd)
+        expected_fd = None
+
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        current_fd = root_fd
+        relative_directories: list[str] = []
+        for index, part in enumerate(relative.parts[:-1]):
+            listed = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            child = os.open(part, directory_flags, dir_fd=current_fd)
+            try:
+                opened = os.fstat(child)
+                opened_mode = stat.S_IMODE(opened.st_mode)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != os.getuid()
+                    or (
+                        opened_mode != 0o555
+                        if sealed_context
+                        else (
+                            opened_mode & 0o500 != 0o500
+                            or opened_mode & 0o022 != 0
+                            or opened_mode & 0o7000 != 0
+                        )
+                    )
+                    or _tree_stat_identity(opened) != _tree_stat_identity(listed)
+                ):
+                    raise ParityAuditError(
+                        "snapshot-fd source directory raced or is unsafe"
+                    )
+                relative_directories.append(part)
+                if expected_directory_identities[index] != (
+                    "/".join(relative_directories),
+                    _tree_stat_identity(opened),
+                ):
+                    raise ParityAuditError(
+                        "snapshot-fd source directory identity differs from bootstrap"
+                    )
+            except BaseException:
+                os.close(child)
+                raise
+            directory_chain.append((current_fd, part, child, opened))
+            current_fd = child
+        listed_file = os.stat(
+            relative.name, dir_fd=current_fd, follow_symlinks=False
+        )
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=current_fd,
+        )
+        opened_file = os.fstat(descriptor)
+        opened_file_mode = stat.S_IMODE(opened_file.st_mode)
+        if (
+            not stat.S_ISREG(opened_file.st_mode)
+            or opened_file.st_uid != os.getuid()
+            or opened_file.st_nlink != 1
+            or (
+                opened_file_mode != 0o444
+                if sealed_context
+                else (
+                    opened_file_mode & 0o400 == 0
+                    or opened_file_mode & 0o022 != 0
+                    or opened_file_mode & 0o7000 != 0
+                )
+            )
+            or _tree_stat_identity(opened_file) != _tree_stat_identity(listed_file)
+            or _tree_stat_identity(opened_file) != expected_script_identity
+        ):
+            raise ParityAuditError("snapshot-fd causal source raced or is unsafe")
+        result = descriptor
+        descriptor = None
+        root_transferred = True
+        return result, opened_file, root_fd, root_before, tuple(directory_chain)
+    except OSError as exc:
+        raise ParityAuditError(f"cannot open snapshot-fd causal source: {exc}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if expected_fd is not None:
+            os.close(expected_fd)
+        if not root_transferred:
+            for _parent, _name, child, _before in reversed(directory_chain):
+                os.close(child)
+            os.close(root_fd)
+
+
 def file_sha256(path: str | Path) -> str:
+    raw = os.fspath(path)
+    snapshot_root_fd: int | None = None
+    snapshot_root_before: os.stat_result | None = None
+    snapshot_directory_chain: tuple[
+        tuple[int, str, int, os.stat_result], ...
+    ] = ()
+    opened: os.stat_result | None = None
+    if raw.startswith("/proc/") or raw.startswith("//proc/"):
+        (
+            descriptor,
+            opened,
+            snapshot_root_fd,
+            snapshot_root_before,
+            snapshot_directory_chain,
+        ) = _open_snapshot_fd_source(raw)
+        source = Path(raw)
+    else:
+        source = Path(path).absolute()
+        descriptor = None
+    if not source.is_absolute() or any(part in ("", ".", "..") for part in source.parts[1:]):
+        raise ParityAuditError(f"hash source is not an absolute normalized path: {source}")
+    if descriptor is None:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        parent_fd: int | None = None
+        try:
+            parent_fd = os.open(source.anchor, directory_flags)
+            for part in source.parts[1:-1]:
+                child = os.open(part, directory_flags, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = child
+            descriptor = os.open(
+                source.name,
+                os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            if parent_fd is not None:
+                os.close(parent_fd)
+            raise ParityAuditError(f"cannot open regular file for hashing {source}: {exc}") from exc
+        assert descriptor is not None and parent_fd is not None
+        os.close(parent_fd)
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while block := handle.read(16 * 1024 * 1024):
+    try:
+        current = os.fstat(descriptor)
+        if opened is None:
+            opened = current
+        elif _tree_stat_identity(current) != _tree_stat_identity(opened):
+            raise ParityAuditError(f"snapshot-fd source changed before hashing: {source}")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_IMODE(opened.st_mode) & 0o444 == 0
+        ):
+            raise ParityAuditError(
+                f"hash source is not a readable regular nonsymlink file: {source}"
+            )
+        while block := os.read(descriptor, 16 * 1024 * 1024):
             digest.update(block)
-    return digest.hexdigest()
+        after = os.fstat(descriptor)
+        if _tree_stat_identity(after) != _tree_stat_identity(opened):
+            raise ParityAuditError(f"regular file changed while hashing: {source}")
+        if snapshot_root_fd is not None and snapshot_root_before is not None:
+            leaf_parent_fd = (
+                snapshot_directory_chain[-1][2]
+                if snapshot_directory_chain
+                else snapshot_root_fd
+            )
+            named_source = os.stat(
+                AUDIT_SOURCE_RELATIVE.name,
+                dir_fd=leaf_parent_fd,
+                follow_symlinks=False,
+            )
+            if _tree_stat_identity(named_source) != _tree_stat_identity(opened):
+                raise ParityAuditError("snapshot-fd causal source name changed while hashing")
+            for parent_fd, name, child_fd, directory_before in reversed(
+                snapshot_directory_chain
+            ):
+                if _tree_stat_identity(os.fstat(child_fd)) != _tree_stat_identity(
+                    directory_before
+                ):
+                    raise ParityAuditError(
+                        "snapshot-fd source directory changed while hashing"
+                    )
+                named_directory = os.stat(
+                    name, dir_fd=parent_fd, follow_symlinks=False
+                )
+                if _tree_stat_identity(named_directory) != _tree_stat_identity(
+                    directory_before
+                ):
+                    raise ParityAuditError(
+                        "snapshot-fd source directory name changed while hashing"
+                    )
+            if _tree_stat_identity(os.fstat(snapshot_root_fd)) != _tree_stat_identity(
+                snapshot_root_before
+            ):
+                raise ParityAuditError("snapshot root changed while hashing causal source")
+            expected_after_fd, expected_after = _open_absolute_directory(
+                PROJECT_ROOT, "expected causal snapshot root after hashing"
+            )
+            try:
+                if _tree_stat_identity(expected_after) != _tree_stat_identity(
+                    snapshot_root_before
+                ):
+                    raise ParityAuditError(
+                        "named causal snapshot root changed while hashing"
+                    )
+            finally:
+                os.close(expected_after_fd)
+    except OSError as exc:
+        raise ParityAuditError(f"cannot hash regular file {source}: {exc}") from exc
+    finally:
+        os.close(descriptor)
+        for _parent, _name, child, _before in reversed(snapshot_directory_chain):
+            os.close(child)
+        if snapshot_root_fd is not None:
+            os.close(snapshot_root_fd)
+    result = digest.hexdigest()
+    if (
+        snapshot_root_before is not None
+        and result != BOOTSTRAP_EXECUTION_SCRIPT_SHA256
+    ):
+        raise ParityAuditError("snapshot-fd causal source differs from compiled script")
+    return result
 
 
 def _load(name: str, path: Path):
@@ -123,10 +530,11 @@ def _assert_project_module(module: Any, project_root: Path) -> None:
     if not module_file:
         raise ParityAuditError(f"module has no concrete source file: {module!r}")
     path = Path(module_file)
+    info = _lstat_if_present(path, f"project module {path}")
     if (
-        path.is_symlink()
-        or not path.is_file()
-        or not path.resolve().is_relative_to(project_root)
+        info is None
+        or not stat.S_ISREG(info.st_mode)
+        or not _resolve_strict(path, f"project module {path}").is_relative_to(project_root)
     ):
         raise ParityAuditError(f"module is not a regular project-root file: {path}")
 
@@ -163,24 +571,251 @@ def _strip_weights(config: Mapping[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _output_tree_fingerprint(path: Path) -> str:
-    """Hash run-output metadata without reading or mutating live result bytes."""
+def _tree_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
 
-    if not path.exists():
-        return stable_hash({"path": str(path), "exists": False})
+
+def _tree_error(message: str, exc: OSError | None = None) -> None:
+    if exc is None:
+        raise ParityAuditError(message)
+    raise ParityAuditError(f"{message}: {exc}") from exc
+
+
+def _secure_output_rows(root: Path) -> list[dict[str, Any]]:
+    """Return a complete, fd-stable metadata/content inventory of ``root``."""
+
+    try:
+        named_root = root.lstat()
+    except OSError as exc:
+        _tree_error("Exp23 live-output root is unavailable", exc)
+    if stat.S_ISLNK(named_root.st_mode) or not stat.S_ISDIR(named_root.st_mode):
+        _tree_error("Exp23 live-output root is not a nonsymlink directory")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec
+    file_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow | cloexec
+    absolute = root.absolute()
+    if not absolute.is_absolute() or any(
+        part in ("", ".", "..") for part in absolute.parts[1:]
+    ):
+        _tree_error("Exp23 live-output root is not an absolute normalized path")
+    root_fd: int | None = None
+    try:
+        root_fd = os.open(absolute.anchor, directory_flags)
+        for part in absolute.parts[1:]:
+            child_fd = os.open(part, directory_flags, dir_fd=root_fd)
+            os.close(root_fd)
+            root_fd = child_fd
+    except OSError as exc:
+        if root_fd is not None:
+            os.close(root_fd)
+        _tree_error("Exp23 live-output root cannot be opened without symlinks", exc)
+    assert root_fd is not None
     rows: list[dict[str, Any]] = []
-    for candidate in sorted(path.rglob("*"), key=lambda item: str(item)):
-        stat = candidate.lstat()
-        rows.append(
-            {
-                "relative": str(candidate.relative_to(path)),
-                "mode": int(stat.st_mode),
-                "size": int(stat.st_size),
-                "mtime_ns": int(stat.st_mtime_ns),
-                "symlink_target": os.readlink(candidate) if candidate.is_symlink() else None,
-            }
-        )
-    return stable_hash({"path": str(path), "exists": True, "entries": rows})
+
+    def require_directory(info: os.stat_result, relative: Path) -> None:
+        if not stat.S_ISDIR(info.st_mode):
+            _tree_error(f"Exp23 live-output entry is not a directory: {relative}")
+        permissions = stat.S_IMODE(info.st_mode)
+        if permissions & 0o444 == 0 or permissions & 0o111 == 0:
+            _tree_error(f"Exp23 live-output directory is not traversable: {relative}")
+
+    def walk(directory_fd: int, parent: Path, before: os.stat_result) -> None:
+        require_directory(before, parent)
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = []
+                for entry in iterator:
+                    try:
+                        child_info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        _tree_error(
+                            f"Exp23 live-output entry cannot be stated: {parent / entry.name}",
+                            exc,
+                        )
+                    children.append((entry.name, child_info))
+        except OSError as exc:
+            _tree_error(f"Exp23 live-output directory cannot be enumerated: {parent}", exc)
+        if len({name for name, _info in children}) != len(children):
+            _tree_error(f"Exp23 live-output directory has duplicate entries: {parent}")
+        for name, listed in sorted(children, key=lambda value: value[0]):
+            if not isinstance(name, str) or name in ("", ".", "..") or "/" in name:
+                _tree_error("Exp23 live-output entry name is unsafe")
+            relative = parent / name
+            if stat.S_ISLNK(listed.st_mode):
+                _tree_error(f"Exp23 live-output tree contains symlink: {relative}")
+            if stat.S_ISDIR(listed.st_mode):
+                require_directory(listed, relative)
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    _tree_error(f"Exp23 live-output directory cannot be opened: {relative}", exc)
+                try:
+                    opened = os.fstat(child_fd)
+                    if _tree_stat_identity(opened) != _tree_stat_identity(listed):
+                        _tree_error(f"Exp23 live-output directory raced before open: {relative}")
+                    if opened.st_uid != os.getuid():
+                        _tree_error(f"Exp23 live-output directory owner differs: {relative}")
+                    rows.append(
+                        {
+                            "relative": str(relative),
+                            "kind": "directory",
+                            "mode": int(opened.st_mode),
+                            "size": int(opened.st_size),
+                            "mtime_ns": int(opened.st_mtime_ns),
+                        }
+                    )
+                    walk(child_fd, relative, opened)
+                    after = os.fstat(child_fd)
+                    if _tree_stat_identity(after) != _tree_stat_identity(opened):
+                        _tree_error(
+                            f"Exp23 live-output directory changed while traversing: {relative}"
+                        )
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(listed.st_mode):
+                if stat.S_IMODE(listed.st_mode) & 0o444 == 0:
+                    _tree_error(f"Exp23 live-output file is not readable: {relative}")
+                try:
+                    child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    _tree_error(f"Exp23 live-output file cannot be opened: {relative}", exc)
+                digest = hashlib.sha256()
+                try:
+                    opened = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or opened.st_uid != os.getuid()
+                        or opened.st_nlink != 1
+                        or _tree_stat_identity(opened) != _tree_stat_identity(listed)
+                    ):
+                        _tree_error(f"Exp23 live-output file raced before open: {relative}")
+                    try:
+                        while block := os.read(child_fd, 16 * 1024 * 1024):
+                            digest.update(block)
+                        after = os.fstat(child_fd)
+                    except OSError as exc:
+                        _tree_error(f"Exp23 live-output file cannot be read: {relative}", exc)
+                    if _tree_stat_identity(after) != _tree_stat_identity(opened):
+                        _tree_error(f"Exp23 live-output file changed while hashing: {relative}")
+                finally:
+                    os.close(child_fd)
+                rows.append(
+                    {
+                        "relative": str(relative),
+                        "kind": "file",
+                        "mode": int(opened.st_mode),
+                        "size": int(opened.st_size),
+                        "mtime_ns": int(opened.st_mtime_ns),
+                        "sha256": digest.hexdigest(),
+                    }
+                )
+            else:
+                _tree_error(f"Exp23 live-output tree contains special file: {relative}")
+        try:
+            after = os.fstat(directory_fd)
+        except OSError as exc:
+            _tree_error(f"Exp23 live-output directory cannot be restated: {parent}", exc)
+        if _tree_stat_identity(after) != _tree_stat_identity(before):
+            _tree_error(f"Exp23 live-output directory changed while enumerating: {parent}")
+
+    try:
+        opened_root = os.fstat(root_fd)
+        if _tree_stat_identity(opened_root) != _tree_stat_identity(named_root):
+            _tree_error("Exp23 live-output root raced before open")
+        if opened_root.st_uid != os.getuid():
+            _tree_error("Exp23 live-output root owner differs")
+        walk(root_fd, Path(), opened_root)
+        after_root = os.fstat(root_fd)
+        if _tree_stat_identity(after_root) != _tree_stat_identity(opened_root):
+            _tree_error("Exp23 live-output root changed while traversing")
+    finally:
+        os.close(root_fd)
+    rows.sort(key=lambda row: str(row["relative"]))
+    return rows
+
+
+def _output_tree_fingerprint(path: Path) -> str:
+    """Hash output metadata outside the intentional submission transaction tree.
+
+    The copied-tree audit is replayed once before submission and again after the
+    submitter has durably created ``state/submission`` and sealed its source copy.
+    Those transaction bytes are orchestration metadata, not scientific output.
+    Project them out (along with the now-empty logical ``state`` container) so the
+    two legitimate phases have one identity.  Every other output entry remains in
+    the projection, and symlinks/special files fail closed.
+
+    The enclosing snapshot preflight separately fingerprints the complete output
+    tree before and after all audit subprocesses, so a replay still cannot mutate
+    even the intentionally projected transaction subtree without detection.
+    """
+
+    if not _lexical_exists(path, f"Exp23 live-output root {path}"):
+        return stable_hash({"ignored_subtree": "state/submission", "entries": []})
+    all_rows = _secure_output_rows(path)
+    rows: list[dict[str, Any]] = []
+    for row in all_rows:
+        relative = Path(str(row["relative"]))
+        parts = relative.parts
+        if relative == Path("state"):
+            if row["kind"] != "directory":
+                raise ParityAuditError("Exp23 submission-state parent is not a directory")
+            continue
+        if len(parts) >= 2 and parts[:2] == ("state", "submission"):
+            if len(parts) == 2 and row["kind"] != "directory":
+                raise ParityAuditError("Exp23 submission root is not a directory")
+            continue
+        rows.append(row)
+    return stable_hash({"ignored_subtree": "state/submission", "entries": rows})
+
+
+def _verify_output_projection_regression() -> None:
+    """Exercise the absent-versus-post-claim projection in every real audit run."""
+
+    temporary_parent = Path(tempfile.gettempdir())
+    parent_stat = temporary_parent.lstat()
+    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+        raise ParityAuditError("causal-audit temporary parent is not a directory")
+    with tempfile.TemporaryDirectory(
+        prefix=f"treewm-exp23-causal-projection-{os.getuid()}-",
+        dir=temporary_parent,
+    ) as raw_root:
+        probe = Path(raw_root)
+        baseline = _output_tree_fingerprint(probe / "absent")
+        claimed = probe / "claimed"
+        snapshot = claimed / "state" / "submission" / "source-snapshot" / "repo"
+        journal = claimed / "state" / "submission" / "journal"
+        snapshot.mkdir(parents=True)
+        journal.mkdir()
+        (snapshot / "sealed.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (journal / "0000_CLAIMED.json").write_text("{}\n", encoding="utf-8")
+        if _output_tree_fingerprint(claimed) != baseline:
+            raise ParityAuditError(
+                "submission-state projection differs between absent and post-claim roots"
+            )
+        scientific_probe = claimed / "scientific-write.json"
+        scientific_probe.write_text("{}\n", encoding="utf-8")
+        if _output_tree_fingerprint(claimed) == baseline:
+            raise ParityAuditError("submission-state projection hid a scientific write")
+        hostile = claimed / "state" / "submission" / "hostile-symlink"
+        hostile.symlink_to(probe / "outside")
+        try:
+            _output_tree_fingerprint(claimed)
+        except ParityAuditError as exc:
+            if "symlink" not in str(exc):
+                raise
+        else:
+            raise ParityAuditError("submission-state projection accepted a symlink")
 
 
 def _launch_pair_identity(
@@ -189,10 +824,17 @@ def _launch_pair_identity(
     project_root: Path,
 ) -> dict[str, Any]:
     argv = list(launch["argv"])
-    if len(argv) < 3 or Path(argv[1]).resolve() != (project_root / "scripts/train.py"):
+    if len(argv) < 3:
         raise ParityAuditError("controlled launch does not use the exact trainer module")
-    if Path(argv[1]).is_symlink():
-        raise ParityAuditError("controlled trainer entrypoint is a symlink")
+    trainer_path = Path(argv[1])
+    trainer_info = _lstat_if_present(trainer_path, "controlled trainer entrypoint")
+    if (
+        trainer_info is None
+        or not stat.S_ISREG(trainer_info.st_mode)
+        or _resolve_strict(trainer_path, "controlled trainer entrypoint")
+        != (project_root / "scripts/train.py")
+    ):
+        raise ParityAuditError("controlled launch does not use the exact regular trainer module")
     normalized: list[str] = [str(argv[0]), "scripts/train.py"]
     seen: set[str] = set()
     removed_weights: dict[str, str] = {}
@@ -353,13 +995,26 @@ def _arm_audit(
 
 def run(project_root: Path) -> dict[str, Any]:
     # Weight-audit import is first and pins NumPy/torch reduction threads before import.
-    if project_root != PROJECT_ROOT or project_root.is_symlink():
+    project_info = _lstat_if_present(project_root, "causal-audit project root")
+    if (
+        project_root != PROJECT_ROOT
+        or project_info is None
+        or not stat.S_ISDIR(project_info.st_mode)
+    ):
         raise ParityAuditError("audit must use the exact nonsymlink package project root")
+    _verify_output_projection_regression()
     audit = _load("exp23_weight_helpers_for_parity", PACKAGE_DIR / "weight_audit.py")
     campaign = _load("exp23_campaign_for_parity", PACKAGE_DIR / "campaign.py")
     for module in (audit, campaign):
         module_path = Path(module.__file__)
-        if module_path.is_symlink() or not module_path.resolve().is_relative_to(project_root):
+        module_info = _lstat_if_present(module_path, f"audit helper module {module_path}")
+        if (
+            module_info is None
+            or not stat.S_ISREG(module_info.st_mode)
+            or not _resolve_strict(
+                module_path, f"audit helper module {module_path}"
+            ).is_relative_to(project_root)
+        ):
             raise ParityAuditError("audit helper module escapes the exact project root")
 
     import numpy as np

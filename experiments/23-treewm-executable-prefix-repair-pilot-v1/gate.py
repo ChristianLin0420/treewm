@@ -21,7 +21,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = PACKAGE_DIR / "manifest.json"
 PREFIX_TARGET_LOCK = PACKAGE_DIR / "prefix_target.lock.json"

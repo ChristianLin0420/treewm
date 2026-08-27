@@ -82,8 +82,8 @@ SNAPSHOT_IMPORT_FILES = {
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
-SUPERSEDED_LAUNCH = {
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
+SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
         "/lustre/fs11/portfolios/edgeai/projects/"
@@ -139,7 +139,65 @@ SUPERSEDED_LAUNCH = {
     "checkpoints_consumed": False,
     "reuse_allowed": False,
     "resume_allowed": False,
-}
+}, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch2",
+    "run_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+    ),
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2/state/submission"
+    ),
+    "snapshot_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2/state/"
+        "submission/source-snapshot/repo"
+    ),
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch2",
+    "status": "aborted_before_submission_contract",
+    "source_commit": "0fd89949a092bd9bbf12b16e3efb058850d50c86",
+    "source_commit_claimed_by_journal": False,
+    "source_commit_evidence": "independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": (
+        "The preserved journal does not record git provenance. Independent evidence "
+        "proves that all 137 sealed snapshot files match commit "
+        "0fd89949a092bd9bbf12b16e3efb058850d50c86 and that HEAD and origin/main "
+        "equaled that commit with a clean worktree at capture; the journal proves "
+        "only its own claim, snapshot, and pre-contract abort records."
+    ),
+    "package_protocol_sha256": "6472ca50fcbc1eaa35c4388876bf627f0f2c03d8310fd05e336f0204c0f49516",
+    "manifest_canonical_sha256": "d124566d5834a62028f7416756c7cca36e6e63ae256e72d8c7c788412d558b00",
+    "manifest_raw_sha256": "44911238bb06b10b46abbf58a8fe33019e0c107a6d760f8954a9a416382be776",
+    "snapshot": {
+        "inventory_sha256": "4aef86836e7fb683ace18cdd7588fd6b3904bdb9877e5c9a08146e76e49e2a76",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    },
+    "claim_token": "a2ea8575200dc47b4e3de67863a0f429d2397ae35fbbd2e7948e9322ffb64802",
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "journal_sha256": {
+        "0000_CLAIMED.json": "e353f69fb6a397d1095f3f5b81ca717a5887b6d4d55fa0961ca38faa3460b6dc",
+        "0001_SNAPSHOT_SEALED.json": "be9a29c112f56dc0ace53847b99e3892ab964ee410ca2ecfc2a0fd9d39179bdc",
+        "9998_OUTER_ABORTED.json": "48eed85ce12306a35927e3ac8b539be28dc52e107465fac9f5546c378c99cb99",
+    },
+    "submission_sha256": None,
+    "known_job_ids": [],
+    "submission_contract_committed": False,
+    "submission_receipt_committed": False,
+    "scientific_run_started": False,
+    "checkpoint_created": False,
+    "wandb_run_created": False,
+    "optimizer_updates": 0,
+    "results_consumed": False,
+    "checkpoints_consumed": False,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+}]
 
 
 class ContractError(RuntimeError):
@@ -359,7 +417,7 @@ def expand_matrix(manifest: Mapping[str, Any]) -> list[Cell]:
                         env_config=str(setting["env_config"]),
                         arm=arm,
                         seed=seed,
-                        run_name=f"exp23-launch2-{setting['id']}-arm{arm.lower()}-seed{seed}",
+                        run_name=f"exp23-launch3-{setting['id']}-arm{arm.lower()}-seed{seed}",
                     )
                 )
     return result
@@ -908,28 +966,36 @@ def validate_manifest(
     require(manifest.get("status") == "sealed_launch_ready_unsubmitted", "package launch state differs")
     require(manifest.get("formal_validation") is False, "pilot is marked formal")
     require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
-    require(manifest.get("superseded_launch") == SUPERSEDED_LAUNCH, "superseded launch identity differs")
     require(
-        manifest["paths"]["run_root"] != SUPERSEDED_LAUNCH["run_root"]
-        and manifest["paths"]["wandb_project"] != SUPERSEDED_LAUNCH["wandb_project"],
+        manifest.get("superseded_launches") == SUPERSEDED_LAUNCHES,
+        "superseded launch identities differ",
+    )
+    require(
+        all(
+            manifest["paths"]["run_root"] != prior["run_root"]
+            and manifest["paths"]["wandb_project"] != prior["wandb_project"]
+            for prior in SUPERSEDED_LAUNCHES
+        ),
         "superseded namespace was reused",
     )
     require(
         manifest["paths"]["prospective_run_root"]
-        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+        and manifest["paths"]["transaction_lock"]
+        == "outputs/.exp23-6e55bb3083712144.transaction.lock"
         and manifest["paths"]["run_root"]
         == (
             "/lustre/fs11/portfolios/edgeai/projects/"
             "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
-            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
         ),
-        "launch2 run namespace differs",
+        "launch3 run/transaction namespace differs",
     )
     require(
         manifest["paths"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_group"] == CAMPAIGN_ID,
-        "launch2 W&B namespace differs",
+        "launch3 W&B namespace differs",
     )
     require(
         manifest["design"]["fresh_start_policy"].endswith(
@@ -958,8 +1024,8 @@ def validate_manifest(
     cells = expand_matrix(manifest)
     require(len(cells) == 20, "matrix expansion differs")
     require(
-        all(cell.run_name.startswith("exp23-launch2-") for cell in cells),
-        "launch2 run-name namespace differs",
+        all(cell.run_name.startswith("exp23-launch3-") for cell in cells),
+        "launch3 run-name namespace differs",
     )
     launch = manifest["launch_contract"]
     require(launch["array"] == "0-19%20" and launch["array_cells"] == 20, "launch array differs")

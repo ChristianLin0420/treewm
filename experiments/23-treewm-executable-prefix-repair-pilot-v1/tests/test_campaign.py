@@ -39,47 +39,81 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch2-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch3-") for cell in cells)
 
 
-def test_launch2_namespace_and_superseded_precontract_abort_are_exact():
+def test_launch3_namespace_and_ordered_superseded_precontract_aborts_are_exact():
     manifest, lock = contracts()
-    superseded = manifest["superseded_launch"]
-    assert superseded == campaign.SUPERSEDED_LAUNCH
-    assert superseded["source_commit_claimed_by_journal"] is False
-    assert superseded["snapshot"] == {
+    superseded = manifest["superseded_launches"]
+    assert superseded == campaign.SUPERSEDED_LAUNCHES
+    assert [row["campaign_id"] for row in superseded] == [
+        "treewm-executable-prefix-repair-pilot-v1",
+        "treewm-executable-prefix-repair-pilot-v1-launch2",
+    ]
+    launch1, launch2 = superseded
+    assert launch1["source_commit_claimed_by_journal"] is False
+    assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
         "file_count": 137,
         "independently_matched_files": 137,
         "all_files_match": True,
     }
-    assert superseded["submission_sha256"] is None
-    assert superseded["known_job_ids"] == []
-    for key in (
-        "submission_receipt_committed",
-        "scientific_run_started",
-        "checkpoint_created",
-        "wandb_run_created",
-        "results_consumed",
-        "checkpoints_consumed",
-        "reuse_allowed",
-        "resume_allowed",
-    ):
-        assert superseded[key] is False
-    assert superseded["optimizer_updates"] == 0
-    assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+    assert launch2["source_commit"] == "0fd89949a092bd9bbf12b16e3efb058850d50c86"
+    assert launch2["package_protocol_sha256"] == (
+        "6472ca50fcbc1eaa35c4388876bf627f0f2c03d8310fd05e336f0204c0f49516"
     )
-    assert manifest["paths"]["run_root"] != superseded["run_root"]
-    assert manifest["logging"]["wandb_project"].endswith("-launch2")
-    assert manifest["logging"]["wandb_group"].endswith("-launch2")
+    assert launch2["manifest_raw_sha256"] == (
+        "44911238bb06b10b46abbf58a8fe33019e0c107a6d760f8954a9a416382be776"
+    )
+    assert launch2["manifest_canonical_sha256"] == (
+        "d124566d5834a62028f7416756c7cca36e6e63ae256e72d8c7c788412d558b00"
+    )
+    assert launch2["snapshot"] == {
+        "inventory_sha256": "4aef86836e7fb683ace18cdd7588fd6b3904bdb9877e5c9a08146e76e49e2a76",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    }
+    assert launch2["claim_token"] == (
+        "a2ea8575200dc47b4e3de67863a0f429d2397ae35fbbd2e7948e9322ffb64802"
+    )
+    assert launch2["journal_sha256"] == {
+        "0000_CLAIMED.json": "e353f69fb6a397d1095f3f5b81ca717a5887b6d4d55fa0961ca38faa3460b6dc",
+        "0001_SNAPSHOT_SEALED.json": "be9a29c112f56dc0ace53847b99e3892ab964ee410ca2ecfc2a0fd9d39179bdc",
+        "9998_OUTER_ABORTED.json": "48eed85ce12306a35927e3ac8b539be28dc52e107465fac9f5546c378c99cb99",
+    }
+    for row in superseded:
+        assert row["submission_sha256"] is None
+        assert row["known_job_ids"] == []
+        for key in (
+            "submission_receipt_committed",
+            "scientific_run_started",
+            "checkpoint_created",
+            "wandb_run_created",
+            "results_consumed",
+            "checkpoints_consumed",
+            "reuse_allowed",
+            "resume_allowed",
+        ):
+            assert row[key] is False
+        assert row["optimizer_updates"] == 0
+    assert launch2["submission_contract_committed"] is False
+    assert manifest["paths"]["run_root"].endswith(
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+    )
+    assert manifest["paths"]["transaction_lock"] == (
+        "outputs/.exp23-6e55bb3083712144.transaction.lock"
+    )
+    assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
+    assert manifest["logging"]["wandb_project"].endswith("-launch3")
+    assert manifest["logging"]["wandb_group"].endswith("-launch3")
 
     tampered = copy.deepcopy(manifest)
-    tampered["paths"]["run_root"] = superseded["run_root"]
+    tampered["paths"]["run_root"] = launch2["run_root"]
     with pytest.raises(campaign.ContractError):
         campaign.validate_manifest(tampered, lock, REPO)
     tampered = copy.deepcopy(manifest)
-    tampered["superseded_launch"]["resume_allowed"] = True
+    tampered["superseded_launches"][1]["resume_allowed"] = True
     with pytest.raises(campaign.ContractError):
         campaign.validate_manifest(tampered, lock, REPO)
 
