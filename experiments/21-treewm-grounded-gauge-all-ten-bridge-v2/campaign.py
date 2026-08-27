@@ -59,7 +59,7 @@ EXPECTED_UNION_COUNTS = {
     "humanoidmaze-large": (955_698, 95_746),
 }
 EXPECTED_MANIFEST_SECTION_SHA256 = {
-    "prerequisite": "8b639ba620c87e31374b93a4f1475fde57dffa3e7d33388ea8576c0d3e8c78af",
+    "prerequisite": "10eedc38468e5bef85c1be671f43b6dbc7c87d45f9847230a856ff5347a8f413",
     "method": "f173cfba0947dbb4bf41839e29fc55ebe8e576074e53e2d374af8272f8729194",
     "design": "6ee8f7db32083b9ba9514e909371c702e15e93f1018391a49b0e073a0e2f85dd",
     "selected_recipe_contract": "824f0ca90d5d3dc19e35a5b85aec795957e61d1dbd38ddcb62232c29feec9f99",
@@ -195,7 +195,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(manifest.get("formal_validation") is False, "bridge claims formal validation")
     require(manifest.get("expected_runs") == RUNS, "run count differs")
     prerequisite = manifest.get("prerequisite") or {}
-    require(prerequisite.get("campaign_id") == "treewm-grounded-gauge-pilot-v2", "prerequisite is not Exp20")
+    require(prerequisite.get("campaign_id") == "treewm-grounded-gauge-pilot-v2-launch2", "prerequisite is not Exp20 launch2")
     require(prerequisite.get("required_status") == "accepted_for_fresh_formal_campaign_design", "Exp20 status differs")
     require(prerequisite.get("allowed_selected_arms") == ["G", "GS"], "Exp20 selected-arm set differs")
     require(prerequisite.get("selection_precedence") == ["G", "GS"], "Exp20 precedence differs")

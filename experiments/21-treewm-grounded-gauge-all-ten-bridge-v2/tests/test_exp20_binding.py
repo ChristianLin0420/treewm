@@ -107,7 +107,7 @@ def synthetic_stage_5000():
                 rows.append({
                     "index": index,
                     "stage_slot": index,
-                    "run_name": f"gauge-v2-{setting}-arm{arm.lower()}-seed{seed}",
+                    "run_name": f"gauge-v2-launch2-{setting}-arm{arm.lower()}-seed{seed}",
                     "setting_id": setting,
                     "arm_id": arm,
                     "seed": seed,
@@ -212,6 +212,68 @@ def synthetic_acceptance(stage_gate: dict, metrics_by_key: dict):
     }
     gate["gate_sha256"] = campaign.stable_hash(gate)
     return gate
+
+
+def test_exp20_launch_binding_requires_direct_shared_trainer() -> None:
+    setting, arm, seed = RAW["settings"][0], "N", RAW["seeds"][0]
+    run_name = f"gauge-v2-launch2-{setting}-arm{arm.lower()}-seed{seed}"
+    snapshot_repo = bind_exp20._expected_exp20_snapshot_repo(CONTRACT, EXP20_MANIFEST)
+    assert snapshot_repo != campaign.REPOSITORY_ROOT
+    launch = {
+        "campaign_id": CONTRACT["campaign_id"],
+        "formal_validation": False,
+        "run": {
+            "setting_id": setting,
+            "arm_id": arm,
+            "seed": seed,
+            "run_name": run_name,
+            "index": 0,
+        },
+        "hashes": {
+            key: CONTRACT[key]
+            for key in (
+                "manifest_sha256",
+                "package_protocol_sha256",
+                "source_sha256",
+                "runtime_sha256",
+                "actual_evaluation_bank_sha256",
+            )
+        },
+        "argv": [
+            EXP20_MANIFEST["paths"]["python"],
+            str(snapshot_repo / "scripts/train.py"),
+            "experiment=treewm_v2_grounded_gauge_pilot_v2",
+            "objective_version=treewm_v2_grounded_gauge_pilot_v2",
+            "train.steps=25000",
+            "train.scheduler_total_steps=1000000",
+            "resume=auto",
+            "+campaign_factorial_arm=N",
+        ],
+    }
+    launch["launch_sha256"] = campaign.stable_hash(launch)
+    bind_exp20._validate_exp20_launch(
+        launch, CONTRACT, EXP20_MANIFEST, (setting, arm, seed), run_name,
+    )
+
+    arbitrary_snapshot_launch = copy.deepcopy(launch)
+    arbitrary_snapshot_launch["argv"][1] = "/some/other/snapshot/repo/scripts/train.py"
+    arbitrary_snapshot_launch.pop("launch_sha256")
+    arbitrary_snapshot_launch["launch_sha256"] = campaign.stable_hash(arbitrary_snapshot_launch)
+    with pytest.raises(campaign.ContractError, match="exact sealed direct"):
+        bind_exp20._validate_exp20_launch(
+            arbitrary_snapshot_launch, CONTRACT, EXP20_MANIFEST, (setting, arm, seed), run_name,
+        )
+
+    wrapper_launch = copy.deepcopy(launch)
+    wrapper_launch["argv"][1] = str(
+        snapshot_repo / "experiments/20-treewm-grounded-gauge-pilot-v2/train_entry.py"
+    )
+    wrapper_launch.pop("launch_sha256")
+    wrapper_launch["launch_sha256"] = campaign.stable_hash(wrapper_launch)
+    with pytest.raises(campaign.ContractError, match="exact sealed direct"):
+        bind_exp20._validate_exp20_launch(
+            wrapper_launch, CONTRACT, EXP20_MANIFEST, (setting, arm, seed), run_name,
+        )
 
 
 def test_raw_metric_recomputation_rejects_forged_method_boolean() -> None:

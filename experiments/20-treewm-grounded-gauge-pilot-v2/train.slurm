@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-grounded-gauge-pilot-v2
+#SBATCH --job-name=treewm-grounded-gauge-pilot-v2-launch2
 #SBATCH --partition=polar4,polar3,polar,grizzly
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal
@@ -43,7 +43,7 @@ if [[ ! -x "$PYTHON_EXECUTABLE" || ! -x "$SRUN" || ! -x "$SCONTROL" ]]; then
 fi
 
 REQUEUE_TARGET="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
-RUN_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v2
+RUN_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v2-launch2
 TASK_STATE="$RUN_ROOT/state/arrays/stage-$TREEWM_EXPECTED_STAGE_TARGET/array-job-$REQUEUE_TARGET/task-$(printf '%02d' "$SLURM_ARRAY_TASK_ID")"
 GENERATION_DIR="$TASK_STATE/requeue/${SLURM_RESTART_COUNT:-0}"
 CANCEL_LATCH="$TASK_STATE/CANCEL_REQUESTED"

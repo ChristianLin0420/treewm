@@ -1,8 +1,9 @@
 # Exp21: fresh all-ten gauge bridge
 
 This package is a bounded, non-formal successor to Exp20. It is intentionally
-unsealed until Exp20 publishes both immutable 5k and accepted 25k gates. Nothing in
-this package authorizes a 1M run.
+unsealed until the corrected Exp20 launch2 namespace publishes both immutable 5k and
+accepted 25k gates. The failed pre-update Exp20 launch1 namespace is not eligible
+evidence. Nothing in this package authorizes a 1M run.
 
 The fixed design is 10 settings x fresh seeds 106/107 = 20 independent one-GPU runs
 from scratch. `bind_exp20.py` rereads Exp20's raw TensorBoard records, recomputes every

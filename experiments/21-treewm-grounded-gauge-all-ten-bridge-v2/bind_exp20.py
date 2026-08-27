@@ -330,9 +330,64 @@ def _selected_exp20_recipe(exp20_manifest: Mapping[str, Any], arm: str) -> dict[
     return {key: value for key, value in matches[0].items() if key != "promotable"}
 
 
+def _expected_exp20_snapshot_repo(
+    contract: Mapping[str, Any], exp20_manifest: Mapping[str, Any]
+) -> Path:
+    identity = stable_hash({
+        "source_sha256": contract["source_sha256"],
+        "runtime_sha256": contract["runtime_sha256"],
+        "package_protocol_sha256": contract["package_protocol_sha256"],
+    })
+    return (
+        Path(exp20_manifest["paths"]["run_root"])
+        / "state/source-snapshots"
+        / identity
+        / "repo"
+    )
+
+
+def _verify_exp20_source_snapshot(
+    contract: Mapping[str, Any], exp20_manifest: Mapping[str, Any]
+) -> Path:
+    repo = _expected_exp20_snapshot_repo(contract, exp20_manifest)
+    identity = repo.parent.name
+    marker_path = repo.parent / "SNAPSHOT.json"
+    trainer_path = repo / "scripts/train.py"
+    require(repo.is_dir() and not repo.is_symlink(), "Exp20 source snapshot repository missing/linked")
+    require(marker_path.is_file() and not marker_path.is_symlink(), "Exp20 source snapshot marker missing/linked")
+    require(trainer_path.is_file() and not trainer_path.is_symlink(), "Exp20 snapshot direct trainer missing/linked")
+    marker = read_json(marker_path)
+    require(marker.get("schema_version") == 1, "Exp20 snapshot marker schema differs")
+    require(marker.get("status") == "sealed_read_only", "Exp20 snapshot is not sealed read-only")
+    require(marker.get("repo_subdirectory") == "repo", "Exp20 snapshot repository name differs")
+    require(marker.get("repo_files_writable") is False, "Exp20 snapshot marker permits writable files")
+    require(marker.get("formal_validation") is False, "Exp20 snapshot claims formal validation")
+    require(marker.get("trainer_source_sha256") == contract["source_sha256"], "Exp20 snapshot source marker differs")
+    require(marker.get("runtime_sha256") == contract["runtime_sha256"], "Exp20 snapshot runtime marker differs")
+    require(marker.get("package_protocol_sha256") == contract["package_protocol_sha256"], "Exp20 snapshot protocol marker differs")
+    require(marker.get("snapshot_identity_sha256") == identity, "Exp20 snapshot identity marker differs")
+    snapshot_lock = repo / "experiments/20-treewm-grounded-gauge-pilot-v2/protocol.sha256"
+    require(
+        snapshot_lock.is_file()
+        and not snapshot_lock.is_symlink()
+        and snapshot_lock.read_text(encoding="utf-8").strip() == contract["package_protocol_sha256"],
+        "Exp20 snapshot package lock differs",
+    )
+    regular_files = [path for path in repo.rglob("*") if path.is_file()]
+    require(regular_files, "Exp20 source snapshot is empty")
+    require(all(not path.is_symlink() for path in regular_files), "Exp20 source snapshot contains linked files")
+    require(all(path.stat().st_mode & 0o222 == 0 for path in regular_files), "Exp20 source snapshot contains writable files")
+    from treewm.utils.provenance import trainer_code_fingerprint
+
+    source = trainer_code_fingerprint(repo)
+    require(source.get("manifest_sha256") == contract["source_sha256"], "Exp20 snapshot trainer source differs")
+    return repo
+
+
 def _validate_exp20_launch(
     launch: Mapping[str, Any],
     contract: Mapping[str, Any],
+    exp20_manifest: Mapping[str, Any],
     key: tuple[str, str, int],
     run_name: str,
 ) -> None:
@@ -363,10 +418,13 @@ def _validate_exp20_launch(
         f"+campaign_factorial_arm={arm}",
     }
     require(required.issubset(set(argv)), f"Exp20 {run_name} launch recipe/fresh objective differs")
+    trainer_path = Path(argv[1]) if len(argv) >= 2 else Path()
+    expected_trainer_path = _expected_exp20_snapshot_repo(contract, exp20_manifest) / "scripts/train.py"
     require(
         len(argv) >= 2
-        and argv[1].endswith("/experiments/20-treewm-grounded-gauge-pilot-v2/train_entry.py"),
-        f"Exp20 {run_name} did not use its sealed local trainer entry",
+        and argv[0] == exp20_manifest["paths"]["python"]
+        and trainer_path == expected_trainer_path,
+        f"Exp20 {run_name} did not use its exact sealed direct scripts/train.py",
     )
 
 
@@ -378,6 +436,7 @@ def collect_raw_evidence(
     list[dict[str, Any]],
 ]:
     raw = contract["raw_recomputation"]
+    _verify_exp20_source_snapshot(contract, exp20_manifest)
     run_root = Path(str(exp20_manifest["paths"]["run_root"]))
     require(run_root.resolve() == Path(contract["stage_5000_gate_path"]).parents[2].resolve(), "Exp20 run root/gate path differ")
     metrics_by_key: dict[tuple[str, str, int], dict[str, dict[int, float]]] = {}
@@ -386,14 +445,14 @@ def collect_raw_evidence(
         for arm in raw["arms"]:
             for seed in raw["seeds"]:
                 key = (setting, arm, seed)
-                run_name = f"gauge-v2-{setting}-arm{arm.lower()}-seed{seed}"
+                run_name = f"gauge-v2-launch2-{setting}-arm{arm.lower()}-seed{seed}"
                 run_dir = run_root / setting / "treewm" / run_name
                 paths = event_paths(run_dir)
                 launch_path = run_dir / "GAUGE_PILOT_V2_LAUNCH.json"
                 require(launch_path.is_file() and not launch_path.is_symlink(), f"Exp20 launch evidence missing: {launch_path}")
                 launch_file_before = file_sha256(launch_path)
                 launch = read_json(launch_path)
-                _validate_exp20_launch(launch, contract, key, run_name)
+                _validate_exp20_launch(launch, contract, exp20_manifest, key, run_name)
                 event_files = [
                     {"path": str(path.resolve()), "size": path.stat().st_size, "sha256": file_sha256(path)}
                     for path in paths
@@ -458,7 +517,7 @@ def recompute_stage_5000(
         seed_index = raw["seeds"].index(key[2])
         index = ((setting_index * 3) + arm_index) * 2 + seed_index
         require(record.get("index") == index and record.get("stage_slot") == index, f"Exp20 5k {key} index differs")
-        require(record.get("run_name") == f"gauge-v2-{key[0]}-arm{key[1].lower()}-seed{key[2]}", f"Exp20 5k {key} run name differs")
+        require(record.get("run_name") == f"gauge-v2-launch2-{key[0]}-arm{key[1].lower()}-seed{key[2]}", f"Exp20 5k {key} run name differs")
         for hash_key in ("launch_sha256", "identity_sha256", "checkpoint_sha256"):
             require(sha(record.get(hash_key)), f"Exp20 5k {key} bad {hash_key}")
         keyed[key] = record
@@ -577,7 +636,7 @@ def recompute_acceptance(
         stage_slot = setting_index * 4 + (0 if selected_arm == "G" else 2) + seed_index
         prior = stage_5000_rows[key]
         require(row.get("index") == index and row.get("stage_slot") == stage_slot, f"Exp20 selected terminal {key} index/slot differs")
-        require(row.get("run_name") == f"gauge-v2-{key[0]}-arm{key[1].lower()}-seed{key[2]}", f"Exp20 selected terminal {key} run name differs")
+        require(row.get("run_name") == f"gauge-v2-launch2-{key[0]}-arm{key[1].lower()}-seed{key[2]}", f"Exp20 selected terminal {key} run name differs")
         require(row.get("launch_sha256") == prior.get("launch_sha256"), f"Exp20 selected terminal {key} launch changed across stages")
         require(row.get("identity_sha256") == prior.get("identity_sha256"), f"Exp20 selected terminal {key} identity changed across stages")
         require(recompute_health(exp20_manifest, metrics_by_key[key], row, target=25_000)["candidate_passed"], f"Exp20 selected terminal cell {key} failed")

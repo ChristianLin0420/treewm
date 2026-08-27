@@ -96,18 +96,37 @@ TREEWM_V2_OBJECTIVES = frozenset(
         "treewm_v2_grounded_repair_pilot_v1",
         "treewm_v2_grounded_repair_formal_v1",
         "treewm_v2_grounded_gauge_pilot_v1",
+        "treewm_v2_grounded_gauge_pilot_v2",
+        "treewm_v2_grounded_gauge_formal_v1",
     }
 )
 BOUNDED_PILOT_OBJECTIVES = {
     "treewm_v2_grounded_pilot_v1": 20_000,
     "treewm_v2_grounded_repair_pilot_v1": 25_000,
     "treewm_v2_grounded_gauge_pilot_v1": 25_000,
+    "treewm_v2_grounded_gauge_pilot_v2": 25_000,
 }
-LATENT_GAUGE_OBJECTIVES = frozenset({"treewm_v2_grounded_gauge_pilot_v1"})
+LATENT_GAUGE_OBJECTIVES = frozenset(
+    {
+        "treewm_v2_grounded_gauge_pilot_v1",
+        "treewm_v2_grounded_gauge_pilot_v2",
+        "treewm_v2_grounded_gauge_formal_v1",
+    }
+)
 FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
 GAUGE_PILOT_STAGE_UPDATES = frozenset({5_000, 25_000})
 GROUNDED_FORMAL_OBJECTIVES = frozenset(
-    {"treewm_v2_grounded_formal_v1", "treewm_v2_grounded_repair_formal_v1"}
+    {
+        "treewm_v2_grounded_formal_v1",
+        "treewm_v2_grounded_repair_formal_v1",
+        "treewm_v2_grounded_gauge_formal_v1",
+    }
+)
+STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES = frozenset(
+    {
+        "treewm_v2_grounded_repair_formal_v1",
+        "treewm_v2_grounded_gauge_formal_v1",
+    }
 )
 
 
@@ -308,7 +327,7 @@ def validate_latent_gauge_configuration(
     configured_enabled = bool(loss_cfg.enabled.get("latent_gauge", False))
     if (configured_enabled, configured_weight) not in {(False, 0.0), (True, 1.0)}:
         raise ValueError(
-            "the bounded gauge objective requires either monitor-only false/0.0 "
+            "a registered gauge objective requires either monitor-only false/0.0 "
             "or active true/1.0"
         )
     if active and float(loss_cfg.scale("latent_gauge", 0)) != 1.0:
@@ -1068,12 +1087,14 @@ def main(cfg: DictConfig) -> None:
             ),
             required_scheduled_sampling_granularity=(
                 "sequence"
-                if objective_version == "treewm_v2_grounded_repair_formal_v1"
+                if objective_version
+                in STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES
                 else None
             ),
             required_multistep_transition_mode=(
                 "grounded_execution_v2"
-                if objective_version == "treewm_v2_grounded_repair_formal_v1"
+                if objective_version
+                in STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES
                 else None
             ),
             train_cfg=cfg.train,

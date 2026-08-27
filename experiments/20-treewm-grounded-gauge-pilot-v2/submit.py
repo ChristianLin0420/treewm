@@ -41,6 +41,7 @@ from campaign import (
 
 SBATCH_JOB = re.compile(r"^(?P<job_id>[0-9]+)(?:;[A-Za-z0-9_.-]+)?$")
 TRAIN_LINES = (
+    "#SBATCH --job-name=treewm-grounded-gauge-pilot-v2-launch2",
     "#SBATCH --time=04:00:00",
     "#SBATCH --requeue",
     "#SBATCH --signal=B:USR1@420",
@@ -51,8 +52,14 @@ TRAIN_LINES = (
     "#SBATCH --mem=64G",
     "#SBATCH --array=0-29%30",
     f"PYTHON_EXECUTABLE={PINNED_FORMAL_PYTHON}",
+    (
+        "RUN_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_"
+        "image-foundation-model-clip/users/chrislin/projects/treewm/outputs/"
+        "treewm-grounded-gauge-pilot-v2-launch2"
+    ),
 )
 GATE_LINES = (
+    "#SBATCH --job-name=treewm-grounded-gauge-v2-launch2-stage-gate",
     "#SBATCH --partition=cpu",
     "#SBATCH --time=04:00:00",
     "#SBATCH --nodes=1",
@@ -146,6 +153,60 @@ def verify_submit_interpreter(
     if actual.resolve() != expected.resolve():
         raise ContractError(f"submit must run under pinned formal Python {expected}; actual is {actual}")
     return str(expected)
+
+
+def verify_trainer_hydra_composition(
+    manifest: Mapping[str, Any],
+    repo_root: str | Path,
+) -> dict[str, Any]:
+    """Compose one exact sealed launch through the executable used on compute nodes."""
+    root = Path(repo_root).resolve()
+    run = expand_runs(manifest)[0]
+    launch = trainer_command(manifest, run, repo_root=root)
+    expected_prefix = [
+        manifest["paths"]["python"],
+        str(root / "scripts" / "train.py"),
+    ]
+    if launch.get("argv", [])[:2] != expected_prefix:
+        raise ContractError("trainer launch does not invoke scripts/train.py directly")
+    environment = os.environ.copy()
+    environment.update(
+        {str(key): str(value) for key, value in launch["environment"].items()}
+    )
+    try:
+        result = subprocess.run(
+            [*launch["argv"], "--cfg", "job", "--resolve"],
+            cwd=root,
+            env=environment,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ContractError("exact trainer Hydra composition timed out") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-4000:]
+        raise ContractError(
+            f"exact trainer Hydra composition failed ({result.returncode}): {detail}"
+        )
+    required = (
+        f"objective_version: {manifest['method']['objective_version']}",
+        f"run_root: {manifest['paths']['run_root']}",
+        f"run_name: {run.run_name}",
+    )
+    missing = [value for value in required if value not in result.stdout]
+    if missing:
+        raise ContractError(
+            "resolved trainer config lacks sealed launch values: " + ", ".join(missing)
+        )
+    return {
+        "status": "exact_direct_hydra_composition_verified",
+        "executable": expected_prefix,
+        "run_name": run.run_name,
+        "resolved_config_sha256": stable_hash(result.stdout),
+    }
 
 
 def _snapshot_source_paths(repo_root: Path) -> list[Path]:
@@ -286,6 +347,7 @@ def static_test(
     package = repo_root / "experiments" / "20-treewm-grounded-gauge-pilot-v2"
     validate_slurms(package)
     verification = verify_all(manifest, repo_root=repo_root, verify_files=verify_files)
+    trainer_preflight = verify_trainer_hydra_composition(manifest, repo_root)
     return {
         "schema_version": 1,
         "status": "static_package_verified",
@@ -298,6 +360,7 @@ def static_test(
         "stage_25000_slots": verification["stage_25000_slots"],
         "recipe_files_verified": verification["recipe_files_verified"],
         "recipe_coverage_audits": verification["recipe_coverage_audits"],
+        "trainer_preflight": trainer_preflight,
         "namespace_fresh": namespace_is_fresh(manifest),
         "snapshot_created": False,
         "jobs_submitted": 0,
@@ -314,6 +377,7 @@ def launch_plan(
     package = repo_root / "experiments" / "20-treewm-grounded-gauge-pilot-v2"
     validate_slurms(package)
     verification = verify_all(manifest, repo_root=repo_root, verify_files=verify_files)
+    trainer_preflight = verify_trainer_hydra_composition(manifest, repo_root)
     scheduler = (
         verify_scheduler_dependency_policy(manifest["execution"]["scontrol"])
         if inspect_scheduler
@@ -346,6 +410,7 @@ def launch_plan(
         "formal_validation": False,
         "repo_root": str(repo_root),
         "verification": verification,
+        "trainer_preflight": trainer_preflight,
         "scheduler_dependency_policy": scheduler,
         "common_hashes": common,
         "stage_5000_runs": [

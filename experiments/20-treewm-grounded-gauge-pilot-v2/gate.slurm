@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-grounded-gauge-v2-stage-gate
+#SBATCH --job-name=treewm-grounded-gauge-v2-launch2-stage-gate
 #SBATCH --partition=cpu
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal

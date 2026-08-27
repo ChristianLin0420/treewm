@@ -1,10 +1,10 @@
-# Exp20: corrected grounded latent-gauge causal pilot v2
+# Exp20: corrected grounded latent-gauge causal pilot v2 launch2
 
 This is a bounded 5k-to-25k engineering pilot, not formal validation and not evidence for a 1M claim. It supersedes Exp18's gate implementation but consumes no Exp18 result, checkpoint, optimizer, RNG, loader, or metric state.
 
 ## Prospective design
 
-All 30 first-stage cells start from scratch in the fresh Exp20 namespace: five settings × N/G/GS × seeds 108/109.
+All 30 first-stage cells start from scratch in the fresh Exp20 launch2 namespace: five settings × N/G/GS × seeds 108/109. Launch1 job 33147842 failed during Hydra startup before any optimizer update; its output, checkpoint, launch, and W&B namespaces are explicitly ineligible here.
 
 - `N` is the nonpromotable no-gauge causal control.
 - `G` enables the update-zero sealed latent gauge at weight 1 with shared world clipping.
@@ -22,7 +22,7 @@ The 25k array maps all 20 G/GS cells. Only the selected arm's ten cells resume t
 
 `train_5000[30] -> gate_5000 -> train_25000[20] -> gate_25000`
 
-Every edge is `afterok`; submission also verifies `kill_invalid_depend`, sealed package/source/runtime identities, exact mappings, the fresh namespace, and a read-only source snapshot. The new objective exists only inside `train_entry.py`, which rejects any arguments or environment not reproduced by the sealed Exp20 launch contract.
+Every edge is `afterok`; submission also verifies `kill_invalid_depend`, sealed package/source/runtime identities, exact mappings, the fresh namespace, and a read-only source snapshot. The objective is registered in the shared trainer, and every sealed launch invokes the historical working `scripts/train.py` Hydra entrypoint directly. Static and sealed-snapshot launch planning execute that exact command with `--cfg job --resolve` before submission.
 
 Cancellation and requeue signals are durably latched and forwarded to the trainer, never the local `srun` client. A successful worker plus durable completion wins a late cancellation race. A signal arriving before child creation is forwarded immediately after `Popen`.
 

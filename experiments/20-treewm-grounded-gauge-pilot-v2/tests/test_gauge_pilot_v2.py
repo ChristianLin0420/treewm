@@ -64,7 +64,7 @@ def test_exact_stage_mappings_and_fresh_seeds(manifest):
     assert {run.arm_id for run in runs} == {"N", "G", "GS"}
     assert len({run.run_name for run in runs}) == 30
     assert len({run.wandb_id for run in runs}) == 30
-    assert all(run.run_name.startswith("gauge-v2-") for run in runs)
+    assert all(run.run_name.startswith("gauge-v2-launch2-") for run in runs)
     assert (runs[0].setting_id, runs[0].arm_id, runs[0].seed) == (
         "antmaze-large",
         "N",
@@ -144,17 +144,41 @@ def test_actual_outcome_bank_is_exact_25k_periodic_monitor(manifest):
     assert bank["seeds"] == [[2718], [3718], [4718], [5718], [6718]]
 
 
-def test_new_objective_is_available_only_through_sealed_local_entry():
+def test_gauge_objectives_are_registered_in_shared_trainer():
     from scripts import train
 
-    objective = "treewm_v2_grounded_gauge_pilot_v2"
-    with pytest.raises(ValueError, match="unsupported objective_version"):
-        train.validate_objective_version(objective, 25_000)
-    assert {"train_entry.py", "metric_boundary.py"} <= set(campaign.PROTOCOL_FILES)
+    pilot = "treewm_v2_grounded_gauge_pilot_v2"
+    formal = "treewm_v2_grounded_gauge_formal_v1"
+    train.validate_objective_version(pilot, 25_000)
+    with pytest.raises(ValueError, match="bounded diagnostic objective"):
+        train.validate_objective_version(pilot, 25_001)
+    train.validate_objective_version(formal, 1_000_000)
+    with pytest.raises(ValueError, match="exactly 1,000,000"):
+        train.validate_objective_version(formal, 25_000)
+    assert pilot in train.TREEWM_V2_OBJECTIVES
+    assert pilot in train.LATENT_GAUGE_OBJECTIVES
+    assert pilot in train.BOUNDED_PILOT_OBJECTIVES
+    assert formal in train.TREEWM_V2_OBJECTIVES
+    assert formal in train.LATENT_GAUGE_OBJECTIVES
+    assert formal in train.GROUNDED_FORMAL_OBJECTIVES
+    assert formal in train.STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES
+    assert formal not in train.BOUNDED_PILOT_OBJECTIVES
+    assert "train_entry.py" not in campaign.PROTOCOL_FILES
+    assert "metric_boundary.py" in campaign.PROTOCOL_FILES
     config = (
         REPO_ROOT / "configs/experiment/treewm_v2_grounded_gauge_pilot_v2.yaml"
     ).read_text(encoding="utf-8")
-    assert f"objective_version: {objective}" in config
+    assert f"objective_version: {pilot}" in config
+
+
+def test_exact_direct_trainer_hydra_composition(manifest):
+    preflight = submit.verify_trainer_hydra_composition(manifest, REPO_ROOT)
+    assert preflight["status"] == "exact_direct_hydra_composition_verified"
+    assert preflight["executable"] == [
+        manifest["paths"]["python"],
+        str(REPO_ROOT / "scripts" / "train.py"),
+    ]
+    assert preflight["run_name"].startswith("gauge-v2-launch2-")
 
 
 @pytest.mark.parametrize(
@@ -491,8 +515,8 @@ def test_exact_metric_tracker_boundary_is_published_reset_and_idempotent(tmp_pat
     _metric_boundary_checkpoint(checkpoint_path, step=50, tracker_state=tracker.state_dict())
     before = campaign.file_sha256(checkpoint_path)
     launch = {
-        "campaign_id": "treewm-grounded-gauge-pilot-v2",
-        "run": {"run_name": "gauge-v2-test"},
+        "campaign_id": "treewm-grounded-gauge-pilot-v2-launch2",
+        "run": {"run_name": "gauge-v2-launch2-test"},
         "launch_sha256": "a" * 64,
         "metric_boundary_required_tags": ["train/grad_norm_world"],
     }
@@ -532,8 +556,8 @@ def test_partial_metric_tracker_window_is_preserved_for_normal_resume(tmp_path):
     _metric_boundary_checkpoint(checkpoint_path, step=37, tracker_state=tracker.state_dict())
     before = campaign.file_sha256(checkpoint_path)
     launch = {
-        "campaign_id": "treewm-grounded-gauge-pilot-v2",
-        "run": {"run_name": "gauge-v2-test"},
+        "campaign_id": "treewm-grounded-gauge-pilot-v2-launch2",
+        "run": {"run_name": "gauge-v2-launch2-test"},
         "launch_sha256": "b" * 64,
         "metric_boundary_required_tags": ["train/grad_norm_world"],
     }
@@ -569,7 +593,7 @@ def _fake_launch(run):
         "config_sha256": f"{run.index + 200:064x}",
     }
     launch = {
-        "campaign_id": "treewm-grounded-gauge-pilot-v2",
+        "campaign_id": "treewm-grounded-gauge-pilot-v2-launch2",
         "formal_validation": False,
         "run": {
             "index": run.index,
@@ -719,7 +743,7 @@ def test_skip_artifact_is_hash_bound_and_idempotent(monkeypatch, tmp_path):
         "setting_id": "antmaze-large",
         "arm_id": "G",
         "seed": 108,
-        "run_name": "gauge-v2-antmaze-large-armg-seed108",
+        "run_name": "gauge-v2-launch2-antmaze-large-armg-seed108",
     })()
     launch = _fake_launch(run)
     launch["run"]["run_directory"] = str(tmp_path / "run")
@@ -763,7 +787,9 @@ def test_skip_artifact_is_hash_bound_and_idempotent(monkeypatch, tmp_path):
 
 def test_previous_gate_is_immutable_and_selects_per_launch(monkeypatch, tmp_path, manifest):
     changed = copy.deepcopy(manifest)
-    changed["paths"]["run_root"] = str(tmp_path / "treewm-grounded-gauge-pilot-v2")
+    changed["paths"]["run_root"] = str(
+        tmp_path / "outputs" / "treewm-grounded-gauge-pilot-v2-launch2"
+    )
     run = campaign.continuation_runs(changed)[0]
     launch = _fake_launch(run)
     rows = []
@@ -805,6 +831,11 @@ def test_launch_plan_has_exact_staged_dag(monkeypatch, manifest):
     monkeypatch.setattr(submit, "verify_all", lambda *_args, **_kwargs: {"status": "verified"})
     monkeypatch.setattr(
         submit,
+        "verify_trainer_hydra_composition",
+        lambda *_args, **_kwargs: {"status": "verified"},
+    )
+    monkeypatch.setattr(
+        submit,
         "trainer_command",
         lambda _manifest, run, repo_root: _fake_launch(run),
     )
@@ -832,7 +863,13 @@ def test_protocol_lock_slurms_and_namespace_are_isolated(manifest, tmp_path):
         CAMPAIGN_DIR / "protocol.sha256"
     ).read_text(encoding="utf-8").strip()
     submit.validate_slurms(CAMPAIGN_DIR)
-    assert manifest["paths"]["run_root"].endswith("/outputs/treewm-grounded-gauge-pilot-v2")
+    assert manifest["campaign_id"] == "treewm-grounded-gauge-pilot-v2-launch2"
+    assert manifest["paths"]["run_root"].endswith(
+        "/outputs/treewm-grounded-gauge-pilot-v2-launch2"
+    )
+    assert manifest["logging"]["wandb_project"].endswith("-launch2")
+    assert manifest["logging"]["wandb_group"].endswith("-launch2")
+    assert manifest["paths"]["run_root"] != manifest["superseded_launch"]["run_root"]
     changed = copy.deepcopy(manifest)
     changed["paths"]["run_root"] = str(tmp_path / "fresh")
     assert submit.namespace_is_fresh(changed) is True

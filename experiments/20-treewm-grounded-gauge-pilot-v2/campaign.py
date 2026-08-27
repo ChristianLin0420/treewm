@@ -61,7 +61,6 @@ INFERENCE_PROFILES = {
 PROTOCOL_FILES = (
     "manifest.json",
     "campaign.py",
-    "train_entry.py",
     "metric_boundary.py",
     "worker.py",
     "stage_gate.py",
@@ -163,13 +162,36 @@ def load_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
 
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(manifest.get("schema_version") == 1, "manifest schema drifted")
-    require(manifest.get("campaign_id") == "treewm-grounded-gauge-pilot-v2", "campaign ID drifted")
+    require(
+        manifest.get("campaign_id") == "treewm-grounded-gauge-pilot-v2-launch2",
+        "campaign ID drifted",
+    )
     require(manifest.get("classification") == "bounded_causal_gauge_pilot_v2", "classification drifted")
     require(manifest.get("formal_validation") is False, "pilot was mislabeled formal")
     require("not formal validation" in str(manifest.get("claim_policy", "")), "claim guard missing")
     require(manifest.get("expected_stage_5000_runs") == RUNS, "5k fleet size drifted")
     require(manifest.get("expected_stage_25000_slots") == CONTINUATION_RUNS, "25k slot count drifted")
     require(manifest.get("expected_promoted_runs") == PROMOTED_RUNS, "promoted fleet size drifted")
+
+    failed_launch = manifest.get("superseded_launch") or {}
+    require(
+        failed_launch
+        == {
+            "campaign_id": "treewm-grounded-gauge-pilot-v2",
+            "run_root": (
+                "/lustre/fs11/portfolios/edgeai/projects/"
+                "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+                "treewm/outputs/treewm-grounded-gauge-pilot-v2"
+            ),
+            "wandb_project": "treewm-grounded-gauge-pilot-v2",
+            "status": "failed_before_first_optimizer_update",
+            "job_id": "33147842",
+            "results_consumed": False,
+            "checkpoints_consumed": False,
+            "resume_allowed": False,
+        },
+        "superseded launch identity drifted",
+    )
 
     superseded = manifest.get("superseded_design") or {}
     require(superseded.get("campaign_id") == "treewm-grounded-gauge-pilot-v1", "superseded campaign drifted")
@@ -330,8 +352,16 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(lifecycle.get("stage_25000_array") == "0-19%20", "25k array drifted")
     require("SKIPPED_BY_SELECTION" in str(lifecycle.get("stage_25000_nonselected_policy", "")), "durable selection skip missing")
     resume_policy = str(lifecycle.get("resume_policy", ""))
-    require("own exact Exp20 5k checkpoint" in resume_policy, "exact continuation boundary missing")
-    require("Exp18" in resume_policy and "external checkpoints are forbidden" in resume_policy, "external resume exclusion missing")
+    require(
+        "own exact Exp20 launch2 5k checkpoint" in resume_policy,
+        "exact continuation boundary missing",
+    )
+    require(
+        "Exp18" in resume_policy
+        and "failed Exp20 launch1" in resume_policy
+        and "external checkpoints are forbidden" in resume_policy,
+        "external resume exclusion missing",
+    )
     cancellation = str(lifecycle.get("cancellation_policy", ""))
     require("publishes CANCELLED.json before the batch exits" in cancellation, "durable cancellation missing")
     require("never signal the local srun client" in cancellation, "srun cancellation bug not excluded")
@@ -406,10 +436,19 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     for key in ("python", "data_root", "raw_cache_root", "compatible_contract_root", "run_root"):
         require(Path((manifest.get("paths") or {}).get(key, "")).is_absolute(), f"{key} must be absolute")
     require(manifest["paths"]["python"] == PINNED_FORMAL_PYTHON, "Python interpreter drifted")
-    require("grounded-gauge-pilot-v2" in manifest["paths"]["run_root"], "output namespace is not isolated")
+    require(
+        manifest["paths"]["run_root"].endswith(
+            "/outputs/treewm-grounded-gauge-pilot-v2-launch2"
+        ),
+        "launch2 output namespace is not isolated",
+    )
+    require(
+        manifest["paths"]["run_root"] != failed_launch["run_root"],
+        "launch2 reused the failed launch namespace",
+    )
     require(manifest.get("logging") == {
-        "wandb_project": "treewm-grounded-gauge-pilot-v2",
-        "wandb_group": "treewm-grounded-gauge-pilot-v2",
+        "wandb_project": "treewm-grounded-gauge-pilot-v2-launch2",
+        "wandb_group": "treewm-grounded-gauge-pilot-v2-launch2",
         "wandb_mode": "online",
     }, "W&B namespace drifted")
 
@@ -448,7 +487,10 @@ def expand_runs(manifest: Mapping[str, Any]) -> list[RunSpec]:
             for seed_index, seed in enumerate(SEEDS):
                 index = ((setting_index * len(ARM_IDS)) + arm_index) * len(SEEDS) + seed_index
                 require(index == len(result), "array mapping is not contiguous")
-                name = f"gauge-v2-{setting['id']}-arm{arm['id'].lower()}-seed{seed}"
+                name = (
+                    f"gauge-v2-launch2-{setting['id']}-"
+                    f"arm{arm['id'].lower()}-seed{seed}"
+                )
                 wandb_id = stable_hash({
                     "campaign_id": manifest["campaign_id"],
                     "setting_id": setting["id"],
@@ -842,7 +884,7 @@ def trainer_command(
     output = run_directory(manifest, run)
     argv = [
         manifest["paths"]["python"],
-        str(package / "train_entry.py"),
+        str(root / "scripts" / "train.py"),
         *overrides,
         _override("run_root", manifest["paths"]["run_root"]),
         _override("run_name", run.run_name),

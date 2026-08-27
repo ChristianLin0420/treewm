@@ -1,12 +1,22 @@
 {
   "schema_version": 1,
-  "campaign_id": "treewm-grounded-gauge-pilot-v2",
+  "campaign_id": "treewm-grounded-gauge-pilot-v2-launch2",
   "classification": "bounded_causal_gauge_pilot_v2",
   "claim_policy": "This fresh staged 5k-to-25k causal gauge pilot is engineering validation, not formal validation, and cannot support a 1M claim.",
   "formal_validation": false,
   "expected_stage_5000_runs": 30,
   "expected_stage_25000_slots": 20,
   "expected_promoted_runs": 10,
+  "superseded_launch": {
+    "campaign_id": "treewm-grounded-gauge-pilot-v2",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v2",
+    "wandb_project": "treewm-grounded-gauge-pilot-v2",
+    "status": "failed_before_first_optimizer_update",
+    "job_id": "33147842",
+    "results_consumed": false,
+    "checkpoints_consumed": false,
+    "resume_allowed": false
+  },
   "superseded_design": {
     "campaign_id": "treewm-grounded-gauge-pilot-v1",
     "package": "experiments/18-treewm-grounded-gauge-pilot-v1",
@@ -48,7 +58,7 @@
     "promotion_precedence": ["G", "GS"],
     "nonpromotable_arms": ["N"],
     "promotion_policy": "Select G only if all ten G setting/seed cells satisfy every absolute gauge, clipping, integrity, and unchanged method gate plus the paired causal comparison to N; otherwise select GS under the identical universal contract; otherwise reject.",
-    "fresh_start_policy": "All thirty 5k runs start from scratch in an empty namespace. Exp18 results and checkpoints and every other external checkpoint are ineligible."
+    "fresh_start_policy": "All thirty 5k runs start from scratch in an empty launch2 namespace. Exp18 results and checkpoints, the failed Exp20 launch1 namespace and artifacts, and every other external checkpoint are ineligible."
   },
   "arms": [
     {
@@ -138,7 +148,7 @@
     "stage_5000_array": "0-29%30",
     "stage_25000_array": "0-19%20",
     "stage_25000_nonselected_policy": "Publish a hash-bound SKIPPED_BY_SELECTION artifact and return success without launching the trainer.",
-    "resume_policy": "Auto-resume only within this campaign: at 5k a run may use only its own exact Exp20 checkpoint, and at 25k only the selected arm may resume its own exact Exp20 5k checkpoint. N, Exp18, and all other external checkpoints are forbidden.",
+    "resume_policy": "Auto-resume only within this launch2 campaign: at 5k a run may use only its own exact Exp20 launch2 checkpoint, and at 25k only the selected arm may resume its own exact Exp20 launch2 5k checkpoint. N, Exp18, failed Exp20 launch1, and all other external checkpoints are forbidden.",
     "cancellation_policy": "A persistent latch is polled by the remote worker, which signals and waits for its trainer, verifies a graceful exact checkpoint, and publishes CANCELLED.json before the batch exits. The batch must never signal the local srun client, and a durable completed boundary wins a cancellation race.",
     "metric_boundary_policy": "If requeue lands after an exact 50-update boundary was committed but before its MetricTracker flush, the worker transactionally publishes the saved complete-window scalars, resets only the tracker window in the exact-resume checkpoint, and binds both byte identities before requeue."
   },
@@ -214,11 +224,11 @@
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v2"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v2-launch2"
   },
   "logging": {
-    "wandb_project": "treewm-grounded-gauge-pilot-v2",
-    "wandb_group": "treewm-grounded-gauge-pilot-v2",
+    "wandb_project": "treewm-grounded-gauge-pilot-v2-launch2",
+    "wandb_group": "treewm-grounded-gauge-pilot-v2-launch2",
     "wandb_mode": "online"
   },
   "settings": [
