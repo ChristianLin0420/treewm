@@ -104,7 +104,7 @@
       "allowed_selected_arms": ["F", "H"],
       "selection_precedence": ["F", "H"],
       "manifest_sha256": "6028a37b1174bafe04dd20a026f58fe7285158eda14615a3430494ffd27e5fa3",
-      "package_protocol_sha256": "e53b35b5118b45fa5dec416a8c6b662a94bfd989a1f72a10f756fd908c2b3bbe",
+      "package_protocol_sha256": "66584190b2fecef2192d55bf125cdbcd303118eaf9ffd1e31130e99104ad8d3e",
       "source_sha256": "28ebcd66ac25cfb1cbf23359448a065a3f32cd8e5766320e85833eff16f2d74f",
       "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
       "required_selection_quorum": {

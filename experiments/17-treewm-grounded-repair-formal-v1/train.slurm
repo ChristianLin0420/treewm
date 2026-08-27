@@ -68,9 +68,6 @@ on_cancel() {
     fi
     mkdir -p "$TASK_STATE"
     touch "$CANCEL_LATCH"
-    if [[ -n "$step_pid" ]] && kill -0 "$step_pid" 2>/dev/null; then
-        kill -TERM "$step_pid" 2>/dev/null || true
-    fi
 }
 trap on_usr1 USR1
 trap on_cancel TERM INT

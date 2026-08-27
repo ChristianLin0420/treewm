@@ -93,7 +93,11 @@ Each array element requests one GPU, 12 CPUs, and 64G. USR1 is forwarded seven
 minutes before the four-hour limit. Exit 75 is requeued only after the worker loads
 `latest.pt` and verifies optimizer, scheduler, RNG streams, loader cursor,
 checkpoint-manager state, and all launch identities. Cancellation latches take
-precedence. The strict CPU report is submitted `afterok` on the complete array.
+precedence. A batch TERM trap only creates the latch: it deliberately leaves the local
+`srun` client alive while the remote worker observes the latch, checkpoints the
+trainer/evaluator, verifies the durable state, and publishes `CANCELLED.json`. Killing
+the local `srun` client would tear down the remote worker before that receipt exists.
+The strict CPU report is submitted `afterok` on the complete array.
 
 After exp15 has published an accepted report, dry-run with the pinned interpreter
 revalidates and binds it while creating neither a snapshot nor jobs. Before that

@@ -27,7 +27,9 @@ records, and requires exp16's embedded exp15 binding to match the same exact fil
   explicit root-successor predictions, reported as 68 effective world predictions
   per full-budget replan.
 - Every one-GPU task requests 12 CPUs and 64 GiB. Requeue/cancellation state is scoped
-  to the exact array element.
+  to the exact array element. A cancellation signal latches intent without killing the
+  local `srun` client; the remote worker must checkpoint/verify and publish its durable
+  cancellation receipt before the batch may exit.
 
 Every stage requires target-appropriate telemetry: train scalars must reach the exact
 target, while validation/diagnostic scalars must reach the exact registered 2k

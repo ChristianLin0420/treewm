@@ -442,6 +442,9 @@ def test_protocol_slurm_resources_and_lifecycle_are_locked(manifest):
     assert pilot.splitlines().count("#SBATCH --mem=64G") == 1
     assert '"$SCONTROL" requeue "$REQUEUE_TARGET"' in pilot
     assert "CANCEL_REQUESTED" in pilot and "READY_FOR_REQUEUE.json" in pilot
+    cancel_body = pilot.split("on_cancel() {", 1)[1].split("}", 1)[0]
+    assert 'touch "$CANCEL_LATCH"' in cancel_body
+    assert 'kill -TERM "$step_pid"' not in cancel_body
     assert "TREEWM_EXPECTED_EXP15_PREREQUISITE_SHA256" in pilot
     assert 'campaign.py" snapshot' in pilot
     report_slurm = (CAMPAIGN_DIR / "report.slurm").read_text(encoding="utf-8")

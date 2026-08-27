@@ -305,7 +305,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         exp16.get("manifest_sha256")
         == "6028a37b1174bafe04dd20a026f58fe7285158eda14615a3430494ffd27e5fa3"
         and exp16.get("package_protocol_sha256")
-        == "e53b35b5118b45fa5dec416a8c6b662a94bfd989a1f72a10f756fd908c2b3bbe"
+        == "66584190b2fecef2192d55bf125cdbcd303118eaf9ffd1e31130e99104ad8d3e"
         and exp16.get("source_sha256")
         == "28ebcd66ac25cfb1cbf23359448a065a3f32cd8e5766320e85833eff16f2d74f"
         and exp16.get("runtime_sha256")

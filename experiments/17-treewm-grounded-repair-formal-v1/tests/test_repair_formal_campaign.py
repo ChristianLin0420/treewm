@@ -182,6 +182,10 @@ def test_every_dag_launcher_and_resource_contract_is_sealed() -> None:
     assert 'worker returned success without a durable completion artifact' in train
     assert 'if [[ -s "$RESULT_PATH" ]]; then' in final
     assert 'final evaluator returned success without a durable result' in final
+    for launcher in (train, final):
+        cancel_body = launcher.split("on_cancel() {", 1)[1].split("}", 1)[0]
+        assert 'touch "$CANCEL_LATCH"' in cancel_body
+        assert 'kill -TERM "$step_pid"' not in cancel_body
     assert "verify_scheduler_dependency_policy" in (campaign.CAMPAIGN_DIR / "submit.py").read_text(encoding="utf-8")
     assert "launch_plan(snapshot_manifest, snapshot, verify_files=True)" in (campaign.CAMPAIGN_DIR / "submit.py").read_text(encoding="utf-8")
     assert submit.verify_scheduler_dependency_policy("/cm/shared/apps/slurm/current/bin/scontrol")["policy"] == "kill_invalid_depend"
