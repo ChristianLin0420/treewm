@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-grounded-gauge-all-ten-bridge-v2",
+  "status": "unsealed_waiting_for_exp20_acceptance",
+  "launch_allowed": false,
+  "exp20": null,
+  "selected_arm": null,
+  "selected_recipe": null,
+  "selected_recipe_sha256": null,
+  "binding_sha256": null
+}
