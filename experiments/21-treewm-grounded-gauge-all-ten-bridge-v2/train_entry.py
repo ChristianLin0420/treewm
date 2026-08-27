@@ -38,14 +38,29 @@ def verify_exact_invocation() -> None:
         campaign.require(os.environ.get(key) == value, f"trainer environment differs: {key}")
 
 
+def register_objective():
+    """Register the bounded objective and its mandatory cadence checkpoint state."""
+    from scripts import train
+    from treewm.utils import checkpoint as checkpoint_utils
+
+    train.TREEWM_V2_OBJECTIVES = frozenset({*train.TREEWM_V2_OBJECTIVES, OBJECTIVE})
+    train.BOUNDED_PILOT_OBJECTIVES = {
+        **train.BOUNDED_PILOT_OBJECTIVES,
+        OBJECTIVE: 25_000,
+    }
+    train.LATENT_GAUGE_OBJECTIVES = frozenset(
+        {*train.LATENT_GAUGE_OBJECTIVES, OBJECTIVE}
+    )
+    checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE = frozenset(
+        {*checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE, OBJECTIVE}
+    )
+    return train
+
+
 def main() -> int:
     verify_exact_invocation()
-    from scripts import train
-
     # The objective extension is local to this wrapper and cannot affect Exp20.
-    train.TREEWM_V2_OBJECTIVES = frozenset({*train.TREEWM_V2_OBJECTIVES, OBJECTIVE})
-    train.BOUNDED_PILOT_OBJECTIVES = {**train.BOUNDED_PILOT_OBJECTIVES, OBJECTIVE: 25_000}
-    train.LATENT_GAUGE_OBJECTIVES = frozenset({*train.LATENT_GAUGE_OBJECTIVES, OBJECTIVE})
+    train = register_objective()
     train.main()
     return 0
 

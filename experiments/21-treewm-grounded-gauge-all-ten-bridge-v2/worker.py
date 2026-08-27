@@ -26,7 +26,6 @@ from campaign import (
     stable_hash,
     trainer_command,
 )
-from metric_boundary import recover_metric_boundary
 
 
 OBJECTIVE = "treewm_v2_grounded_gauge_all_ten_bridge_v2"
@@ -139,6 +138,40 @@ def _rank_state_complete(payload: Mapping[str, Any]) -> bool:
     )
 
 
+def validate_post_update_cadence(
+    payload: Mapping[str, Any], completed_updates: int
+) -> dict[str, int | str | None]:
+    """Require the fresh Exp21 checkpoint's durable cadence substate."""
+    from treewm.utils.checkpoint import PostUpdateCadenceState
+
+    cadence_payload = payload.get("post_update_cadence")
+    require(cadence_payload is not None, "Exp21 checkpoint lacks post_update_cadence")
+    try:
+        cadence = PostUpdateCadenceState.from_state_dict(
+            cadence_payload,
+            require_durable=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"Exp21 checkpoint post-update cadence is invalid: {exc}") from exc
+    require(
+        cadence.committed_update == completed_updates,
+        "Exp21 checkpoint post-update cadence/update boundary differs",
+    )
+    return cadence.state_dict()
+
+
+def validate_complete_post_update_cadence(
+    cadence: Mapping[str, Any], completed_updates: int
+) -> None:
+    """Require the fully completed cadence used by an external-gate marker."""
+    require(
+        cadence.get("committed_update") == completed_updates
+        and cadence.get("completed_update") == completed_updates
+        and cadence.get("replay_action") is None,
+        "Exp21 stage-marker checkpoint has incomplete post-update cadence",
+    )
+
+
 def verify_checkpoint(
     path: Path,
     launch: Mapping[str, Any],
@@ -169,6 +202,7 @@ def verify_checkpoint(
         raise ContractError(f"checkpoint exact-resume payload is invalid: {exc}") from exc
 
     completed = int(payload.get("completed_updates", -1))
+    cadence = validate_post_update_cadence(payload, completed)
     identity = payload.get("run_identity") or {}
     config = payload.get("config") or {}
     run = launch["run"]
@@ -219,6 +253,7 @@ def verify_checkpoint(
         "status": "checkpoint_verified",
         "completed_updates": completed,
         "reason": payload.get("reason"),
+        "post_update_cadence": cadence,
         "identity_sha256": payload.get("identity_sha256"),
         "evaluation_seed_tables_sha256": identity.get("evaluation_seed_tables_sha256"),
         "final_seed_table_sha256": identity.get("final_seed_table_sha256"),
@@ -233,6 +268,10 @@ def verify_stage_marker(run_dir: Path, launch: Mapping[str, Any]) -> dict[str, A
     path = run_dir / "stage-gates" / f"AWAITING_GATE_{STAGE_TARGET}.json"
     marker = read_json(path)
     checkpoint = verify_checkpoint(run_dir / "checkpoints/latest.pt", launch, expected_step=STAGE_TARGET)
+    validate_complete_post_update_cadence(
+        checkpoint["post_update_cadence"],
+        STAGE_TARGET,
+    )
     checks = (
         marker.get("schema_version") == 1,
         marker.get("status") == "awaiting_external_stage_gate",
@@ -416,16 +455,7 @@ def run_worker(args: argparse.Namespace) -> int:
     if disposition == "requeue":
         checkpoint = verify_checkpoint(run_dir / "checkpoints/latest.pt", launch)
         validate_requeue_checkpoint(checkpoint)
-        metric_recovery = recover_metric_boundary(
-            run_dir / "checkpoints/latest.pt",
-            run_dir,
-            launch,
-        )
-        checkpoint = verify_checkpoint(run_dir / "checkpoints/latest.pt", launch)
-        atomic_json(state_dir / "READY_FOR_REQUEUE.json", {
-            **checkpoint,
-            "metric_boundary_recovery": metric_recovery,
-        })
+        atomic_json(state_dir / "READY_FOR_REQUEUE.json", checkpoint)
         return GRACEFUL_EXIT_CODE
     atomic_json(state_dir / "FAILED.json", {
         "schema_version": 1,

@@ -28,12 +28,6 @@ RUNS = 20
 STAGE_TARGET = 25_000
 SEEDS = (106, 107)
 TASK_IDS = (1, 2, 3, 4, 5)
-SEPARATE_CLIP_TAGS = (
-    "train/grad_norm_world_rest",
-    "train/grad_norm_branch_transformer",
-    "train/grad_clip_coefficient_world_rest",
-    "train/grad_clip_coefficient_branch_transformer",
-)
 SETTING_IDS = (
     "scene",
     "puzzle-3x3",
@@ -71,7 +65,7 @@ EXPECTED_MANIFEST_SECTION_SHA256 = {
     "settings": "33f4c6b9f348f5abeb8ec96d31ad2b059c47417d9f274bcd9f5d9d3f9091eaa5",
     "compatible_v2_recipe_input": "fde8338ae6f6c60daaf5813f6f5702e107c7eabdac8c8d03c955d588dd334a38",
     "claim_policy": "853c89f42a34a1a83879b40017b839a9a67825e9d1b15f893a7019fb42cee4e4",
-    "lifecycle": "c6966f16e07851e915465b68e52883dfd71fd5d2b1cec3de935b20429148f7b8",
+    "lifecycle": "23665b5b28b264fda8538477761f43c025f5c79845f12e90ae43835f56df1be5",
     "source_snapshot": "df327c774067f97374a5221386886b7eaa09c0ece9e15ea3b042f0fd3ff8a9d6",
 }
 PROTOCOL_FILES = (
@@ -80,7 +74,6 @@ PROTOCOL_FILES = (
     "campaign.py",
     "bind_exp20.py",
     "train_entry.py",
-    "metric_boundary.py",
     "worker.py",
     "stage_gate.py",
     "submit.py",
@@ -274,11 +267,12 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(stage.get("min_scale_ratio") == 0.8, "gauge ratio rail differs")
     require(stage.get("min_clip_coefficient") == 0.05 and stage.get("max_clip_fraction_below_threshold") == 0.25, "clip rails differ")
     lifecycle = manifest.get("lifecycle") or {}
-    metric_boundary = str(lifecycle.get("metric_boundary_policy", ""))
+    post_update_cadence = str(lifecycle.get("post_update_cadence_policy", ""))
     require(
-        "exact 50-update graceful requeue boundary" in metric_boundary
-        and "reset only that tracker window" in metric_boundary,
-        "MetricTracker boundary-recovery policy differs",
+        "schema-v1 post_update_cadence state" in post_update_cadence
+        and "Graceful signals are deferred" in post_update_cadence
+        and "completed before any later update after resume" in post_update_cadence,
+        "post-update cadence policy differs",
     )
     require(manifest.get("execution", {}).get("array") == "0-19%20", "array differs")
     require(manifest.get("paths", {}).get("python") == PINNED_PYTHON, "Python is not pinned")
@@ -756,16 +750,12 @@ def trainer_command(
         "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    metric_boundary_required_tags = list(manifest["stage_acceptance"]["training_exact_target_tags"])
-    if binding["selected_arm"] == "GS":
-        metric_boundary_required_tags.extend(SEPARATE_CLIP_TAGS)
     launch: dict[str, Any] = {
         "schema_version": 1,
         "campaign_id": manifest["campaign_id"],
         "classification": manifest["classification"],
         "formal_validation": False,
         "run": {**asdict(run), "selected_arm": binding["selected_arm"], "run_directory": str(output)},
-        "metric_boundary_required_tags": metric_boundary_required_tags,
         "hashes": {
             "manifest_sha256": manifest_sha256(manifest),
             "source_sha256": source["source_sha256"],

@@ -13,7 +13,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 
 def _load_local_modules():
-    names = ("campaign", "metric_boundary", "worker", "stage_gate", "submit", "train_entry")
+    names = ("campaign", "worker", "stage_gate", "submit", "train_entry")
     previous = {name: sys.modules.get(name) for name in names}
     for name in names:
         sys.modules.pop(name, None)
@@ -29,7 +29,7 @@ def _load_local_modules():
                 sys.modules[name] = previous[name]
 
 
-campaign, metric_boundary, worker, stage_gate, submit, train_entry = _load_local_modules()
+campaign, worker, stage_gate, submit, train_entry = _load_local_modules()
 
 
 @pytest.fixture(scope="module")
@@ -142,6 +142,31 @@ def test_direct_hydra_composition_is_bounded_but_unsealed(manifest: dict) -> Non
     assert cfg.get("campaign_selected_recipe_sha256") is None
     with pytest.raises(campaign.ContractError):
         train_entry.verify_exact_invocation()
+
+
+def test_train_entry_registers_exp21_for_strict_cadence_checkpoints() -> None:
+    from scripts import train
+    from treewm.utils import checkpoint as checkpoint_utils
+
+    original_v2 = train.TREEWM_V2_OBJECTIVES
+    original_bounded = train.BOUNDED_PILOT_OBJECTIVES
+    original_gauge = train.LATENT_GAUGE_OBJECTIVES
+    original_cadence = checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE
+    try:
+        registered = train_entry.register_objective()
+        assert registered is train
+        assert train_entry.OBJECTIVE in train.TREEWM_V2_OBJECTIVES
+        assert train.BOUNDED_PILOT_OBJECTIVES[train_entry.OBJECTIVE] == 25_000
+        assert train_entry.OBJECTIVE in train.LATENT_GAUGE_OBJECTIVES
+        assert (
+            train_entry.OBJECTIVE
+            in checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE
+        )
+    finally:
+        train.TREEWM_V2_OBJECTIVES = original_v2
+        train.BOUNDED_PILOT_OBJECTIVES = original_bounded
+        train.LATENT_GAUGE_OBJECTIVES = original_gauge
+        checkpoint_utils.OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE = original_cadence
 
 
 def test_binding_state_and_static_test_are_fail_closed(manifest: dict) -> None:
@@ -334,89 +359,53 @@ def test_exact_stage_target_requeue_is_valid_but_past_target_rejects() -> None:
         })
 
 
-def _metric_boundary_checkpoint(path: Path, *, step: int, tracker_state: dict) -> None:
-    import torch
-
-    torch.save({
-        "completed_updates": step,
-        "reason": "graceful-stop:SIGUSR1",
-        "run_identity": {"world_size": 1},
-        "rank_states": [{"rank": 0, "metric_tracker": tracker_state}],
-    }, path)
-
-
-@pytest.mark.parametrize("boundary_step", [50, campaign.STAGE_TARGET])
-def test_exact_metric_tracker_boundary_is_published_reset_and_idempotent(
-    tmp_path: Path,
-    boundary_step: int,
-) -> None:
-    import torch
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-    from treewm.logging.metrics import MetricTracker
-
-    run_dir = tmp_path / "run"
-    checkpoint_path = run_dir / "checkpoints" / "latest.pt"
-    checkpoint_path.parent.mkdir(parents=True)
-    tracker = MetricTracker()
-    tracker.add("train/grad_norm_world", 2.0, count=50)
-    tracker.add_hist("train/example_hist", [1.0, 2.0, 3.0])
-    _metric_boundary_checkpoint(checkpoint_path, step=boundary_step, tracker_state=tracker.state_dict())
-    before = campaign.file_sha256(checkpoint_path)
-    launch = {
-        "campaign_id": "treewm-grounded-gauge-all-ten-bridge-v2",
-        "run": {"run_name": "gaugebridge-v2-test"},
-        "launch_sha256": "a" * 64,
-        "metric_boundary_required_tags": ["train/grad_norm_world"],
+def test_exp21_checkpoint_cadence_is_mandatory_and_durable() -> None:
+    complete = {
+        "post_update_cadence": {
+            "schema_version": 1,
+            "committed_update": 25_000,
+            "completed_update": 25_000,
+            "replay_action": None,
+        }
     }
+    assert worker.validate_post_update_cadence(complete, 25_000) == complete[
+        "post_update_cadence"
+    ]
+    worker.validate_complete_post_update_cadence(
+        complete["post_update_cadence"],
+        25_000,
+    )
 
-    recovered = metric_boundary.recover_metric_boundary(checkpoint_path, run_dir, launch)
-    assert recovered["status"] == "metric_boundary_recovered"
-    assert recovered["checkpoint_before_sha256"] == before
-    assert recovered["checkpoint_after_sha256"] != before
-    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    assert payload["rank_states"][0]["metric_tracker"] == {
-        "schema_version": 1,
-        "sums": {},
-        "counts": {},
-        "hists": {},
+    replayable = {
+        "post_update_cadence": {
+            "schema_version": 1,
+            "committed_update": 12_500,
+            "completed_update": 12_499,
+            "replay_action": "evaluation",
+        }
     }
-    event_path = next(run_dir.glob("events.out.tfevents.*"))
-    accumulator = EventAccumulator(str(event_path), size_guidance={"scalars": 0})
-    accumulator.Reload()
-    points = accumulator.Scalars("train/grad_norm_world")
-    assert [(point.step, point.value) for point in points] == [(boundary_step, pytest.approx(2.0))]
+    assert worker.validate_post_update_cadence(replayable, 12_500) == replayable[
+        "post_update_cadence"
+    ]
+    with pytest.raises(campaign.ContractError, match="incomplete post-update cadence"):
+        worker.validate_complete_post_update_cadence(
+            replayable["post_update_cadence"],
+            12_500,
+        )
 
-    again = metric_boundary.recover_metric_boundary(checkpoint_path, run_dir, launch)
-    assert again["status"] == "metric_boundary_previously_recovered"
-    assert len(list(run_dir.glob("events.out.tfevents.*"))) == 1
-
-
-def test_partial_metric_tracker_window_is_preserved_for_normal_resume(tmp_path: Path) -> None:
-    from treewm.logging.metrics import MetricTracker
-
-    run_dir = tmp_path / "run"
-    checkpoint_path = run_dir / "checkpoints" / "latest.pt"
-    checkpoint_path.parent.mkdir(parents=True)
-    tracker = MetricTracker()
-    tracker.add("train/grad_norm_world", 2.0, count=37)
-    _metric_boundary_checkpoint(checkpoint_path, step=37, tracker_state=tracker.state_dict())
-    before = campaign.file_sha256(checkpoint_path)
-    launch = {
-        "campaign_id": "treewm-grounded-gauge-all-ten-bridge-v2",
-        "run": {"run_name": "gaugebridge-v2-test"},
-        "launch_sha256": "b" * 64,
-        "metric_boundary_required_tags": ["train/grad_norm_world"],
-    }
-    result = metric_boundary.recover_metric_boundary(checkpoint_path, run_dir, launch)
-    assert result["status"] == "no_metric_boundary_recovery_needed"
-    assert campaign.file_sha256(checkpoint_path) == before
-    assert not list(run_dir.glob("events.out.tfevents.*"))
+    with pytest.raises(campaign.ContractError, match="lacks post_update_cadence"):
+        worker.validate_post_update_cadence({}, 25_000)
+    incomplete = copy.deepcopy(replayable)
+    incomplete["post_update_cadence"]["replay_action"] = None
+    with pytest.raises(campaign.ContractError, match="cadence is invalid"):
+        worker.validate_post_update_cadence(incomplete, 12_500)
 
 
 def test_slurm_and_protocol_inventory_are_isolated() -> None:
     submit.validate_slurms(PACKAGE)
     assert len(campaign.PROTOCOL_FILES) == len(set(campaign.PROTOCOL_FILES))
-    assert {"train_entry.py", "bind_exp20.py", "metric_boundary.py", "train.slurm", "gate.slurm"}.issubset(campaign.PROTOCOL_FILES)
+    assert {"train_entry.py", "bind_exp20.py", "train.slurm", "gate.slurm"}.issubset(campaign.PROTOCOL_FILES)
+    assert "metric_boundary.py" not in campaign.PROTOCOL_FILES
     train = (PACKAGE / "train.slurm").read_text(encoding="utf-8")
     assert train.index('if [[ "$status" -eq 0 ]]') < train.index('if [[ -e "$CANCEL_LATCH" || "$status" -eq 143 ]]')
     manifest = campaign.load_manifest()

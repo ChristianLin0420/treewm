@@ -195,6 +195,145 @@ def test_exact_resume_validation_precedes_any_model_mutation(tmp_path):
     assert target_scheduler.state_dict() == before_scheduler
 
 
+def test_exp22_requires_strict_post_update_cadence_before_model_mutation(tmp_path):
+    saved_model = torch.nn.Linear(2, 2)
+    saved_optimizer = torch.optim.AdamW(saved_model.parameters(), lr=1e-3)
+    saved_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        saved_optimizer, lambda _step: 1.0
+    )
+    _identity, invalid = _exact_payload(
+        saved_model,
+        saved_optimizer,
+        saved_scheduler,
+        CheckpointManager(tmp_path / "manager", enabled=False),
+    )
+    identity = {
+        "run": "exact-unit",
+        "world_size": 1,
+        "objective_version": "treewm_v2_grounded_gauge_formal_v1",
+    }
+    invalid["run_identity"] = identity
+    invalid["identity_sha256"] = _stable_hash(identity)
+    invalid["post_update_cadence"] = {
+        "schema_version": 1,
+        "committed_update": "3",
+        "completed_update": 3,
+        "replay_action": None,
+    }
+    path = save_checkpoint_payload(tmp_path / "malformed-cadence.pt", invalid)
+
+    target = torch.nn.Linear(2, 2)
+    with torch.no_grad():
+        target.weight.fill_(7.0)
+        target.bias.fill_(7.0)
+    optimizer = torch.optim.AdamW(target.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+    before_model = copy.deepcopy(target.state_dict())
+    before_optimizer = copy.deepcopy(optimizer.state_dict())
+    before_scheduler = copy.deepcopy(scheduler.state_dict())
+
+    with pytest.raises(ValueError, match="committed_update must be an integer"):
+        load_checkpoint(
+            path,
+            target,
+            optimizer,
+            scheduler,
+            restore_rng=False,
+            expected_identity=identity,
+            expected_world_size=1,
+            require_exact_resume=True,
+        )
+    for key, value in before_model.items():
+        torch.testing.assert_close(target.state_dict()[key], value, rtol=0, atol=0)
+    assert optimizer.state_dict() == before_optimizer
+    assert scheduler.state_dict() == before_scheduler
+
+
+def test_exp22_rejects_legacy_checkpoint_without_cadence_but_older_objective_allows_it(
+    tmp_path,
+):
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+    _identity, payload = _exact_payload(
+        model,
+        optimizer,
+        scheduler,
+        CheckpointManager(tmp_path, enabled=False),
+    )
+    validate_exact_resume_payload(payload, expected_world_size=1)
+
+    identity = dict(payload["run_identity"])
+    identity["objective_version"] = "treewm_v2_grounded_gauge_formal_v1"
+    payload["run_identity"] = identity
+    payload["identity_sha256"] = _stable_hash(identity)
+    with pytest.raises(ValueError, match="lacks post_update_cadence"):
+        validate_exact_resume_payload(payload, expected_world_size=1)
+
+
+@pytest.mark.parametrize(
+    ("cadence", "pending", "match"),
+    [
+        (
+            {
+                "schema_version": True,
+                "committed_update": 3,
+                "completed_update": 3,
+                "replay_action": None,
+            },
+            None,
+            "schema differs",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "committed_update": 3,
+                "completed_update": 2,
+                "replay_action": None,
+            },
+            None,
+            "without replay intent",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "committed_update": 3,
+                "completed_update": 2,
+                "replay_action": "evaluation",
+            },
+            None,
+            "differs from pending evaluation",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "committed_update": 3,
+                "completed_update": 2,
+                "replay_action": "visualization",
+            },
+            3,
+            "cannot retain evaluation intent",
+        ),
+    ],
+)
+def test_exact_resume_rejects_malformed_cadence_relationships(
+    tmp_path, cadence, pending, match
+):
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+    _identity, payload = _exact_payload(
+        model,
+        optimizer,
+        scheduler,
+        CheckpointManager(tmp_path, enabled=False),
+    )
+    payload["post_update_cadence"] = cadence
+    payload["pending_eval_step"] = pending
+    with pytest.raises(ValueError, match=match):
+        validate_exact_resume_payload(payload, expected_world_size=1)
+
+
 def test_exact_resume_rejects_late_model_shape_error_before_partial_mutation(tmp_path):
     saved_model = torch.nn.Linear(2, 2)
     saved_optimizer = torch.optim.AdamW(saved_model.parameters(), lr=1e-3)

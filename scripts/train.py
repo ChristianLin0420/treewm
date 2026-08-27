@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from dataclasses import replace
 import sys
 import time
 from pathlib import Path
+from types import ModuleType
 
 import hydra
 import numpy as np
@@ -68,6 +70,7 @@ from treewm.utils import config as cfg_utils
 from treewm.utils.checkpoint import (
     GRACEFUL_EXIT_CODE,
     CheckpointManager,
+    PostUpdateCadenceState,
     StopController,
     atomic_json_dump,
     build_checkpoint,
@@ -129,6 +132,16 @@ STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES = frozenset(
     }
 )
 
+# These two objectives are intentionally package-authorized.  Their scientific
+# recipe is selected by an upstream experiment, so composing the Hydra config is
+# not sufficient authority to start a formal run.  Keep the labels distinct: a
+# gauge-formal receipt must never be mistaken for the older repair-formal gate.
+FORMAL_RECIPE_AUTHORIZATION_LABELS = {
+    "treewm_v2_grounded_repair_formal_v1": "repaired formal",
+    "treewm_v2_grounded_gauge_formal_v1": "Exp22 gauge formal",
+}
+EXP22_CAMPAIGN_DIRECTORY = "experiments/22-treewm-grounded-gauge-formal-v1"
+
 
 def validate_objective_version(objective_version: str, total_steps: int) -> None:
     """Reject unknown objectives and prevent diagnostic pilots becoming formal runs."""
@@ -174,6 +187,138 @@ def resolve_stage_stop_after(
     return stage, True
 
 
+def validate_formal_recipe_authorization(
+    objective_version: str,
+    cfg: Mapping[str, object],
+    environ: Mapping[str, str] | None = None,
+    argv: list[str] | tuple[str, ...] | None = None,
+) -> None:
+    """Require the package-issued recipe receipt for selected-recipe formals.
+
+    Exp22 is independently rederived from its fixed package, sealed prerequisite
+    receipt, canonical manifest run, exact argv, and complete launch environment.
+    The older repair formal retains its historical config/environment consistency
+    check. Both checks run before loading data or constructing a model.
+    """
+    label = FORMAL_RECIPE_AUTHORIZATION_LABELS.get(objective_version)
+    if label is None:
+        return
+    environment = os.environ if environ is None else environ
+    authorization = {
+        "campaign_prerequisite_binding_sha256": str(
+            cfg.get("campaign_prerequisite_binding_sha256", "")
+        ),
+        "campaign_selected_recipe_sha256": str(
+            cfg.get("campaign_selected_recipe_sha256", "")
+        ),
+        "TREEWM_PREREQUISITE_BINDING_SHA256": environment.get(
+            "TREEWM_PREREQUISITE_BINDING_SHA256"
+        ),
+        "TREEWM_SELECTED_RECIPE_SHA256": environment.get(
+            "TREEWM_SELECTED_RECIPE_SHA256"
+        ),
+    }
+    malformed = malformed_sha256_names(authorization)
+    if malformed:
+        raise ValueError(
+            f"{label} objective requires sealed prerequisite/recipe hashes: "
+            + ", ".join(malformed)
+        )
+    if (
+        authorization["campaign_prerequisite_binding_sha256"]
+        != authorization["TREEWM_PREREQUISITE_BINDING_SHA256"]
+        or authorization["campaign_selected_recipe_sha256"]
+        != authorization["TREEWM_SELECTED_RECIPE_SHA256"]
+    ):
+        raise ValueError(
+            f"{label} prerequisite hashes differ between config and environment"
+        )
+
+    if objective_version != "treewm_v2_grounded_gauge_formal_v1":
+        return
+
+    repository = Path(__file__).resolve().parents[1]
+    package = repository / EXP22_CAMPAIGN_DIRECTORY
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        campaign = _load_exp22_campaign_authority(package)
+        manifest = campaign.load_manifest(package / "manifest.json")
+        protocol_sha256 = campaign.verify_protocol_lock(package)
+        binding = campaign.load_prerequisite_bindings(
+            manifest,
+            package / "prerequisite_bindings.json",
+            verify_external_files=False,
+        )
+        run_name = environment.get("TREEWM_RUN_NAME", "")
+        matches = [
+            run for run in campaign.expand_runs(manifest) if run.run_name == run_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "TREEWM_RUN_NAME does not identify one canonical Exp22 manifest run"
+            )
+        expected = campaign.trainer_command(
+            manifest,
+            matches[0],
+            repo_root=repository,
+        )
+        expected_argv = list(expected["argv"][2:])
+        if actual_argv != expected_argv:
+            raise ValueError("trainer arguments differ from canonical Exp22 launch")
+        expected_environment = expected.get("environment")
+        if not isinstance(expected_environment, Mapping):
+            raise ValueError("canonical Exp22 launch environment is malformed")
+        for key, value in expected_environment.items():
+            if environment.get(str(key)) != str(value):
+                raise ValueError(
+                    f"trainer environment differs from canonical Exp22 launch: {key}"
+                )
+        expected_hashes = expected.get("hashes")
+        if not isinstance(expected_hashes, Mapping):
+            raise ValueError("canonical Exp22 launch hashes are malformed")
+        if protocol_sha256 != expected_hashes.get("package_protocol_sha256"):
+            raise ValueError("canonical Exp22 protocol hash differs")
+        if (
+            binding.get("binding_sha256")
+            != expected_hashes.get("prerequisite_binding_sha256")
+            or binding.get("selected_recipe_sha256")
+            != expected_hashes.get("selected_recipe_sha256")
+            or authorization["campaign_prerequisite_binding_sha256"]
+            != binding.get("binding_sha256")
+            or authorization["campaign_selected_recipe_sha256"]
+            != binding.get("selected_recipe_sha256")
+        ):
+            raise ValueError(
+                "trainer hashes differ from canonical Exp22 prerequisite receipt"
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"canonical Exp22 launch authorization failed: {exc}") from exc
+
+
+def _load_exp22_campaign_authority(package: Path) -> ModuleType:
+    """Load the fixed package verifier without accepting a caller-selected module."""
+    campaign_path = package / "campaign.py"
+    if not campaign_path.is_file() or campaign_path.is_symlink():
+        raise ValueError("canonical Exp22 campaign verifier is missing or symlinked")
+    module_name = "_treewm_exp22_campaign_authority"
+    spec = importlib.util.spec_from_file_location(module_name, campaign_path)
+    if spec is None or spec.loader is None:
+        raise ValueError("canonical Exp22 campaign verifier cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    return module
+
+
 def should_visualise(step: int, cfg) -> bool:
     """Dense visualisation early, sparser later (spec section 12).
 
@@ -185,6 +330,31 @@ def should_visualise(step: int, cfg) -> bool:
     early_until = int(cfg.train.viz_early_until)
     every = int(cfg.train.viz_every_early) if step <= early_until else int(cfg.train.viz_every)
     return step % max(every, 1) == 0
+
+
+def replay_pending_post_update_cadence(
+    cadence: PostUpdateCadenceState,
+    pending_eval_step: int | None,
+    *,
+    run_evaluation,
+    run_visualization,
+    save_completion,
+) -> None:
+    """Replay a checkpointed post-update suffix before entering the training range."""
+    if pending_eval_step is not None:
+        if pending_eval_step != cadence.committed_update:
+            raise ValueError("pending evaluation differs from post-update boundary")
+        run_evaluation(pending_eval_step)
+    elif cadence.replay_action == "evaluation":
+        raise ValueError("post-update evaluation replay lacks pending evaluation intent")
+
+    if cadence.replay_action == "visualization":
+        update = cadence.committed_update
+        run_visualization(update)
+        cadence.finish(update)
+        save_completion("post-update-cadence-complete")
+    if not cadence.complete:
+        raise RuntimeError("post-update cadence replay did not reach a complete boundary")
 
 
 def build_scheduler(optimizer, cfg):
@@ -885,6 +1055,11 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("train.scheduler_total_steps cannot be smaller than train.steps")
     objective_version = str(cfg.get("objective_version", "treewm_v1"))
     validate_objective_version(objective_version, total_steps)
+    # Exp22 is authorized only by the exact launch rederived from its sealed package.
+    # Reject a bare/directly fabricated composition before any dataset/model work.
+    # The repair-formal check retains its historical position and error ordering.
+    if objective_version == "treewm_v2_grounded_gauge_formal_v1":
+        validate_formal_recipe_authorization(objective_version, cfg)
     stage_limit_value = os.environ.get("TREEWM_STOP_AFTER_UPDATE")
     stage_stop_after, stage_lifecycle_active = resolve_stage_stop_after(
         objective_version, total_steps, stage_limit_value
@@ -1327,33 +1502,7 @@ def main(cfg: DictConfig) -> None:
                 + ", ".join(malformed)
             )
     if objective_version == "treewm_v2_grounded_repair_formal_v1":
-        repaired_binding_hashes = {
-            "campaign_prerequisite_binding_sha256": str(
-                cfg.get("campaign_prerequisite_binding_sha256", "")
-            ),
-            "campaign_selected_recipe_sha256": str(
-                cfg.get("campaign_selected_recipe_sha256", "")
-            ),
-            "TREEWM_PREREQUISITE_BINDING_SHA256": os.environ.get(
-                "TREEWM_PREREQUISITE_BINDING_SHA256"
-            ),
-            "TREEWM_SELECTED_RECIPE_SHA256": os.environ.get(
-                "TREEWM_SELECTED_RECIPE_SHA256"
-            ),
-        }
-        malformed = malformed_sha256_names(repaired_binding_hashes)
-        if malformed:
-            raise ValueError(
-                "repaired formal objective requires sealed prerequisite/recipe hashes: "
-                + ", ".join(malformed)
-            )
-        if (
-            repaired_binding_hashes["campaign_prerequisite_binding_sha256"]
-            != repaired_binding_hashes["TREEWM_PREREQUISITE_BINDING_SHA256"]
-            or repaired_binding_hashes["campaign_selected_recipe_sha256"]
-            != repaired_binding_hashes["TREEWM_SELECTED_RECIPE_SHA256"]
-        ):
-            raise ValueError("repaired formal prerequisite hashes differ between config and environment")
+        validate_formal_recipe_authorization(objective_version, cfg)
     dataset_reported_sha256 = str(
         getattr(train_ds, "manifest_sha256", getattr(train_ds, "source_manifest_sha256", ""))
     )
@@ -1698,6 +1847,21 @@ def main(cfg: DictConfig) -> None:
         if phase not in {"train", "final_eval"}:
             raise ValueError(f"invalid checkpoint phase: {phase}")
 
+    cadence_payload = (
+        resume_payload.get("post_update_cadence") if resume_payload is not None else None
+    )
+    if cadence_payload is None:
+        # Historical objectives retain their pre-field resume behavior. Fresh Exp22
+        # checkpoints are rejected centrally before state mutation if this is absent.
+        post_update_cadence = PostUpdateCadenceState(completed_updates)
+    else:
+        post_update_cadence = PostUpdateCadenceState.from_state_dict(
+            cadence_payload,
+            require_durable=True,
+        )
+        if post_update_cadence.committed_update != completed_updates:
+            raise ValueError("checkpoint post-update cadence/update boundary differs")
+
     logger = TreeWMLogger(
         run_dir,
         is_main=dist_info.is_main,
@@ -1819,6 +1983,7 @@ def main(cfg: DictConfig) -> None:
                             latent_index.state_dict() if latent_index is not None else None
                         ),
                         "pending_eval_step": pending_eval_step,
+                        "post_update_cadence": post_update_cadence.state_dict(),
                         "final_eval": final_eval,
                         "phase": phase,
                         "gradient_checkpointing": gradient_checkpointing,
@@ -1846,6 +2011,12 @@ def main(cfg: DictConfig) -> None:
 
     def raise_if_stopping() -> None:
         if any_rank_true(stop.requested, device):
+            # A checkpoint at N resumes with an empty N-boundary loop. Defer the
+            # graceful exit until its deterministic cadence is complete. Replayable
+            # evaluation/visualization suffixes are the exceptions: their
+            # explicit cadence action makes every omitted outcome resume-visible.
+            if not post_update_cadence.stop_checkpoint_is_durable(pending_eval_step):
+                return
             reason = stop.reason or "signal-on-peer"
             save_training_checkpoint(f"graceful-stop:{reason}")
             if dist_info.is_main:
@@ -1859,10 +2030,188 @@ def main(cfg: DictConfig) -> None:
             cleanup_distributed()
             raise SystemExit(GRACEFUL_EXIT_CODE)
 
+    def run_synchronized_visualization(viz_step: int) -> None:
+        """Render every visualization due at one committed update on rank zero."""
+        if not should_visualise(viz_step, cfg):
+            return
+        # The xy tree renders are maze-specific. Non-spatial domains (cube, scene,
+        # puzzle) get domain-native diagnostics instead of an obs[:2] projection.
+        if dist_info.is_main and maze_spec is not None:
+            model.eval()
+            try:
+                logger.figure(
+                    "viz/branching_factor_heatmap",
+                    diag.branching_factor_heatmap(model, maze_spec, normalizer, device),
+                    viz_step,
+                )
+                if include_branch_prior:
+                    logger.figure(
+                        "viz/expansion_gain_heatmap",
+                        diag.expansion_gain_heatmap(model, maze_spec, normalizer, device),
+                        viz_step,
+                    )
+                with torch.no_grad():
+                    vbatch = to_device(fixed_diagnostic_batch, device)
+                    fig = diag.q_pca_plot(model, vbatch, normalizer, maze_spec)
+                    if fig is not None:
+                        logger.figure("viz/q_pca", fig, viz_step)
+                    for a in range(min(int(cfg.train.viz_anchors), len(anchors))):
+                        start, goal = anchors.starts[a], anchors.goals[a]
+                        obs_a = torch.from_numpy(normalizer.norm_obs(start[None])).to(device)
+                        goal_a = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
+                        tree, _ = model.generate(
+                            model.encode(obs_a),
+                            tree_cfg,
+                            generator=rng.viz,
+                            goal_obs=(
+                                goal_a
+                                if tree_cfg.scorer in GOAL_AWARE_SCORERS
+                                else None
+                            ),
+                        )
+                        node_obs = model.decoder(tree.latent)
+                        gd = torch.linalg.vector_norm(
+                            node_obs[..., domain.goal_dims]
+                            - goal_a[..., domain.goal_dims].unsqueeze(1),
+                            dim=-1,
+                        )
+                        gd = gd.masked_fill(~tree.valid, float("inf"))
+                        gd[:, 0] = float("inf")
+                        rendered = tv.TreeRender.from_tree(
+                            model,
+                            tree,
+                            normalizer,
+                            goal,
+                            start,
+                            0,
+                            int(gd.argmin(dim=1).item()),
+                        )
+                        name = anchors.names[a]
+                        logger.figure(
+                            f"viz/tree_xy_depth/{name}",
+                            tv.view_depth(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.figure(
+                            f"viz/tree_xy_expansion_order/{name}",
+                            tv.view_expansion_order(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.figure(
+                            f"viz/tree_xy_goal_distance/{name}",
+                            tv.view_goal_distance(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.figure(
+                            f"viz/tree_xy_root_subtree/{name}",
+                            tv.view_root_subtree(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.figure(
+                            f"viz/tree_horizon/{name}",
+                            tv.view_horizon(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.figure(
+                            f"viz/tree_selected_path/{name}",
+                            tv.view_selected_path(rendered, maze_spec, name),
+                            viz_step,
+                        )
+                        logger.scalars(
+                            tstats.structural_summary(tree, model, normalizer),
+                            viz_step,
+                        )
+                        logger.histogram(
+                            f"tree/horizon_hist/{name}",
+                            tree.action_mask.sum(-1)[tree.valid].float(),
+                            viz_step,
+                        )
+            except Exception as exc:  # visualisation must never kill a run
+                print(f"[treewm] visualisation skipped at step {viz_step}: {exc}")
+        elif dist_info.is_main:
+            model.eval()
+            try:
+                from treewm.evaluation import domain_viz as dvz
+
+                for task_index, task in enumerate(
+                    tasks[: int(cfg.train.viz_anchors)]
+                ):
+                    observation, info = env.reset(
+                        options={"task_id": int(task["task_id"])},
+                        seed=int(cfg.eval.seed) + task_index,
+                    )
+                    goal = np.asarray(info["goal"], dtype=np.float32)
+                    obs_a = torch.from_numpy(
+                        normalizer.norm_obs(
+                            np.asarray(observation, dtype=np.float32)[None]
+                        )
+                    ).to(device)
+                    goal_a = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
+                    tree, _ = model.generate(
+                        model.encode(obs_a), tree_cfg, generator=rng.viz
+                    )
+                    node_obs = model.decoder(tree.latent)
+                    gd = torch.linalg.vector_norm(
+                        node_obs[..., domain.goal_dims]
+                        - goal_a[..., domain.goal_dims].unsqueeze(1),
+                        dim=-1,
+                    )
+                    gd = gd.masked_fill(~tree.valid, float("inf"))
+                    gd[:, 0] = float("inf")
+                    selected = int(gd.argmin(dim=1).item())
+                    name = task.get("task_name", f"task{task_index}")
+                    if domain.goal_metric == "onehot":
+                        logger.figure(
+                            f"viz/board_by_depth/{name}",
+                            dvz.view_board_by_depth(
+                                model,
+                                tree,
+                                normalizer,
+                                domain,
+                                goal,
+                                title=name,
+                            ),
+                            viz_step,
+                        )
+                    else:
+                        logger.figure(
+                            f"viz/object_tree/{name}",
+                            dvz.view_object_tree(
+                                model,
+                                tree,
+                                normalizer,
+                                domain,
+                                goal,
+                                title=name,
+                                selected=selected,
+                            ),
+                            viz_step,
+                        )
+                    if task_index == 0:
+                        logger.scalars(
+                            dvz.branch_divergence(model, tree, normalizer, domain),
+                            viz_step,
+                        )
+                        logger.scalars(
+                            tstats.structural_summary(tree, model, normalizer),
+                            viz_step,
+                        )
+                        logger.histogram(
+                            "tree/horizon_hist",
+                            tree.action_mask.sum(-1)[tree.valid].float(),
+                            viz_step,
+                        )
+            except Exception as exc:
+                print(
+                    f"[treewm] domain visualisation skipped at step {viz_step}: {exc}"
+                )
+        barrier()
+
     def run_synchronized_evaluation(eval_step: int) -> None:
         """Keep peer ranks parked while rank zero evaluates, with resumable intent."""
         nonlocal pending_eval_step
-        pending_eval_step = int(eval_step)
+        post_update_cadence.mark_replay("evaluation", eval_step)
+        pending_eval_step = eval_step
         save_training_checkpoint("evaluation-pending")
         eval_failed = False
         eval_success = None
@@ -1913,15 +2262,26 @@ def main(cfg: DictConfig) -> None:
             if any_rank_true(stop.requested, device):
                 raise_if_stopping()
             raise RuntimeError(f"evaluation failed at step {eval_step}")
-        raise_if_stopping()
         pending_eval_step = None
+        if should_visualise(eval_step, cfg):
+            post_update_cadence.mark_replay("visualization", eval_step)
+        else:
+            post_update_cadence.finish(eval_step)
         save_training_checkpoint(
             "evaluation-complete",
             best_success=eval_success if dist_info.is_main else None,
         )
 
-    if phase == "train" and pending_eval_step is not None:
-        run_synchronized_evaluation(int(pending_eval_step))
+    if phase == "train" and (
+        pending_eval_step is not None or not post_update_cadence.complete
+    ):
+        replay_pending_post_update_cadence(
+            post_update_cadence,
+            pending_eval_step,
+            run_evaluation=run_synchronized_evaluation,
+            run_visualization=run_synchronized_visualization,
+            save_completion=save_training_checkpoint,
+        )
 
     progress = tqdm(
         range(completed_updates, stage_stop_after),
@@ -2090,6 +2450,7 @@ def main(cfg: DictConfig) -> None:
         optimizer.step()
         scheduler.step()
         completed_updates = step + 1
+        post_update_cadence.begin(completed_updates)
         log_step = completed_updates
         tracker.add("train/grad_norm", float(grad_norm))
         learning_rates = scheduler.get_last_lr()
@@ -2105,9 +2466,8 @@ def main(cfg: DictConfig) -> None:
             )
         tracker.add("train/weight_decay", float(cfg.train.weight_decay))
         tracker.add("train/weight_decay_gain", gain_weight_decay)
-        # Signals delivered during the update are handled only after the optimizer and
-        # scheduler have committed the same absolute update on every rank.
-        raise_if_stopping()
+        # A signal delivered during the optimizer step is now latched while every
+        # deterministic action due at this absolute update is completed below.
 
         # ------------------------------------------------------------- logging
         if completed_updates % int(cfg.train.log_every) == 0:
@@ -2158,7 +2518,11 @@ def main(cfg: DictConfig) -> None:
             logger.scalars({k: all_reduce_mean(v, device) for k, v in dmetrics.items()}, log_step)
 
         # --------------------------------------------------------- validation
-        if completed_updates % validation_every == 0:
+        evaluation_due = completed_updates % int(cfg.train.eval_every) == 0
+        visualization_due = should_visualise(log_step, cfg)
+        validation_due = completed_updates % validation_every == 0
+        checkpoint_due = completed_updates % checkpoint_every == 0
+        if validation_due:
             val_tracker = MetricTracker(device)
             val_label_tracker = MetricTracker(device)
             model.eval()
@@ -2248,6 +2612,19 @@ def main(cfg: DictConfig) -> None:
             )
             vscalars.update(fixed_validation_scalars)
             logger.scalars(vscalars, log_step)
+            if evaluation_due:
+                # Make a validation checkpoint immediately before evaluation replay
+                # that outcome if the process is killed before evaluation can start.
+                pending_eval_step = completed_updates
+                post_update_cadence.mark_replay(
+                    "evaluation", completed_updates
+                )
+            elif visualization_due:
+                post_update_cadence.mark_replay(
+                    "visualization", completed_updates
+                )
+            else:
+                post_update_cadence.finish(completed_updates)
             save_training_checkpoint(
                 "periodic-validation",
                 best_val_loss=(
@@ -2256,120 +2633,52 @@ def main(cfg: DictConfig) -> None:
                     else None
                 ),
             )
-        elif completed_updates % checkpoint_every == 0:
+        elif checkpoint_due:
+            if evaluation_due:
+                pending_eval_step = completed_updates
+                post_update_cadence.mark_replay(
+                    "evaluation", completed_updates
+                )
+            elif visualization_due:
+                post_update_cadence.mark_replay(
+                    "visualization", completed_updates
+                )
+            else:
+                post_update_cadence.finish(completed_updates)
             save_training_checkpoint("periodic")
 
+        if not validation_due and not checkpoint_due:
+            if evaluation_due:
+                pending_eval_step = completed_updates
+                post_update_cadence.mark_replay(
+                    "evaluation", completed_updates
+                )
+            elif visualization_due:
+                post_update_cadence.mark_replay(
+                    "visualization", completed_updates
+                )
+            else:
+                post_update_cadence.finish(completed_updates)
+
         # ---------------------------------------------------- goal evaluation
-        if completed_updates % int(cfg.train.eval_every) == 0:
+        if evaluation_due:
             run_synchronized_evaluation(log_step)
 
         # ------------------------------------------------------ visualisations
-        # The xy tree renders are maze-specific. Non-spatial domains (cube, scene,
-        # puzzle) get their own diagnostics in treewm/evaluation/domain_viz.py instead of
-        # a meaningless projection onto the first two observation dims.
-        if should_visualise(log_step, cfg) and dist_info.is_main and maze_spec is not None:
-            model.eval()
-            try:
-                logger.figure(
-                    "viz/branching_factor_heatmap",
-                    diag.branching_factor_heatmap(model, maze_spec, normalizer, device), log_step,
-                )
-                if include_branch_prior:
-                    logger.figure(
-                        "viz/expansion_gain_heatmap",
-                        diag.expansion_gain_heatmap(model, maze_spec, normalizer, device), log_step,
-                    )
-                with torch.no_grad():
-                    vbatch = to_device(fixed_diagnostic_batch, device)
-                    fig = diag.q_pca_plot(model, vbatch, normalizer, maze_spec)
-                    if fig is not None:
-                        logger.figure("viz/q_pca", fig, log_step)
-                    # Fixed anchors, identical across every run, so two runs can be
-                    # compared by flipping between them in TensorBoard.
-                    for a in range(min(int(cfg.train.viz_anchors), len(anchors))):
-                        start, goal = anchors.starts[a], anchors.goals[a]
-                        obs_a = torch.from_numpy(normalizer.norm_obs(start[None])).to(device)
-                        goal_a = torch.from_numpy(normalizer.norm_obs(goal[None])).to(device)
-                        tree, _ = model.generate(
-                            model.encode(obs_a), tree_cfg, generator=rng.viz,
-                            goal_obs=goal_a if tree_cfg.scorer in GOAL_AWARE_SCORERS else None,
-                        )
-                        node_obs = model.decoder(tree.latent)
-                        gd = torch.linalg.vector_norm(
-                            node_obs[..., domain.goal_dims]
-                            - goal_a[..., domain.goal_dims].unsqueeze(1),
-                            dim=-1,
-                        )
-                        gd = gd.masked_fill(~tree.valid, float("inf")); gd[:, 0] = float("inf")
-                        r = tv.TreeRender.from_tree(model, tree, normalizer, goal, start, 0,
-                                                    int(gd.argmin(dim=1).item()))
-                        nm = anchors.names[a]
-                        logger.figure(f"viz/tree_xy_depth/{nm}", tv.view_depth(r, maze_spec, nm), log_step)
-                        logger.figure(f"viz/tree_xy_expansion_order/{nm}",
-                                      tv.view_expansion_order(r, maze_spec, nm), log_step)
-                        logger.figure(f"viz/tree_xy_goal_distance/{nm}",
-                                      tv.view_goal_distance(r, maze_spec, nm), log_step)
-                        logger.figure(f"viz/tree_xy_root_subtree/{nm}",
-                                      tv.view_root_subtree(r, maze_spec, nm), log_step)
-                        logger.figure(f"viz/tree_horizon/{nm}", tv.view_horizon(r, maze_spec, nm), log_step)
-                        logger.figure(f"viz/tree_selected_path/{nm}",
-                                      tv.view_selected_path(r, maze_spec, nm), log_step)
-                        logger.scalars(tstats.structural_summary(tree, model, normalizer), log_step)
-                        logger.histogram(f"tree/horizon_hist/{nm}",
-                                         tree.action_mask.sum(-1)[tree.valid].float(), log_step)
-            except Exception as exc:  # visualisation must never kill a run
-                print(f"[treewm] visualisation skipped at step {log_step}: {exc}")
-        if should_visualise(log_step, cfg) and maze_spec is not None:
-            barrier()
-            raise_if_stopping()
-
-        # ---------------------------------------- non-spatial domain diagnostics
-        # Cube/scene/puzzle have no maze floor to draw on, and projecting their
-        # observations onto obs[:2] would render the robot's joint angles -- visually
-        # plausible, completely uninformative. Instead render the quantity the task
-        # actually constrains, plus a scalar test of whether the K branches are
-        # genuinely different futures or have collapsed onto one continuation.
-        if should_visualise(log_step, cfg) and dist_info.is_main and maze_spec is None:
-            model.eval()
-            try:
-                from treewm.evaluation import domain_viz as dvz
-
-                for ti, task in enumerate(tasks[:int(cfg.train.viz_anchors)]):
-                    ob0, info0 = env.reset(options={"task_id": int(task["task_id"])},
-                                           seed=int(cfg.eval.seed) + ti)
-                    goal0 = np.asarray(info0["goal"], dtype=np.float32)
-                    obs_a = torch.from_numpy(
-                        normalizer.norm_obs(np.asarray(ob0, dtype=np.float32)[None])).to(device)
-                    goal_a = torch.from_numpy(normalizer.norm_obs(goal0[None])).to(device)
-                    tree, _ = model.generate(model.encode(obs_a), tree_cfg, generator=rng.viz)
-                    node_obs = model.decoder(tree.latent)
-                    gd = torch.linalg.vector_norm(
-                        node_obs[..., domain.goal_dims] - goal_a[..., domain.goal_dims].unsqueeze(1),
-                        dim=-1)
-                    gd = gd.masked_fill(~tree.valid, float("inf")); gd[:, 0] = float("inf")
-                    sel = int(gd.argmin(dim=1).item())
-                    nm = task.get("task_name", f"task{ti}")
-
-                    if domain.goal_metric == "onehot":
-                        logger.figure(f"viz/board_by_depth/{nm}",
-                                      dvz.view_board_by_depth(model, tree, normalizer, domain,
-                                                              goal0, title=nm), log_step)
-                    else:
-                        logger.figure(f"viz/object_tree/{nm}",
-                                      dvz.view_object_tree(model, tree, normalizer, domain,
-                                                           goal0, title=nm, selected=sel), log_step)
-                    if ti == 0:
-                        logger.scalars(dvz.branch_divergence(model, tree, normalizer, domain), log_step)
-                        logger.scalars(tstats.structural_summary(tree, model, normalizer), log_step)
-                        logger.histogram("tree/horizon_hist",
-                                         tree.action_mask.sum(-1)[tree.valid].float(), log_step)
-            except Exception as exc:
-                print(f"[treewm] domain visualisation skipped at step {log_step}: {exc}")
-        if should_visualise(log_step, cfg) and maze_spec is None:
-            barrier()
-            raise_if_stopping()
+        run_synchronized_visualization(log_step)
+        if not post_update_cadence.complete:
+            post_update_cadence.finish(completed_updates)
+        # This is the sole ordinary post-update graceful-stop boundary. It follows
+        # logging, diagnostics, validation, periodic checkpoint/evaluation, and any
+        # visualization due for the committed update.
+        raise_if_stopping()
 
     # ------------------------------------------------------- external stage gate
+    if not post_update_cadence.complete:
+        raise RuntimeError("training loop exited with incomplete post-update cadence")
+    # Close the terminal-stage race: a signal received after the final loop-body
+    # check is still checkpointed before an empty-loop resume can publish a gate.
+    raise_if_stopping()
     if stage_lifecycle_active:
         if completed_updates != stage_stop_after:
             raise RuntimeError(

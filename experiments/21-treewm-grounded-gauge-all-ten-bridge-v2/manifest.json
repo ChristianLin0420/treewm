@@ -218,7 +218,7 @@
     "stage_target": 25000,
     "stop_environment": "TREEWM_STOP_AFTER_UPDATE",
     "resume_policy": "auto only within the exact fresh Exp21 run directory; no external checkpoint is accepted",
-    "metric_boundary_policy": "At an exact 50-update graceful requeue boundary, publish the complete saved MetricTracker window and atomically reset only that tracker window before resume; model, optimizer, scheduler, loader, RNG, and horizon state remain exact."
+    "post_update_cadence_policy": "Every checkpoint carries schema-v1 post_update_cadence state. Graceful signals are deferred until deterministic logging, diagnostics, validation, evaluation, and visualization due at the committed update finish; a replayable evaluation or visualization suffix is recorded explicitly and completed before any later update after resume."
   },
   "source_snapshot": {
     "required_for_submit": true, "marker": "SNAPSHOT.json",

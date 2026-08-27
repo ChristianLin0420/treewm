@@ -18,11 +18,13 @@ only G/GS difference. The isolated `train_entry.py` registers the new bounded ob
 at runtime and accepts only an argv/environment tuple reproduced from a sealed launch;
 direct Hydra composition cannot train.
 
-Exact requeue also preserves the sealed 50-update telemetry cadence. If a graceful
-checkpoint lands after an optimizer update but before that boundary's scalar flush,
-the worker transactionally publishes the saved complete MetricTracker window and
-resets only that tracker window before exact resume. A checkpoint at the exact 25k
-boundary is resumable so the trainer can publish its immutable boundary marker.
+Exact requeue also preserves the sealed post-update cadence. The shared trainer defers
+a graceful stop until all deterministic logging, diagnostics, validation, evaluation,
+and visualization due at the committed update have completed. Every fresh Exp21
+checkpoint must carry the schema-v1 `post_update_cadence` substate; if evaluation or
+visualization remains replayable, resume completes that explicit suffix before any
+later optimizer update. A checkpoint at the exact 25k boundary remains resumable so
+the trainer can publish its immutable boundary marker.
 
 At exactly 25,000 updates, every one of 20 cells must clear the unchanged method,
 gauge, gradient, finite-telemetry, and bounded-clipping gates. The prospective monitor

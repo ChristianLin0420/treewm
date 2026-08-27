@@ -25,6 +25,11 @@ from treewm.utils.seeding import get_rng_state, set_rng_state
 
 CHECKPOINT_SCHEMA_VERSION = 2
 GRACEFUL_EXIT_CODE = 75
+POST_UPDATE_CADENCE_SCHEMA_VERSION = 1
+POST_UPDATE_REPLAY_ACTIONS = frozenset({"evaluation", "visualization"})
+OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE = frozenset(
+    {"treewm_v2_grounded_gauge_formal_v1"}
+)
 
 
 class GracefulStop(RuntimeError):
@@ -52,6 +57,146 @@ class StopController:
     def install(self) -> None:
         for sig in (signal.SIGUSR1, signal.SIGTERM):
             signal.signal(sig, lambda signum, _frame: self.request(signal.Signals(signum).name))
+
+
+class PostUpdateCadenceState:
+    """Durable phase of the deterministic work following an optimizer update.
+
+    ``completed_update == committed_update`` is a fully durable boundary.  Otherwise
+    the immediately preceding update has committed and either no replayable boundary
+    has been reached yet, or ``replay_action`` names the first remaining action that a
+    checkpoint resume must execute.
+    """
+
+    def __init__(
+        self,
+        committed_update: int,
+        completed_update: int | None = None,
+        replay_action: str | None = None,
+    ) -> None:
+        if type(committed_update) is not int:
+            raise ValueError("post-update committed_update must be an integer")
+        if completed_update is not None and type(completed_update) is not int:
+            raise ValueError("post-update completed_update must be an integer")
+        if replay_action is not None and type(replay_action) is not str:
+            raise ValueError("post-update replay_action must be a string or null")
+        self.committed_update = committed_update
+        self.completed_update = (
+            committed_update if completed_update is None else completed_update
+        )
+        self.replay_action = replay_action
+        if self.committed_update < 0 or self.completed_update < 0:
+            raise ValueError("post-update cadence counters must be nonnegative")
+        if self.completed_update not in {
+            self.committed_update,
+            max(0, self.committed_update - 1),
+        }:
+            raise ValueError("post-update cadence checkpoint has an invalid boundary")
+        if self.replay_action not in {None, *POST_UPDATE_REPLAY_ACTIONS}:
+            raise ValueError("post-update cadence checkpoint has an invalid replay action")
+        if self.complete and self.replay_action is not None:
+            raise ValueError("complete post-update cadence cannot retain a replay action")
+
+    @classmethod
+    def from_state_dict(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        require_durable: bool = False,
+    ) -> "PostUpdateCadenceState":
+        if not isinstance(value, Mapping):
+            raise ValueError("checkpoint post_update_cadence state is malformed")
+        expected = {
+            "schema_version",
+            "committed_update",
+            "completed_update",
+            "replay_action",
+        }
+        if set(value) != expected:
+            missing = sorted(expected.difference(value))
+            unexpected = sorted(str(key) for key in set(value).difference(expected))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise ValueError(
+                "checkpoint post_update_cadence fields differ"
+                + (": " + "; ".join(details) if details else "")
+            )
+        if type(value["schema_version"]) is not int or value["schema_version"] != (
+            POST_UPDATE_CADENCE_SCHEMA_VERSION
+        ):
+            raise ValueError("checkpoint post_update_cadence schema differs")
+        state = cls(
+            value["committed_update"],
+            value["completed_update"],
+            value["replay_action"],
+        )
+        if require_durable and not state.complete and state.replay_action is None:
+            raise ValueError(
+                "checkpoint stopped inside post-update cadence without replay intent"
+            )
+        return state
+
+    @property
+    def complete(self) -> bool:
+        return self.completed_update == self.committed_update
+
+    def begin(self, committed_update: int) -> None:
+        if type(committed_update) is not int:
+            raise ValueError("post-update committed_update must be an integer")
+        if not self.complete:
+            raise RuntimeError("cannot commit another update before cadence completion")
+        if committed_update != self.committed_update + 1:
+            raise RuntimeError("post-update cadence commits must be consecutive")
+        self.committed_update = committed_update
+        self.replay_action = None
+
+    def mark_replay(self, replay_action: str, update: int) -> None:
+        if type(update) is not int or update != self.committed_update:
+            raise RuntimeError("cannot mark replay for a different update")
+        if replay_action not in POST_UPDATE_REPLAY_ACTIONS:
+            raise ValueError("invalid post-update replay action")
+        if self.complete:
+            if update <= 0:
+                raise RuntimeError("cannot reopen the initial cadence boundary")
+            # Legacy checkpoints could carry evaluation intent without the cadence
+            # substate. Reopen only that already-committed update for explicit replay.
+            self.completed_update = update - 1
+        if self.replay_action is not None:
+            allowed = (
+                self.replay_action == replay_action
+                or (self.replay_action == "evaluation" and replay_action == "visualization")
+            )
+            if not allowed:
+                raise RuntimeError("post-update replay action regressed")
+        self.replay_action = replay_action
+
+    def finish(self, completed_update: int) -> None:
+        if type(completed_update) is not int:
+            raise ValueError("post-update completed_update must be an integer")
+        if completed_update != self.committed_update:
+            raise RuntimeError("cannot finish cadence for a different update")
+        self.completed_update = completed_update
+        self.replay_action = None
+
+    def stop_checkpoint_is_durable(self, pending_eval_step: int | None) -> bool:
+        if self.complete:
+            return True
+        if self.replay_action == "evaluation":
+            return pending_eval_step == self.committed_update
+        if self.replay_action == "visualization":
+            return pending_eval_step is None
+        return False
+
+    def state_dict(self) -> dict[str, int | str | None]:
+        return {
+            "schema_version": POST_UPDATE_CADENCE_SCHEMA_VERSION,
+            "committed_update": self.committed_update,
+            "completed_update": self.completed_update,
+            "replay_action": self.replay_action,
+        }
 
 
 def build_checkpoint(
@@ -402,12 +547,41 @@ def validate_exact_resume_payload(
         not isinstance(pending, int) or isinstance(pending, bool) or pending < 0
     ):
         raise ValueError("checkpoint pending evaluation step is invalid")
+    if pending is not None and pending != completed:
+        raise ValueError("checkpoint pending evaluation step differs from update boundary")
     if payload.get("final_eval") is not None and not isinstance(
         payload.get("final_eval"), Mapping
     ):
         raise ValueError("checkpoint final evaluation state is invalid")
-    if payload.get("phase") not in {"train", "final_eval"}:
+    phase = payload.get("phase")
+    if phase not in {"train", "final_eval"}:
         raise ValueError("checkpoint phase is invalid")
+    cadence_payload = payload.get("post_update_cadence")
+    objective_version = str(identity.get("objective_version", ""))
+    if cadence_payload is None:
+        if objective_version in OBJECTIVES_REQUIRING_POST_UPDATE_CADENCE:
+            raise ValueError(
+                "checkpoint lacks post_update_cadence required by formal objective"
+            )
+    else:
+        cadence = PostUpdateCadenceState.from_state_dict(
+            cadence_payload,
+            require_durable=True,
+        )
+        if cadence.committed_update != completed:
+            raise ValueError("checkpoint post-update cadence/update boundary differs")
+        if cadence.replay_action == "evaluation" and pending != completed:
+            raise ValueError(
+                "checkpoint evaluation replay intent differs from pending evaluation"
+            )
+        if cadence.replay_action == "visualization" and pending is not None:
+            raise ValueError(
+                "checkpoint visualization replay cannot retain evaluation intent"
+            )
+        if cadence.complete and phase == "train" and pending is not None:
+            raise ValueError(
+                "checkpoint completed cadence cannot retain training evaluation intent"
+            )
     if not isinstance(payload.get("gradient_checkpointing"), bool):
         raise ValueError("checkpoint gradient-checkpointing state is invalid")
     if not isinstance(payload.get("reason"), str) or not payload["reason"]:
