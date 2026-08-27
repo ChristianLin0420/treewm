@@ -35,6 +35,10 @@ train:
   separate_gain_grad_clip: false
   world_grad_clip: 1.0
   gain_grad_clip: 1.0
+  # Fresh v2 objectives may isolate the recurrent branch-transformer trunk from the
+  # rest of the world path. Disabled by default to preserve every existing optimizer.
+  separate_branch_transformer_grad_clip: false
+  branch_transformer_grad_clip: 1.0
   grad_accum: 1
   gradient_checkpointing: true  # required activation rematerialisation for formal runs
   bf16: true                 # A100 default (spec section 24)
@@ -158,6 +162,10 @@ losses:
   grounded_loss_horizon_weight: 0.0
   grounded_loss_endpoint_weight: 0.0
   grounded_detach_self_fed_parent: true
+  # Outcome-blind update-zero latent-scale gauge. It is registered only by a fresh v2
+  # objective; legacy and existing v2 objectives keep the loss disabled at weight zero.
+  latent_gauge_epsilon: 1.0e-8
+  latent_gauge_min_reference_scale: 1.0e-4
   # Track H2 -- per-depth weights for the multi-step loss ([] -> uniform).
   multistep_depth_weights: []
   redundancy_temperature: 0.25
@@ -212,6 +220,7 @@ losses:
     recursive: 0.2
     uncertainty: 0.2
     multistep: 0.0
+    latent_gauge: 0.0
   enabled:
     state: true
     action: true
@@ -227,6 +236,7 @@ losses:
     recursive: true
     uncertainty: true
     multistep: false
+    latent_gauge: false
 
 # -------------------------------------------------------------------- planner
 planner:

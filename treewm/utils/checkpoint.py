@@ -365,6 +365,17 @@ def validate_exact_resume_payload(
         _validate_generator_state(
             state["horizon_generator"], "horizon-generator state"
         )
+        if "metric_tracker" in state:
+            # New checkpoints may preserve an in-flight scalar aggregation window.
+            # Validate it here, before the trainer mutates any resumed state.
+            from treewm.logging.metrics import MetricTracker
+
+            try:
+                MetricTracker().load_state_dict(state["metric_tracker"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "checkpoint rank metric-tracker state is invalid"
+                ) from exc
         ranks.append(state["rank"])
     if sorted(ranks) != list(range(world_size)) or len(set(ranks)) != world_size:
         raise ValueError("checkpoint rank-state coverage differs")

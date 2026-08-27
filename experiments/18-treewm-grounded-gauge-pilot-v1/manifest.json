@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-grounded-gauge-pilot-v1",
+  "classification": "bounded_causal_gauge_pilot",
+  "claim_policy": "This fresh staged 5k-to-25k causal gauge pilot is engineering validation, not formal validation, and cannot support a 1M claim.",
+  "formal_validation": false,
+  "expected_stage_5000_runs": 30,
+  "expected_stage_25000_slots": 20,
+  "expected_promoted_runs": 10,
+  "engineering_diagnosis": {
+    "campaign_id": "treewm-grounded-repair-pilot-v1",
+    "status": "engineering_aborted_gauge_collapse",
+    "accepted_prerequisite": false,
+    "resume_allowed": false,
+    "package_protocol_sha256": "ec41f19a97ab0c21d341b00baa69a6f50259408adda2d7bc6428ff46398a4f49",
+    "source_sha256": "dc0b5d2c80a25c6ac51495696e83450859de4429fe9e40137572b1e981510d6a",
+    "scheduler_array_job_id": "33127349",
+    "diagnostic_policy": "Exp15 artifacts may be bound read-only for provenance only; no acceptance, checkpoint, optimizer, RNG, or loader state may enter this pilot."
+  },
+  "method": {
+    "arm": "treewm",
+    "model_class": "TreeWM",
+    "experiment_config": "treewm_v2_grounded_gauge_pilot",
+    "objective_version": "treewm_v2_grounded_gauge_pilot_v1",
+    "node_budget": 64,
+    "branch_factor": 4
+  },
+  "inference_choice": {
+    "profile": "learned_guard_on",
+    "profiles": {
+      "learned_guard_on": {"scorer": "learned", "require_first_edge_improvement": true},
+      "learned_guard_off": {"scorer": "learned", "require_first_edge_improvement": false},
+      "bfs_guard_on": {"scorer": "bfs", "require_first_edge_improvement": true},
+      "bfs_guard_off": {"scorer": "bfs", "require_first_edge_improvement": false},
+      "novelty_q_guard_on": {"scorer": "novelty_q", "require_first_edge_improvement": true},
+      "novelty_q_guard_off": {"scorer": "novelty_q", "require_first_edge_improvement": false}
+    },
+    "decision_policy": "The learned scorer with first-edge guard is prospectively locked for every arm and stage; diagnostics cannot change it."
+  },
+  "design": {
+    "seeds": [104, 105],
+    "stage_5000_mapping": "index=((setting_index*3)+arm_index)*2+seed_index",
+    "stage_25000_mapping": "index=((setting_index*2)+continuation_arm_index)*2+seed_index",
+    "task_ids": [1, 2, 3, 4, 5],
+    "stage_5000_arms": ["N", "G", "GS"],
+    "continuation_arms": ["G", "GS"],
+    "promotion_precedence": ["G", "GS"],
+    "nonpromotable_arms": ["N"],
+    "promotion_policy": "Select G only if all ten G setting/seed cells satisfy every absolute gauge, clipping, integrity, and unchanged method gate plus the paired causal comparison to N; otherwise select GS under the identical universal contract; otherwise reject.",
+    "fresh_start_policy": "All thirty 5k runs start from scratch in an empty namespace. Exp15 and all other checkpoints are ineligible."
+  },
+  "arms": [
+    {
+      "id": "N", "label": "historical-c-no-gauge-nonpromotable", "promotable": false,
+      "world_lr": 0.00003, "transition_mode": "grounded_execution_v2",
+      "grounded_select_action_weight": 1.0, "grounded_select_endpoint_weight": 1.0, "grounded_select_horizon_weight": 0.25,
+      "grounded_loss_latent_weight": 0.25, "grounded_loss_action_weight": 0.5, "grounded_loss_horizon_weight": 0.25, "grounded_loss_endpoint_weight": 0.5,
+      "latent_gauge_enabled": false, "latent_gauge_weight": 0.0,
+      "separate_branch_transformer_grad_clip": false, "branch_transformer_grad_clip": 1.0
+    },
+    {
+      "id": "G", "label": "gauge-with-shared-world-clipping", "promotable": true,
+      "world_lr": 0.00003, "transition_mode": "grounded_execution_v2",
+      "grounded_select_action_weight": 1.0, "grounded_select_endpoint_weight": 1.0, "grounded_select_horizon_weight": 0.25,
+      "grounded_loss_latent_weight": 0.25, "grounded_loss_action_weight": 0.5, "grounded_loss_horizon_weight": 0.25, "grounded_loss_endpoint_weight": 0.5,
+      "latent_gauge_enabled": true, "latent_gauge_weight": 1.0,
+      "separate_branch_transformer_grad_clip": false, "branch_transformer_grad_clip": 1.0
+    },
+    {
+      "id": "GS", "label": "gauge-with-separate-branch-transformer-clipping", "promotable": true,
+      "world_lr": 0.00003, "transition_mode": "grounded_execution_v2",
+      "grounded_select_action_weight": 1.0, "grounded_select_endpoint_weight": 1.0, "grounded_select_horizon_weight": 0.25,
+      "grounded_loss_latent_weight": 0.25, "grounded_loss_action_weight": 0.5, "grounded_loss_horizon_weight": 0.25, "grounded_loss_endpoint_weight": 0.5,
+      "latent_gauge_enabled": true, "latent_gauge_weight": 1.0,
+      "separate_branch_transformer_grad_clip": true, "branch_transformer_grad_clip": 1.0
+    }
+  ],
+  "scientific_contract": {
+    "optimizer_updates": 25000,
+    "scheduler_total_steps": 1000000,
+    "checkpoint_every_updates": 1000,
+    "validation_every_updates": 1000,
+    "diagnostics_every_updates": 1000,
+    "periodic_evaluation_every_updates": 12500,
+    "periodic_evaluation_updates": [12500, 25000],
+    "periodic_episodes_per_task": 1,
+    "final_episodes_per_task": 5,
+    "validation_sample_seed": 1701,
+    "evaluation_seed": 2718,
+    "evaluation_seed_protocol_sha256": "96001dcf77f1210ae3bac7c2250f7feafc7bf11cf2ba83627f04cbef87157398",
+    "task_split": "standard",
+    "data_loader_workers": 10,
+    "loader_thread_limit": 1,
+    "gradient_checkpointing": true,
+    "world_weight_decay": 0.001,
+    "model_dropout": 0.1,
+    "model_max_depth": 3,
+    "tree_max_depth": 3,
+    "keep_threshold": 0.5,
+    "keep_balance": true,
+    "multistep_enabled": true,
+    "multistep_weight": 1.0,
+    "multistep_depth_weights": [1.0, 1.0, 1.0],
+    "scheduled_sampling_p": 0.25,
+    "scheduled_sampling_warmup": 5000,
+    "scheduled_sampling_granularity": "sequence",
+    "grounded_detach_self_fed_parent": true,
+    "gain_lr": 0.0003,
+    "gain_weight_decay": 0.0,
+    "gain_loss_every": 1,
+    "gain_training_scorers": ["learned", "novelty_q"],
+    "planner_decoded_metric": "domain_raw",
+    "planner_execute_mode": "clipped",
+    "planner_execute_steps": 4,
+    "min_first_edge_improvement": 0.0,
+    "latent_gauge_epsilon": 1e-8,
+    "latent_gauge_min_reference_scale": 0.0001,
+    "future_config": {
+      "recipe_anchor_policy": "published_union", "num_neighbors": 24, "query_multiplier": 6,
+      "time_exclusion": 50, "include_self": true, "metric_mode": "rms_v2",
+      "horizons": [4, 8, 16, 32, 64], "h_max": 64, "horizon_rule": "displacement",
+      "fixed_horizon": 32, "cluster_method": "average", "max_modes": 4,
+      "multi_step_depth": 3, "retrieval_pool": 50000, "cache": false, "shared_cache": true
+    }
+  },
+  "compatible_v2_recipe_input": {
+    "campaign_id": "treewm-50task-1m-v2",
+    "objective_version": "treewm_v2_rms_rank_v1",
+    "campaign_protocol_sha256": "1ee9dd8a65ab5b01def3d55826efe34212628e9c1393259ef17e5d12665afc82",
+    "recipe_code_sha256": "4cb70b4421d3eae1a6e947e3b0359336bd64248897ffcf52d4a672ca4adcd30c",
+    "recipe_runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+    "read_only": true
+  },
+  "lifecycle": {
+    "stage_targets": [5000, 25000],
+    "stop_environment": "TREEWM_STOP_AFTER_UPDATE",
+    "stage_5000_array": "0-29%30",
+    "stage_25000_array": "0-19%20",
+    "stage_25000_nonselected_policy": "Publish a hash-bound SKIPPED_BY_SELECTION artifact and return success without launching the trainer.",
+    "resume_policy": "Auto-resume only the selected arm from its exact exp18 5k checkpoint; N and all external checkpoints are forbidden.",
+    "cancellation_policy": "A persistent latch is polled by the remote worker, which signals and waits for its trainer, verifies a graceful exact checkpoint, and publishes CANCELLED.json before the batch exits. The batch must never signal the local srun client."
+  },
+  "stage_acceptance": {
+    "required_finite_tags": [
+      "latent_gauge/root/scale", "latent_gauge/root/reference", "latent_gauge/root/ratio",
+      "latent_gauge/future/scale", "latent_gauge/future/reference", "latent_gauge/future/ratio",
+      "latent_gauge/min_ratio", "latent_gauge/loss", "latent_gauge/reference_sealed", "latent_gauge/reference_update",
+      "val/loss_total", "val/loss_multistep_self_fed", "val/loss_horizon",
+      "control/retrieval_uses_task_metric_endpoint", "control/q_advantage_over_z", "control/q_advantage_over_random_proj",
+      "expansion/gain_rank_correlation", "expansion/gain_pairwise_accuracy", "expansion/gain_eligible_decision_fraction",
+      "expansion/gain_ordered_pair_count", "expansion/gain_pair_coverage_fraction",
+      "tree/support_recall", "tree/support_precision",
+      "train/grad_norm_world", "train/grad_norm_gain", "train/grad_clip_coefficient_world", "train/grad_clip_coefficient_gain",
+      "data/validation_fixed_sample_count",
+      "data/validation_horizon_label_fraction_h4", "data/validation_horizon_label_fraction_h8",
+      "data/validation_horizon_label_fraction_h16", "data/validation_horizon_label_fraction_h32", "data/validation_horizon_label_fraction_h64"
+    ],
+    "training_exact_target_tags": [
+      "latent_gauge/root/scale", "latent_gauge/root/reference", "latent_gauge/root/ratio",
+      "latent_gauge/future/scale", "latent_gauge/future/reference", "latent_gauge/future/ratio",
+      "latent_gauge/min_ratio", "latent_gauge/loss", "latent_gauge/reference_sealed", "latent_gauge/reference_update",
+      "train/grad_norm_world", "train/grad_norm_gain", "train/grad_clip_coefficient_world", "train/grad_clip_coefficient_gain"
+    ],
+    "training_every_updates": 50,
+    "validation_diagnostic_every_updates": 1000,
+    "gradient_recent_window_updates": 5000,
+    "gauge_recent_window_updates": 1000,
+    "min_scale_ratio": 0.8,
+    "reference_update": 0,
+    "reference_sealed": 1.0,
+    "min_paired_mean_ratio_delta_vs_n": 0.0,
+    "min_gradient_norm": 1e-8,
+    "min_clip_coefficient": 0.05,
+    "max_clip_fraction_below_threshold": 0.25,
+    "max_validation_regret_fraction": 0.1,
+    "max_self_fed_multistep_validation_regret_fraction": 0.1,
+    "horizon_uniform_cross_entropy": 1.6094379124341003,
+    "horizon_label_fraction_sum_tolerance": 0.02,
+    "min_q_advantage": 0.0,
+    "min_gain_rank_correlation": 0.1,
+    "min_gain_pairwise_accuracy": 0.52,
+    "min_gain_eligible_decision_fraction": 0.2,
+    "min_gain_ordered_pair_count": 1.0,
+    "min_gain_pair_coverage_fraction": 0.01,
+    "min_support_recall": 0.5,
+    "min_support_precision": 0.25,
+    "selection_stage": 5000,
+    "outcome_stage": 25000,
+    "outcome_episodes_per_run": 5,
+    "min_total_successes_per_seed": 1,
+    "min_mean_distance_reduction_per_seed": 0.0,
+    "min_settings_with_both_seed_success": 1,
+    "min_settings_with_both_seed_positive_progress": 3,
+    "universal_candidate_cells_required": 10,
+    "selected_terminal_runs_required": 10,
+    "unchanged_method_gate_policy": "Every promotable cell must pass the same validation, self-fed, horizon, q, gain, support, gradient, and clipping gates at both boundaries."
+  },
+  "source_snapshot": {
+    "required_for_submit": true, "marker": "SNAPSHOT.json", "status": "sealed_read_only",
+    "repo_subdirectory": "repo", "writable_files_allowed": false
+  },
+  "execution": {
+    "stage_5000_array": "0-29%30", "stage_25000_array": "0-19%20",
+    "gpu_partitions": "polar4,polar3,polar,grizzly", "cpu_partition": "cpu",
+    "gpus_per_task": 1, "cpus_per_task": 12, "memory_per_task": "64G", "walltime": "04:00:00",
+    "signal_seconds_before_end": 420, "sbatch": "/usr/local/bin/sbatch",
+    "srun": "/cm/shared/apps/slurm/current/bin/srun", "scontrol": "/cm/shared/apps/slurm/current/bin/scontrol"
+  },
+  "paths": {
+    "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
+    "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
+    "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
+    "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-gauge-pilot-v1"
+  },
+  "logging": {
+    "wandb_project": "treewm-grounded-gauge-pilot-v1",
+    "wandb_group": "treewm-grounded-gauge-pilot-v1",
+    "wandb_mode": "online"
+  },
+  "settings": [
+    {
+      "id": "antmaze-large", "env_config": "antmaze_large_navigate", "env_name": "antmaze-large-navigate-v0", "source_name": "antmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "9009f22bcf2007341a6e3040b5f8a325fdd542520e852c372b90cdd50cad9d6e", "calibration_sha256": "77d33a07fa5862150472b6bf8d97e3ed7e7c3a4c803fb0c3c121ebe7cb234a62", "future_recipe_sha256": "34087d2bab3b42f5fe96a2148a96975a757def976ec69bab2d9b206ffe953598",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "scene", "env_config": "scene_play", "env_name": "scene-play-v0", "source_name": "scene-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 32, 33, 36, 38], "relative_endpoints": false, "max_episode_steps": 750,
+      "input_contract_sha256": "0fa8d6c363a88503133669d5715a549a9e4c2b70148d486bc25bda9090958f89", "calibration_sha256": "b2935ffac00eeb409e48066625760b8243d5a6f34fc83e18e1cea46b5c7a051e", "future_recipe_sha256": "8c345a6b855ab1bf378dc84839b0ce8728284cd3620e05336ec6e527d0e8af09",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-3x3", "env_config": "puzzle_3x3_play", "env_name": "puzzle-3x3-play-v0", "source_name": "puzzle-3x3-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "39f7ca2799cf13f876f7bbe4991589f8bf967e4372d9484d21f3bd6dee778e6c", "calibration_sha256": "58263941d8902dfee9d4171ea13930ee8ca3f0ee5f1e316c4151ee28283ed4c7", "future_recipe_sha256": "58c0d8dc7ca10be57d971e1d30031736c972521c0e735cb01b0c2938185adae9",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-4x4-100m", "env_config": "puzzle_4x4_play_100m", "env_name": "puzzle-4x4-play-v0", "source_name": "puzzle-4x4-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/puzzle-4x4-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52, 55, 56, 59, 60, 63, 64, 67, 68, 71, 72, 75, 76, 79, 80], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "7ba892f3e4b7eb11b1b1c9712bbf9d9237c66910b13c034f4fbe01c1c34e4883", "calibration_sha256": "03bc78c2b7948093dd752e01ec512338da83f2cf677b6c4fc5e7e900ab51ba18", "future_recipe_sha256": "819a452dc22c3d80fe44aad3848b1e6a11295863b80fe87ba0510f5a2f9a6ff3",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    },
+    {
+      "id": "cube-quadruple-100m", "env_config": "cube_quadruple_play_100m", "env_name": "cube-quadruple-play-v0", "source_name": "cube-quadruple-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/cube-quadruple-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39, 46, 47, 48], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "cfd70e8f04c396e9ea88720d483e5190bed4ff1ae36b27e2da81b5324542e9a6", "calibration_sha256": "3240b1462484bca29e10e8d3c8a59a4df12c2989ab74066bd6484b038bba4928", "future_recipe_sha256": "42aec1a4b9de2b4c98efd0bb7b51edad0330f7241adf5ad148dfbbded0eeca5f",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    }
+  ]
+}

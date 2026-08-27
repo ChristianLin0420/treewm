@@ -12,6 +12,7 @@ centralised here rather than done ad hoc at each call site.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -82,6 +83,68 @@ class MetricTracker:
         self._sums.clear()
         self._counts.clear()
         self._hists.clear()
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the exact local accumulation window for checkpoint/resume.
+
+        A signal can arrive between logging boundaries.  Persisting only model and
+        loader state would make the first scalar after resume a partial-window mean,
+        which is unacceptable when a preregistered gate consumes a complete cadence.
+        """
+        return {
+            "schema_version": 1,
+            "sums": dict(self._sums),
+            "counts": dict(self._counts),
+            "hists": {
+                name: [np.asarray(chunk, dtype=np.float32).copy() for chunk in chunks]
+                for name, chunks in self._hists.items()
+            },
+        }
+
+    def load_state_dict(self, state: Mapping[str, object]) -> None:
+        """Restore a structurally validated local accumulation window."""
+        if not isinstance(state, Mapping) or state.get("schema_version") != 1:
+            raise ValueError("metric-tracker checkpoint state is invalid")
+        sums = state.get("sums")
+        counts = state.get("counts")
+        hists = state.get("hists")
+        if not isinstance(sums, Mapping) or not isinstance(counts, Mapping):
+            raise ValueError("metric-tracker scalar state is invalid")
+        if set(sums) != set(counts) or not all(
+            isinstance(name, str) and name for name in sums
+        ):
+            raise ValueError("metric-tracker scalar keys differ")
+        restored_sums: dict[str, float] = {}
+        restored_counts: dict[str, float] = {}
+        for name in sums:
+            try:
+                total = float(sums[name])
+                count = float(counts[name])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("metric-tracker scalar state is nonnumeric") from exc
+            if not np.isfinite(total) or not np.isfinite(count) or count < 0.0:
+                raise ValueError("metric-tracker scalar state is non-finite")
+            restored_sums[name] = total
+            restored_counts[name] = count
+        if not isinstance(hists, Mapping):
+            raise ValueError("metric-tracker histogram state is invalid")
+        restored_hists: dict[str, list[np.ndarray]] = {}
+        for name, chunks in hists.items():
+            if not isinstance(name, str) or not name or not isinstance(chunks, (list, tuple)):
+                raise ValueError("metric-tracker histogram entry is invalid")
+            restored_chunks: list[np.ndarray] = []
+            for chunk in chunks:
+                array = np.asarray(chunk, dtype=np.float32).ravel().copy()
+                if not np.isfinite(array).all():
+                    raise ValueError("metric-tracker histogram state is non-finite")
+                if array.size:
+                    restored_chunks.append(array)
+            restored_hists[name] = restored_chunks
+
+        self.reset()
+        self._sums.update(restored_sums)
+        self._counts.update(restored_counts)
+        self._hists.update(restored_hists)
 
     def __contains__(self, name: str) -> bool:
         return name in self._sums

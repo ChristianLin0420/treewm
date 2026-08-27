@@ -67,3 +67,28 @@ def test_reduction_is_identity_without_a_process_group():
     tracker.add("x", 1.0, count=2)
     tracker.add("x", 3.0, count=2)
     assert abs(tracker.compute(reduce=True)["x"] - 2.0) < 1e-6
+
+
+def test_metric_tracker_partial_window_round_trips_exactly():
+    tracker = MetricTracker()
+    tracker.add("loss", 1.0, count=2)
+    tracker.add("loss", 4.0, count=1)
+    tracker.add("bad", float("nan"))
+    tracker.add_hist("scores", torch.tensor([1.0, 2.0]))
+    state = tracker.state_dict()
+
+    restored = MetricTracker()
+    restored.load_state_dict(state)
+    restored.add("loss", 7.0, count=1)
+    restored.add_hist("scores", torch.tensor([3.0]))
+    assert restored.compute(reduce=False)["loss"] == pytest.approx(3.25)
+    assert restored.compute(reduce=False)["bad__nonfinite"] == pytest.approx(1.0)
+    torch.testing.assert_close(
+        torch.from_numpy(restored.histograms()["scores"]),
+        torch.tensor([1.0, 2.0, 3.0]),
+    )
+
+    corrupt = dict(state)
+    corrupt["counts"] = {"loss": float("nan")}
+    with pytest.raises(ValueError, match="keys differ|non-finite"):
+        MetricTracker().load_state_dict(corrupt)

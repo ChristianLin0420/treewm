@@ -54,6 +54,7 @@ from treewm.data.maze_utils import MazeSpec
 from treewm.logging.metrics import MetricTracker
 from treewm.logging.tensorboard import TreeWMLogger
 from treewm.losses.expansion_losses import novelty_gain_loss
+from treewm.losses.latent_gauge import LatentGauge
 from treewm.losses.recursive_losses import multi_step_recursive_loss, scheduled_sampling_schedule
 from treewm.losses.total import (
     assemble_loss_terms,
@@ -94,13 +95,17 @@ TREEWM_V2_OBJECTIVES = frozenset(
         "treewm_v2_grounded_formal_v1",
         "treewm_v2_grounded_repair_pilot_v1",
         "treewm_v2_grounded_repair_formal_v1",
+        "treewm_v2_grounded_gauge_pilot_v1",
     }
 )
 BOUNDED_PILOT_OBJECTIVES = {
     "treewm_v2_grounded_pilot_v1": 20_000,
     "treewm_v2_grounded_repair_pilot_v1": 25_000,
+    "treewm_v2_grounded_gauge_pilot_v1": 25_000,
 }
+LATENT_GAUGE_OBJECTIVES = frozenset({"treewm_v2_grounded_gauge_pilot_v1"})
 FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
+GAUGE_PILOT_STAGE_UPDATES = frozenset({5_000, 25_000})
 GROUNDED_FORMAL_OBJECTIVES = frozenset(
     {"treewm_v2_grounded_formal_v1", "treewm_v2_grounded_repair_formal_v1"}
 )
@@ -127,17 +132,23 @@ def resolve_stage_stop_after(
     total_steps: int,
     value: str | None,
 ) -> tuple[int, bool]:
-    """Resolve lifecycle-only formal staging without changing scientific identity."""
+    """Resolve registered lifecycle staging without changing scientific identity."""
     if value is None:
         return int(total_steps), False
-    if objective_version not in GROUNDED_FORMAL_OBJECTIVES:
+    if objective_version in GROUNDED_FORMAL_OBJECTIVES:
+        allowed_stages = FORMAL_STAGE_UPDATES
+        stage_label = "grounded formal"
+    elif objective_version in LATENT_GAUGE_OBJECTIVES:
+        allowed_stages = GAUGE_PILOT_STAGE_UPDATES
+        stage_label = "latent-gauge pilot"
+    else:
         raise ValueError(
-            "TREEWM_STOP_AFTER_UPDATE is reserved for grounded formal stages"
+            "TREEWM_STOP_AFTER_UPDATE is reserved for registered staged objectives"
         )
     stage = int(value)
-    if stage not in FORMAL_STAGE_UPDATES:
+    if stage not in allowed_stages:
         raise ValueError(
-            "grounded formal stage limit must be 2000, 25000, 100000, or 1000000"
+            f"{stage_label} stage limit must be one of {sorted(allowed_stages)}"
         )
     if stage > int(total_steps):
         raise ValueError("stage limit cannot exceed scientific train.steps")
@@ -280,6 +291,46 @@ def validate_multistep_transition_configuration(
     )
     if decoded_active and model is not None and getattr(model, "decoder", None) is None:
         raise ValueError("grounded decoded recursive terms require model.decoder")
+
+
+def validate_latent_gauge_configuration(
+    objective_version: str,
+    loss_cfg,
+) -> None:
+    """Bind the new gauge graph to its fresh bounded v2 identity only."""
+    active = loss_cfg.on("latent_gauge")
+    registered = objective_version in LATENT_GAUGE_OBJECTIVES
+    if active and not registered:
+        raise ValueError("latent_gauge is restricted to a registered TreeWM-v2 objective")
+    if not registered:
+        return
+    configured_weight = float(loss_cfg.weights.latent_gauge)
+    configured_enabled = bool(loss_cfg.enabled.get("latent_gauge", False))
+    if (configured_enabled, configured_weight) not in {(False, 0.0), (True, 1.0)}:
+        raise ValueError(
+            "the bounded gauge objective requires either monitor-only false/0.0 "
+            "or active true/1.0"
+        )
+    if active and float(loss_cfg.scale("latent_gauge", 0)) != 1.0:
+        raise ValueError("latent-gauge regularization must be active from update zero")
+    if active and (
+        int(loss_cfg.warmup.get("latent_gauge", 0)) != 0
+        or int(loss_cfg.decay.get("latent_gauge", 0)) != 0
+    ):
+        raise ValueError("latent-gauge regularization cannot warm up or decay")
+    if (
+        not math.isfinite(float(loss_cfg.latent_gauge_epsilon))
+        or float(loss_cfg.latent_gauge_epsilon) <= 0.0
+    ):
+        raise ValueError("latent_gauge_epsilon must be finite and positive")
+    if (
+        not math.isfinite(float(loss_cfg.latent_gauge_min_reference_scale))
+        or float(loss_cfg.latent_gauge_min_reference_scale)
+        <= float(loss_cfg.latent_gauge_epsilon)
+    ):
+        raise ValueError(
+            "latent_gauge_min_reference_scale must exceed latent_gauge_epsilon"
+        )
 
 
 def heldout_multistep_validation(
@@ -453,6 +504,33 @@ def gradient_parameter_groups(model, include_branch_prior: bool) -> tuple[list, 
     ]
     gain_parameters = [parameter for parameter in gain_parameters if parameter.requires_grad]
     return world_parameters, gain_parameters
+
+
+def split_branch_transformer_parameters(
+    model,
+    world_parameters,
+) -> tuple[list, list]:
+    """Split the recurrent transformer from the existing non-gain world group.
+
+    The input order is retained in both outputs so optimizer parameter ordering is
+    deterministic and exact-resume checks can reject any configuration drift.
+    """
+    branch_ids = {
+        id(parameter)
+        for parameter in model.branch_transformer.parameters()
+        if parameter.requires_grad
+    }
+    branch_parameters = [
+        parameter for parameter in world_parameters if id(parameter) in branch_ids
+    ]
+    world_rest = [
+        parameter for parameter in world_parameters if id(parameter) not in branch_ids
+    ]
+    if not branch_parameters:
+        raise ValueError("separate branch-transformer clipping found no trainable parameters")
+    if len(world_rest) + len(branch_parameters) != len(world_parameters):
+        raise RuntimeError("branch-transformer parameter split is not exhaustive")
+    return world_rest, branch_parameters
 
 
 def module_gradient_norms(model, include_branch_prior: bool) -> dict[str, float]:
@@ -916,6 +994,20 @@ def main(cfg: DictConfig) -> None:
     match_cfg = cfg_utils.matching_config(cfg)
     loss_cfg = cfg_utils.loss_config(cfg)
     validate_multistep_transition_configuration(objective_version, loss_cfg, model)
+    validate_latent_gauge_configuration(objective_version, loss_cfg)
+    if objective_version in LATENT_GAUGE_OBJECTIVES:
+        # Attach only for the fresh objective. Existing model/checkpoint state dicts are
+        # therefore byte-for-byte unchanged, while gauge references become ordinary
+        # persistent model buffers before DDP and checkpoint restore are constructed.
+        model.add_module(
+            "latent_gauge",
+            LatentGauge(
+                epsilon=float(loss_cfg.latent_gauge_epsilon),
+                min_reference_scale=float(
+                    loss_cfg.latent_gauge_min_reference_scale
+                ),
+            ).to(device),
+        )
     planner_cfg = cfg_utils.planner_config(cfg)
     # The v2 scorer creates its set-attention modules lazily. This must precede both
     # optimiser construction and checkpoint restore so parameters/state are identical.
@@ -948,6 +1040,18 @@ def main(cfg: DictConfig) -> None:
         model, include_branch_prior=include_branch_prior
     )
     separate_gain_clip = bool(cfg.train.get("separate_gain_grad_clip", False))
+    separate_branch_clip = bool(
+        cfg.train.get("separate_branch_transformer_grad_clip", False)
+    )
+    if separate_branch_clip:
+        world_rest_parameters, branch_transformer_parameters = (
+            split_branch_transformer_parameters(model, world_parameters)
+        )
+    else:
+        # Aliases only: the disabled branch follows the exact historical optimizer and
+        # clipping construction below.
+        world_rest_parameters = world_parameters
+        branch_transformer_parameters = []
     if total_steps == 1_000_000 and objective_version in TREEWM_V2_OBJECTIVES:
         v2_contract = formal_v2_objective_contract(
             model,
@@ -1007,13 +1111,21 @@ def main(cfg: DictConfig) -> None:
         or configured_gain_lr is not None
         or configured_gain_weight_decay is not None
     )
-    optimizer_parameters = (
-        [
+    if separate_branch_clip:
+        # Stable group order is part of exact checkpoint resume. The gain group remains
+        # explicit even when it happens to share world hyperparameters.
+        optimizer_parameters = [
             {
-                "params": world_parameters,
+                "params": world_rest_parameters,
                 "lr": float(cfg.train.lr),
                 "weight_decay": float(cfg.train.weight_decay),
-                "name": "world",
+                "name": "world_rest",
+            },
+            {
+                "params": branch_transformer_parameters,
+                "lr": float(cfg.train.lr),
+                "weight_decay": float(cfg.train.weight_decay),
+                "name": "branch_transformer",
             },
             {
                 "params": gain_parameters,
@@ -1022,9 +1134,25 @@ def main(cfg: DictConfig) -> None:
                 "name": "gain",
             },
         ]
-        if separate_gain_optimizer
-        else model.parameters()
-    )
+    else:
+        optimizer_parameters = (
+            [
+                {
+                    "params": world_parameters,
+                    "lr": float(cfg.train.lr),
+                    "weight_decay": float(cfg.train.weight_decay),
+                    "name": "world",
+                },
+                {
+                    "params": gain_parameters,
+                    "lr": gain_lr,
+                    "weight_decay": gain_weight_decay,
+                    "name": "gain",
+                },
+            ]
+            if separate_gain_optimizer
+            else model.parameters()
+        )
     optimizer = torch.optim.AdamW(
         optimizer_parameters,
         lr=float(cfg.train.lr),
@@ -1464,6 +1592,9 @@ def main(cfg: DictConfig) -> None:
     pending_eval_step = None
     final_eval = None
     phase = "train"
+    # This is checkpointed for the gauge pilot so a signal between 50-update logging
+    # boundaries cannot turn the first post-resume scalar into a partial-window mean.
+    tracker = MetricTracker(device)
     resume_path = None
     resume_setting = cfg.resume or ("auto" if total_steps == 1_000_000 else None)
     if resume_setting == "auto":
@@ -1488,11 +1619,25 @@ def main(cfg: DictConfig) -> None:
             expected_identity=run_identity,
             require_exact_resume=True,
             expected_world_size=dist_info.world_size,
-            require_cuda_rng=(device.type == "cuda" and total_steps == 1_000_000),
+            require_cuda_rng=(
+                device.type == "cuda"
+                and (
+                    total_steps == 1_000_000
+                    or objective_version in LATENT_GAUGE_OBJECTIVES
+                )
+            ),
         )
         completed_updates = int(resume_payload.get("completed_updates", -1))
         if not 0 <= completed_updates <= total_steps:
             raise ValueError(f"invalid completed_updates in checkpoint: {completed_updates}")
+        if (
+            objective_version in LATENT_GAUGE_OBJECTIVES
+            and completed_updates > 0
+            and not model.latent_gauge.is_sealed
+        ):
+            raise ValueError(
+                "post-update latent-gauge checkpoint has no sealed initialization reference"
+            )
         if completed_updates > stage_stop_after:
             raise ValueError(
                 "checkpoint is beyond TREEWM_STOP_AFTER_UPDATE for this lifecycle stage"
@@ -1506,6 +1651,14 @@ def main(cfg: DictConfig) -> None:
         )
         if rank_resume_state is None:
             raise ValueError(f"checkpoint has no exact state for rank {dist_info.rank}")
+        metric_tracker_state = rank_resume_state.get("metric_tracker")
+        if metric_tracker_state is None:
+            if objective_version in LATENT_GAUGE_OBJECTIVES and completed_updates > 0:
+                raise ValueError(
+                    "post-update latent-gauge checkpoint has no metric-tracker state"
+                )
+        else:
+            tracker.load_state_dict(metric_tracker_state)
         train_iter.load_state_dict(rank_resume_state.get("loader", {}))
         rng.load_state_dict(rank_resume_state.get("rng_streams", {}))
         horizon_state = rank_resume_state.get("horizon_generator")
@@ -1537,7 +1690,11 @@ def main(cfg: DictConfig) -> None:
     # per-rank checkpoint stream last so the next training batch/update is exact.
     if rank_resume_state is not None:
         set_rng_state(
-            rank_resume_state["rng_state"], strict_cuda=(total_steps == 1_000_000)
+            rank_resume_state["rng_state"],
+            strict_cuda=(
+                total_steps == 1_000_000
+                or objective_version in LATENT_GAUGE_OBJECTIVES
+            ),
         )
         if dist_info.is_main:
             print(
@@ -1577,12 +1734,18 @@ def main(cfg: DictConfig) -> None:
         print(f"[treewm] parameters: {count_parameters(model)/1e6:.2f}M | scorer={tree_cfg.scorer}")
 
     # -------------------------------------------------------------- train loop
-    tracker = MetricTracker(device)
     accum = max(1, int(cfg.train.grad_accum))
     world_grad_clip = float(cfg.train.get("world_grad_clip", cfg.train.grad_clip))
     gain_grad_clip = float(cfg.train.get("gain_grad_clip", cfg.train.grad_clip))
-    if world_grad_clip <= 0 or gain_grad_clip <= 0:
-        raise ValueError("world_grad_clip and gain_grad_clip must be positive")
+    branch_transformer_grad_clip = float(
+        cfg.train.get("branch_transformer_grad_clip", cfg.train.grad_clip)
+    )
+    if (
+        world_grad_clip <= 0
+        or gain_grad_clip <= 0
+        or branch_transformer_grad_clip <= 0
+    ):
+        raise ValueError("all configured gradient-clip thresholds must be positive")
 
     def local_rank_state() -> dict:
         return {
@@ -1591,6 +1754,7 @@ def main(cfg: DictConfig) -> None:
             "loader": train_iter.state_dict(),
             "rng_streams": rng.state_dict(),
             "horizon_generator": model._horizon_gen.get_state().detach().cpu(),
+            "metric_tracker": tracker.state_dict(),
         }
 
     def save_training_checkpoint(
@@ -1798,7 +1962,78 @@ def main(cfg: DictConfig) -> None:
         if log_gradient_modules:
             for name, value in module_gradient_norms(model, include_branch_prior).items():
                 tracker.add(name, value)
-        if separate_gain_clip:
+        if separate_branch_clip:
+            if separate_gain_clip:
+                world_rest_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        world_rest_parameters,
+                        world_grad_clip,
+                        error_if_nonfinite=True,
+                    )
+                )
+                gain_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        gain_parameters, gain_grad_clip, error_if_nonfinite=True
+                    )
+                )
+                world_rest_coefficient = min(
+                    1.0, world_grad_clip / max(world_rest_norm, 1e-12)
+                )
+                gain_coefficient = min(
+                    1.0, gain_grad_clip / max(gain_norm, 1e-12)
+                )
+            else:
+                # Isolate only the transformer. The remaining historical parameter
+                # population retains one common global clipping coefficient.
+                world_rest_norm = gradient_l2_norm(world_rest_parameters)
+                gain_norm = gradient_l2_norm(gain_parameters)
+                non_branch_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        [*world_rest_parameters, *gain_parameters],
+                        float(cfg.train.grad_clip),
+                        error_if_nonfinite=True,
+                    )
+                )
+                non_branch_coefficient = min(
+                    1.0, float(cfg.train.grad_clip) / max(non_branch_norm, 1e-12)
+                )
+                world_rest_coefficient = non_branch_coefficient
+                gain_coefficient = non_branch_coefficient
+            branch_transformer_norm = float(
+                torch.nn.utils.clip_grad_norm_(
+                    branch_transformer_parameters,
+                    branch_transformer_grad_clip,
+                    error_if_nonfinite=True,
+                )
+            )
+            branch_transformer_coefficient = min(
+                1.0,
+                branch_transformer_grad_clip
+                / max(branch_transformer_norm, 1e-12),
+            )
+            world_norm = math.sqrt(
+                world_rest_norm**2 + branch_transformer_norm**2
+            )
+            world_coefficient = min(
+                world_rest_coefficient, branch_transformer_coefficient
+            )
+            tracker.add("train/grad_norm_world_rest", world_rest_norm)
+            tracker.add(
+                "train/grad_norm_branch_transformer", branch_transformer_norm
+            )
+            tracker.add("train/grad_norm_world", world_norm)
+            tracker.add("train/grad_norm_gain", gain_norm)
+            tracker.add(
+                "train/grad_clip_coefficient_world_rest", world_rest_coefficient
+            )
+            tracker.add(
+                "train/grad_clip_coefficient_branch_transformer",
+                branch_transformer_coefficient,
+            )
+            tracker.add("train/grad_clip_coefficient_world", world_coefficient)
+            tracker.add("train/grad_clip_coefficient_gain", gain_coefficient)
+            grad_norm = math.sqrt(world_norm**2 + gain_norm**2)
+        elif separate_gain_clip:
             world_norm = float(
                 torch.nn.utils.clip_grad_norm_(
                     world_parameters, world_grad_clip, error_if_nonfinite=True
@@ -1837,11 +2072,16 @@ def main(cfg: DictConfig) -> None:
         log_step = completed_updates
         tracker.add("train/grad_norm", float(grad_norm))
         learning_rates = scheduler.get_last_lr()
-        tracker.add("train/learning_rate", learning_rates[0])
-        tracker.add(
-            "train/learning_rate_gain",
-            learning_rates[1] if separate_gain_optimizer else learning_rates[0],
-        )
+        if separate_branch_clip:
+            tracker.add("train/learning_rate", learning_rates[0])
+            tracker.add("train/learning_rate_branch_transformer", learning_rates[1])
+            tracker.add("train/learning_rate_gain", learning_rates[2])
+        else:
+            tracker.add("train/learning_rate", learning_rates[0])
+            tracker.add(
+                "train/learning_rate_gain",
+                learning_rates[1] if separate_gain_optimizer else learning_rates[0],
+            )
         tracker.add("train/weight_decay", float(cfg.train.weight_decay))
         tracker.add("train/weight_decay_gain", gain_weight_decay)
         # Signals delivered during the update are handled only after the optimizer and

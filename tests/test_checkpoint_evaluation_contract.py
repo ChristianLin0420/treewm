@@ -126,6 +126,29 @@ def test_all_checkpoint_slots_carry_same_complete_post_selection_boundary(tmp_pa
     assert [set(item) for item in loaded] == [set(payload), set(payload), set(payload)]
 
 
+def test_exact_resume_validates_optional_metric_tracker_window(tmp_path):
+    model = torch.nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _step: 1.0)
+    _identity, payload = _exact_payload(
+        model,
+        optimizer,
+        scheduler,
+        CheckpointManager(tmp_path / "manager", enabled=False),
+    )
+    payload["rank_states"][0]["metric_tracker"] = {
+        "schema_version": 1,
+        "sums": {"loss": 6.0},
+        "counts": {"loss": 3.0},
+        "hists": {},
+    }
+    validate_exact_resume_payload(payload, expected_world_size=1)
+
+    payload["rank_states"][0]["metric_tracker"]["counts"]["loss"] = float("nan")
+    with pytest.raises(ValueError, match="metric-tracker state is invalid"):
+        validate_exact_resume_payload(payload, expected_world_size=1)
+
+
 def test_exact_resume_validation_precedes_any_model_mutation(tmp_path):
     saved_model = torch.nn.Linear(2, 2)
     with torch.no_grad():

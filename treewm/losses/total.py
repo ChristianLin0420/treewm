@@ -45,6 +45,9 @@ class LossWeights:
     recursive: float = 0.2
     uncertainty: float = 0.2
     multistep: float = 0.0  # Track A1; 0 keeps the exp-1..4 baseline exactly
+    # Opt-in only. V2's scale-invariant latent losses otherwise leave a shrinkable
+    # encoder/decoder gauge; the dedicated bounded gauge objective pins this to 1.0.
+    latent_gauge: float = 0.0
 
 
 @dataclass
@@ -66,6 +69,7 @@ class LossConfig:
             "recursive": True,
             "uncertainty": True,
             "multistep": False,
+            "latent_gauge": False,
         }
     )
     control_objective: str = "future_set"  # future_set | contrastive | bootstrap
@@ -92,6 +96,11 @@ class LossConfig:
     grounded_loss_horizon_weight: float = 0.0
     grounded_loss_endpoint_weight: float = 0.0
     grounded_detach_self_fed_parent: bool = True
+    # The gauge reference is sealed from the DDP-global first training batch at update
+    # zero. These numerical guards are explicit config/identity fields; old objectives
+    # leave the term disabled and never execute this path.
+    latent_gauge_epsilon: float = 1.0e-8
+    latent_gauge_min_reference_scale: float = 1.0e-4
     # Track H2: relative weight of each recursive depth (empty -> uniform).
     multistep_depth_weights: tuple[float, ...] = ()
     redundancy_temperature: float = 0.25
@@ -444,6 +453,19 @@ def compute_branch_losses(
 
     losses: dict[str, torch.Tensor] = {}
     auxiliary_metrics: dict[str, float] = {}
+    latent_gauge = getattr(model, "latent_gauge", None)
+    if latent_gauge is not None:
+        gauge_loss, gauge_metrics = latent_gauge(
+            z,
+            tgt_z,
+            modes["valid"],
+            step=step,
+        )
+        if loss_cfg.on("latent_gauge"):
+            losses["latent_gauge"] = gauge_loss
+        auxiliary_metrics.update(gauge_metrics)
+    elif loss_cfg.on("latent_gauge"):
+        raise ValueError("active latent-gauge objective has no sealed gauge module")
     world_target_z = tgt["z"].detach() if loss_cfg.detach_world_targets else tgt["z"]
     target_scale = wl.detached_target_scale(world_target_z, matched)
 
