@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -22,6 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from types import ModuleType
 from typing import Any, Callable, Mapping, Sequence
@@ -30,7 +32,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -75,6 +77,32 @@ SAFE_CHILD_ENVIRONMENT = frozenset(
         "REQUESTS_CA_BUNDLE",
     }
 )
+EPHEMERAL_CHILD_DIRECTORIES = {
+    "HOME": "home",
+    "TMPDIR": "tmp",
+    "MPLCONFIGDIR": "matplotlib",
+    "XDG_CACHE_HOME": "xdg-cache",
+    "XDG_CONFIG_HOME": "xdg-config",
+    "XDG_DATA_HOME": "xdg-data",
+    "XDG_STATE_HOME": "xdg-state",
+    "TORCH_HOME": "torch",
+    "HF_HOME": "huggingface",
+    "WANDB_CACHE_DIR": "wandb-cache",
+    "WANDB_CONFIG_DIR": "wandb-config",
+}
+WEIGHT_AUDIT_SOURCE_FILES = {
+    "audit": PACKAGE_RELATIVE / "weight_audit.py",
+    "trainer": Path("scripts/train.py"),
+    "executable_loss": Path("treewm/losses/executable_prefix.py"),
+    "action_projection": Path("treewm/planning/action_execution.py"),
+    "objective_config": Path(
+        "configs/experiment/treewm_v2_grounded_executable_prefix_pilot_v1.yaml"
+    ),
+    "dataset": Path("treewm/data/ogbench_dataset.py"),
+    "future_recipe": Path("treewm/data/future_recipe.py"),
+    "future_sets": Path("treewm/data/future_sets.py"),
+    "total_loss": Path("treewm/losses/total.py"),
+}
 
 # Stdlib-only child bootstrap. ``-I -S`` prevents sitecustomize and every ``.pth``
 # file from running; the two hash-bound distribution roots are appended directly.
@@ -283,6 +311,83 @@ def _contained_regular_no_symlinks(root: Path, relative: Path, label: str) -> Pa
     return current
 
 
+def _manifest_repository_root(
+    manifest: Mapping[str, Any], candidate: str | Path | None = None
+) -> Path:
+    """Bind protected audit reads to the repository named by the manifest.
+
+    A copied source tree is deliberately incomplete: Exp20 checkpoints remain in the
+    live repository's protected output namespace.  The live input root is therefore
+    distinct from the snapshot execution/import root, but it is not caller-selectable.
+    It is derived from the exact absolute run root and its repository-relative form.
+    """
+
+    run_root = Path(str(manifest["paths"]["run_root"]))
+    require(run_root.is_absolute(), "manifest run root is not absolute")
+    prospective = _safe_relative(
+        str(manifest["paths"]["prospective_run_root"]),
+        "prospective run root",
+    )
+    repository = run_root
+    for _part in prospective.parts:
+        repository = repository.parent
+    require(
+        repository / prospective == run_root,
+        "manifest run root does not match its repository-relative binding",
+    )
+    expected = _directory_nonsymlink(repository, "manifest repository root")
+    require(
+        expected == repository.absolute(),
+        "manifest repository root changed while resolving",
+    )
+    if candidate is not None:
+        supplied_path = Path(candidate)
+        require(supplied_path.is_absolute(), "audit input root is not absolute")
+        supplied = _directory_nonsymlink(supplied_path, "audit input root")
+        require(
+            supplied_path.absolute() == repository.absolute() and supplied == expected,
+            "audit input root differs from the manifest repository root",
+        )
+    return expected
+
+
+def _verify_external_audit_inputs(
+    execution_root: Path,
+    input_root: Path,
+    weight_lock: Mapping[str, Any],
+) -> None:
+    """Verify live audit inputs without permitting live Python imports.
+
+    The scientific source files are present in both roots.  Requiring both copies to
+    match the frozen weight lock prevents the external Exp20 input root from acting as
+    an alternate code root.  Checkpoint/data hashes are compared by the replay itself
+    and then byte-semantically checked against the four frozen audit locks.
+    """
+
+    source_hashes = weight_lock.get("source_sha256")
+    require(isinstance(source_hashes, Mapping), "weight audit source hashes are absent")
+    for name, relative in WEIGHT_AUDIT_SOURCE_FILES.items():
+        expected = str(source_hashes.get(name, ""))
+        require(SHA256.fullmatch(expected) is not None, f"weight audit {name} hash is malformed")
+        copied = _contained_regular_no_symlinks(
+            execution_root, relative, f"snapshot audit source {name}"
+        )
+        live = _contained_regular_no_symlinks(
+            input_root, relative, f"live audit source {name}"
+        )
+        require(file_sha256(copied) == expected, f"snapshot audit source differs: {name}")
+        require(file_sha256(live) == expected, f"live audit source differs: {name}")
+    _contained_regular_no_symlinks(
+        input_root,
+        Path("experiments/20-treewm-grounded-gauge-pilot-v2/manifest.json"),
+        "protected Exp20 manifest",
+    )
+    _directory_nonsymlink(
+        input_root / "outputs/treewm-grounded-gauge-pilot-v2-launch2",
+        "protected Exp20 output root",
+    )
+
+
 def _open_relative_regular(root: Path, relative: Path, label: str) -> tuple[int, os.stat_result]:
     """Open a repository file through O_NOFOLLOW directory descriptors."""
 
@@ -301,9 +406,73 @@ def _open_relative_regular(root: Path, relative: Path, label: str) -> tuple[int,
             os.close(source_fd)
             raise SubmissionError(f"{label} is not a regular file")
         return source_fd, info
+    except OSError as exc:
+        raise SubmissionError(f"{label} is unavailable or symlinked: {exc}") from exc
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _hash_relative_regular(
+    root: Path,
+    relative: Path,
+    label: str,
+    *,
+    capture: bool = False,
+) -> tuple[str, bytes | None]:
+    """Hash one component-safe open inode and optionally return those exact bytes."""
+
+    _directory_nonsymlink(root, f"{label} root")
+    descriptor, before = _open_relative_regular(root, relative, label)
+    digest = hashlib.sha256()
+    chunks: list[bytes] | None = [] if capture else None
+    try:
+        while block := os.read(descriptor, 16 * 1024 * 1024):
+            digest.update(block)
+            if chunks is not None:
+                chunks.append(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    require(identity(after) == identity(before), f"{label} changed while hashing")
+    return digest.hexdigest(), b"".join(chunks) if chunks is not None else None
+
+
+def _read_inventory_json(
+    root: Path,
+    relative: Path,
+    expected_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    """Parse only bytes captured from the exact hash-bound regular-file inode."""
+
+    require(SHA256.fullmatch(expected_sha256) is not None, f"{label} hash is malformed")
+    digest, payload = _hash_relative_regular(root, relative, label, capture=True)
+    require(digest == expected_sha256, f"{label} differs from frozen snapshot inventory")
+    assert payload is not None
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                SubmissionError(f"non-finite JSON value in {label}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SubmissionError(f"cannot read frozen JSON {label}: {exc}") from exc
+    require(isinstance(value, dict), f"frozen JSON root is not an object: {label}")
+    return value
 
 
 def _load_module(name: str, path: Path, *, containment_root: Path) -> ModuleType:
@@ -530,9 +699,11 @@ def git_provenance(repo_root: Path) -> dict[str, Any]:
 
 
 def _child_environment(
+    cache_root: Path,
     extra: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    root = _directory_nonsymlink(cache_root, "ephemeral child root")
     source = os.environ if environ is None else environ
     result = {key: source[key] for key in SAFE_CHILD_ENVIRONMENT if key in source}
     result.update(
@@ -543,23 +714,46 @@ def _child_environment(
             "MKL_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
-            # Audits are read-only.  Do not let optional libraries populate user or
-            # repository caches as a side effect of import.
-            # /proc/self/fd is reported as a writable directory (so Matplotlib does
-            # not create a temporary fallback) but cannot retain named cache files.
-            "MPLCONFIGDIR": "/proc/self/fd",
-            "XDG_CACHE_HOME": "/proc/self/fd",
-            "TORCH_HOME": "/proc/self/fd",
-            "HF_HOME": "/proc/self/fd",
-            "WANDB_CACHE_DIR": "/proc/self/fd",
-            "WANDB_CONFIG_DIR": "/proc/self/fd",
         }
     )
+    for variable, relative in EPHEMERAL_CHILD_DIRECTORIES.items():
+        directory = root / relative
+        resolved = _directory_nonsymlink(directory, f"ephemeral {variable}")
+        require(resolved.parent == root, f"ephemeral {variable} escapes its root")
+        result[variable] = str(resolved)
     if extra:
         for key, value in extra.items():
             require(key != "TREEWM_STOP_AFTER_UPDATE", "staged stop is forbidden")
+            require(
+                key not in EPHEMERAL_CHILD_DIRECTORIES,
+                f"launch environment may not replace ephemeral {key}",
+            )
             result[str(key)] = str(value)
     return result
+
+
+@contextlib.contextmanager
+def _ephemeral_child_environment(
+    extra: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
+):
+    """Yield a contained writable cache tree and remove it after one runner call."""
+
+    temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
+    with tempfile.TemporaryDirectory(
+        prefix=f"treewm-exp23-launch2-{os.getuid()}-", dir=temporary_parent
+    ) as raw_root:
+        root = Path(raw_root)
+        root_info = root.lstat()
+        require(
+            stat.S_ISDIR(root_info.st_mode)
+            and root_info.st_uid == os.getuid()
+            and root_info.st_mode & 0o077 == 0,
+            "ephemeral child root is not private",
+        )
+        for relative in sorted(set(EPHEMERAL_CHILD_DIRECTORIES.values())):
+            (root / relative).mkdir(mode=0o700)
+        yield _child_environment(root, extra, environ)
 
 
 def _output_tree_fingerprint(manifest: Mapping[str, Any]) -> str:
@@ -709,10 +903,16 @@ def rerun_audit_locks(
     campaign: ModuleType,
     manifest: Mapping[str, Any],
     *,
+    audit_input_root: Path | None = None,
     runner: AuditRunner = _default_runner,
     timeout: float = 7_200,
     snapshot_inventory: Mapping[str, str] | None = None,
+    sealed_snapshot: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    require(
+        isinstance(snapshot_inventory, Mapping) and snapshot_inventory,
+        "audit replay requires the static preflight snapshot inventory",
+    )
     package = repo_root / PACKAGE_RELATIVE
     records: dict[str, Any] = {}
     results: dict[str, Any] = {}
@@ -728,20 +928,49 @@ def rerun_audit_locks(
     _regular_nonsymlink(Path(python).resolve(strict=True), "resolved pinned Python")
     require(os.access(python, os.X_OK), "pinned Python is not executable")
     identity = interpreter_contract(manifest)
-    environment = _child_environment()
+    input_root = _manifest_repository_root(
+        manifest, repo_root if audit_input_root is None else audit_input_root
+    )
+    weight_relative = PACKAGE_RELATIVE / AUDIT_LOCKS["weight"]
+    weight_lock_sha256 = str(snapshot_inventory.get(str(weight_relative), ""))
+    weight_lock = _read_inventory_json(
+        repo_root,
+        weight_relative,
+        weight_lock_sha256,
+        "frozen weight-audit lock",
+    )
+    _verify_external_audit_inputs(repo_root, input_root, weight_lock)
     for label, program, arguments, prefix in AUDITS:
-        lock = read_json(package / AUDIT_LOCKS[label])
+        lock_relative = PACKAGE_RELATIVE / AUDIT_LOCKS[label]
+        lock_sha256 = str(snapshot_inventory.get(str(lock_relative), ""))
+        lock = _read_inventory_json(
+            repo_root,
+            lock_relative,
+            lock_sha256,
+            f"frozen {label} audit lock",
+        )
         raw_command = [python, str(package / program), *arguments]
         if label in {"weight", "prefix_target"}:
-            raw_command.extend(["--project-root", str(repo_root)])
+            raw_command.extend(
+                [
+                    "--project-root",
+                    str(input_root),
+                    "--weight-lock-sha256",
+                    weight_lock_sha256,
+                ]
+            )
         command = isolated_python_command(
             raw_command,
             repo_root,
             identity,
             intercept_python_children=True,
-            snapshot_inventory=snapshot_inventory,
+            # A live static preflight needs the frozen map for exact lock lookup, but
+            # its repository is intentionally writable and contains files outside the
+            # snapshot union.  Only copied-tree execution gets sealed-root enforcement.
+            snapshot_inventory=snapshot_inventory if sealed_snapshot else None,
         )
-        completed = runner(command, repo_root, environment, timeout)
+        with _ephemeral_child_environment() as environment:
+            completed = runner(command, repo_root, environment, timeout)
         require(
             completed.returncode == 0,
             f"{label} audit replay failed ({completed.returncode}): "
@@ -780,9 +1009,6 @@ def _compose_one(
     require(Path(str(argv[1])).resolve(strict=True) == root / "scripts/train.py", f"cell{cell.index}: trainer path escapes snapshot")
     require("resume=auto" in argv and "train.steps=25000" in argv, f"cell{cell.index}: scratch-to-25k contract differs")
     require(not any("TREEWM_STOP_AFTER_UPDATE" in str(item) for item in argv), f"cell{cell.index}: staged stop leaked into argv")
-    environment = _child_environment(
-        {str(key): str(value) for key, value in launch["environment"].items()}
-    )
     composition_command = isolated_python_command(
         [*argv, "--cfg", "job", "--resolve"],
         root,
@@ -790,7 +1016,10 @@ def _compose_one(
         intercept_python_children=False,
         snapshot_inventory=snapshot_inventory,
     )
-    completed = runner(composition_command, root, environment, timeout)
+    with _ephemeral_child_environment(
+        {str(key): str(value) for key, value in launch["environment"].items()}
+    ) as environment:
+        completed = runner(composition_command, root, environment, timeout)
     require(
         completed.returncode == 0,
         f"cell{cell.index}: direct Hydra composition failed ({completed.returncode}): "
@@ -915,12 +1144,19 @@ def static_preflight(
     protocol = campaign.verify_protocol_lock(root / PACKAGE_RELATIVE)
     source_before = campaign.source_contract(root)
     require(source_before["source_sha256"] == manifest["core_binding"]["trainer_code_fingerprint"], "source fingerprint differs")
+    inventory = snapshot_inventory(
+        root, campaign, protocol, source_contract=source_before
+    )
     output_before = _output_tree_fingerprint(manifest)
     scientific_before = _scientific_output_fingerprint(manifest)
     require(_namespace_is_fresh(manifest, submission_root), "prospective output namespace is not fresh")
     if rerun_audits:
         audit_records, audit_results = rerun_audit_locks(
-            root, campaign, manifest, runner=runner
+            root,
+            campaign,
+            manifest,
+            runner=runner,
+            snapshot_inventory=inventory,
         )
         resolved_lock = audit_results["resolved_config"]
     else:
@@ -941,6 +1177,7 @@ def static_preflight(
     scientific_after = _scientific_output_fingerprint(manifest)
     require(source_after == source_before, "trainer source/runtime changed during preflight")
     require(protocol_after == protocol, "package protocol changed during preflight")
+    verify_inventory_sources(root, inventory)
     require(output_after == output_before, "preflight changed the prospective scientific output tree")
     require(scientific_after == scientific_before, "preflight changed prospective cell outputs")
     require(_namespace_is_fresh(manifest, submission_root), "preflight changed the prospective output namespace")
@@ -955,6 +1192,8 @@ def static_preflight(
         "manifest": manifest,
         "weight_lock": weight_lock,
         "package_protocol_sha256": protocol,
+        "snapshot_inventory": inventory,
+        "snapshot_inventory_sha256": stable_hash(inventory),
         "source_contract": source_before,
         "orchestration_interpreter": runtime_interpreter,
         "audit_replays": audit_records,
@@ -971,42 +1210,89 @@ def static_preflight(
 
 
 def snapshot_inventory(
-    repo_root: Path, campaign: ModuleType, protocol: str
+    repo_root: Path,
+    campaign: ModuleType,
+    protocol: str,
+    *,
+    source_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
+    """Freeze the exact source union whose protocol was verified in this pass."""
+
     root = repo_root.resolve(strict=True)
-    source = campaign.source_contract(root)
+    source = campaign.source_contract(root) if source_contract is None else source_contract
+    source_files = source.get("source_files")
+    require(isinstance(source_files, Mapping) and source_files, "source file inventory is absent")
     inventory: dict[str, str] = {}
-    for raw_relative, claimed in source["source_files"].items():
+    for raw_relative, claimed_value in source_files.items():
+        claimed = str(claimed_value)
+        require(SHA256.fullmatch(claimed) is not None, "trainer source SHA256 is malformed")
         relative = _safe_relative(raw_relative, "trainer fingerprint path")
-        path = _contained_regular_no_symlinks(root, relative, f"trainer source {relative}")
-        actual = file_sha256(path)
+        actual, _bytes = _hash_relative_regular(
+            root, relative, f"trainer source {relative}"
+        )
         require(actual == claimed, f"trainer fingerprint byte drift: {relative}")
         inventory[str(relative)] = actual
-    package = root / PACKAGE_RELATIVE
-    require(campaign.protocol_sha256(package) == protocol, "protocol changed while inventorying snapshot")
-    for raw_relative in campaign.PROTOCOL_FILES:
-        relative = PACKAGE_RELATIVE / _safe_relative(raw_relative, "protocol path")
-        path = _contained_regular_no_symlinks(root, relative, f"protocol file {relative}")
-        digest = file_sha256(path)
+    protocol_names = tuple(campaign.PROTOCOL_FILES)
+    require(
+        protocol_names and len(protocol_names) == len(set(protocol_names)),
+        "protocol file list is empty or duplicated",
+    )
+    protocol_files: dict[str, str] = {}
+    for raw_relative in protocol_names:
+        protocol_relative = _safe_relative(raw_relative, "protocol path")
+        relative = PACKAGE_RELATIVE / protocol_relative
+        digest, _bytes = _hash_relative_regular(
+            root, relative, f"protocol file {relative}"
+        )
+        protocol_files[str(protocol_relative)] = digest
         prior = inventory.get(str(relative))
         require(prior in (None, digest), f"snapshot union has conflicting hashes: {relative}")
         inventory[str(relative)] = digest
-    supplemental = getattr(campaign, "SNAPSHOT_IMPORT_FILES", {})
-    if supplemental:
-        require(isinstance(supplemental, Mapping), "SNAPSHOT_IMPORT_FILES must map paths to exact SHA256 values")
-        for raw_relative, claimed in supplemental.items():
-            require(SHA256.fullmatch(str(claimed)) is not None, "supplemental snapshot SHA256 is malformed")
-            relative = _safe_relative(raw_relative, "supplemental snapshot import path")
-            path = _contained_regular_no_symlinks(root, relative, f"supplemental import file {relative}")
-            digest = file_sha256(path)
-            require(digest == claimed, f"supplemental snapshot byte drift: {relative}")
-            prior = inventory.get(str(relative))
-            require(prior in (None, digest), f"snapshot union has conflicting hashes: {relative}")
-            inventory[str(relative)] = digest
+    require(
+        stable_hash({"schema_version": 1, "files": protocol_files}) == protocol,
+        "frozen protocol inventory differs from the verified protocol",
+    )
+    supplemental = dict(getattr(campaign, "SNAPSHOT_IMPORT_FILES", {}))
+    for raw_relative, claimed_value in supplemental.items():
+        claimed = str(claimed_value)
+        require(SHA256.fullmatch(claimed) is not None, "supplemental snapshot SHA256 is malformed")
+        relative = _safe_relative(raw_relative, "supplemental snapshot import path")
+        digest, _bytes = _hash_relative_regular(
+            root, relative, f"supplemental import file {relative}"
+        )
+        require(digest == claimed, f"supplemental snapshot byte drift: {relative}")
+        prior = inventory.get(str(relative))
+        require(prior in (None, digest), f"snapshot union has conflicting hashes: {relative}")
+        inventory[str(relative)] = digest
     lock_relative = PACKAGE_RELATIVE / "protocol.sha256"
-    _contained_regular_no_symlinks(root, lock_relative, "protocol lock")
-    inventory[str(lock_relative)] = file_sha256(root / lock_relative)
+    lock_digest, lock_bytes = _hash_relative_regular(
+        root, lock_relative, "protocol lock", capture=True
+    )
+    assert lock_bytes is not None
+    try:
+        locked_protocol = lock_bytes.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise SubmissionError("protocol lock is not ASCII") from exc
+    require(locked_protocol == protocol, "protocol lock changed while inventorying snapshot")
+    prior = inventory.get(str(lock_relative))
+    require(prior in (None, lock_digest), "snapshot union conflicts with protocol lock")
+    inventory[str(lock_relative)] = lock_digest
     return dict(sorted(inventory.items()))
+
+
+def verify_inventory_sources(repo_root: Path, inventory: Mapping[str, str]) -> None:
+    """Reopen every frozen source path; extra live repository files are irrelevant."""
+
+    root = _directory_nonsymlink(repo_root, "inventory source root")
+    require(isinstance(inventory, Mapping) and inventory, "snapshot inventory is absent")
+    for raw_relative, claimed_value in inventory.items():
+        claimed = str(claimed_value)
+        require(SHA256.fullmatch(claimed) is not None, "snapshot inventory SHA256 is malformed")
+        relative = _safe_relative(raw_relative, "snapshot inventory path")
+        digest, _bytes = _hash_relative_regular(
+            root, relative, f"snapshot inventory source {relative}"
+        )
+        require(digest == claimed, f"snapshot inventory source changed: {relative}")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1418,6 +1704,7 @@ def _assert_live_transaction(submission_root: Path, *, ready: bool = False) -> N
 
 def _snapshot_preflight_in_process(
     snapshot_root: Path,
+    audit_input_root: Path,
     protocol: str,
     inventory: Mapping[str, str],
     *,
@@ -1425,6 +1712,7 @@ def _snapshot_preflight_in_process(
 ) -> dict[str, Any]:
     package = snapshot_root / PACKAGE_RELATIVE
     manifest = read_json(package / "manifest.json")
+    input_root = _manifest_repository_root(manifest, audit_input_root)
     runtime_interpreter = activate_isolated_runtime(manifest)
     require(
         not any(name == "treewm" or name.startswith("treewm.") for name in sys.modules),
@@ -1442,8 +1730,10 @@ def _snapshot_preflight_in_process(
         snapshot_root,
         campaign,
         manifest,
+        audit_input_root=input_root,
         runner=runner,
         snapshot_inventory=inventory,
+        sealed_snapshot=True,
     )
     resolved = audit_results["resolved_config"]
     launches, compositions = direct_hydra_matrix(
@@ -1487,12 +1777,14 @@ def _snapshot_preflight_in_process(
             "runtime_sha256": source_before["runtime_sha256"],
             "orchestration_interpreter": runtime_interpreter,
             "import_containment": "all_treewm_modules_inside_snapshot",
+            "audit_input_root": str(input_root),
         },
     }
 
 
 def _snapshot_preflight(
     snapshot_root: Path,
+    audit_input_root: Path,
     protocol: str,
     inventory: Mapping[str, str],
     *,
@@ -1501,25 +1793,34 @@ def _snapshot_preflight(
     """Run the complete copied-tree verification in a clean isolated process."""
 
     package = snapshot_root / PACKAGE_RELATIVE
+    verify_snapshot_files(snapshot_root, inventory)
     manifest = read_json(package / "manifest.json")
-    python = verify_submit_interpreter(manifest)
+    input_root = _manifest_repository_root(manifest, audit_input_root)
+    identity = interpreter_contract(manifest)
+    python = str(identity["lexical_executable"])
     program = package / "submit.py"
     _regular_nonsymlink(program, "snapshot submit verifier")
-    command = [
-        python,
-        "-I",
-        "-S",
-        "-B",
-        str(program),
-        "--_snapshot-preflight",
-        "--snapshot-root",
-        str(snapshot_root),
-        "--protocol-sha256",
-        protocol,
-        "--inventory-json",
-        canonical_json(inventory),
-    ]
-    completed = runner(command, snapshot_root, _child_environment(), 14_400)
+    command = isolated_python_command(
+        [
+            python,
+            str(program),
+            "--_snapshot-preflight",
+            "--snapshot-root",
+            str(snapshot_root),
+            "--audit-input-root",
+            str(input_root),
+            "--protocol-sha256",
+            protocol,
+            "--inventory-json",
+            canonical_json(inventory),
+        ],
+        snapshot_root,
+        identity,
+        intercept_python_children=False,
+        snapshot_inventory=inventory,
+    )
+    with _ephemeral_child_environment() as environment:
+        completed = runner(command, snapshot_root, environment, 14_400)
     require(
         completed.returncode == 0,
         "isolated snapshot preflight failed: "
@@ -1541,12 +1842,157 @@ def _snapshot_preflight(
         == "all_treewm_modules_inside_snapshot",
         "isolated snapshot import containment is absent",
     )
+    require(
+        verification.get("audit_input_root") == str(input_root),
+        "isolated snapshot audit input root differs",
+    )
     return value
+
+
+def _restore_snapshot_test_permissions(task_root: Path) -> None:
+    """Make only the private snapshot-test tree removable by TemporaryDirectory."""
+
+    temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
+    root = task_root.absolute()
+    require(
+        root.parent == temporary_parent
+        and root.name.startswith(f"treewm-exp23-launch2-snapshot-test-{os.getuid()}-"),
+        "refusing to restore permissions outside a snapshot-test temporary tree",
+    )
+    if not os.path.lexists(root):
+        return
+    info = root.lstat()
+    require(
+        stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid(),
+        "snapshot-test temporary root is unsafe",
+    )
+    for directory, names, files in os.walk(root, topdown=False, followlinks=False):
+        current = Path(directory)
+        for name in files:
+            path = current / name
+            child = path.lstat()
+            require(
+                stat.S_ISREG(child.st_mode) and child.st_uid == os.getuid(),
+                f"snapshot-test temporary file is unsafe: {path}",
+            )
+            path.chmod(0o600)
+        for name in names:
+            path = current / name
+            child = path.lstat()
+            require(
+                stat.S_ISDIR(child.st_mode) and child.st_uid == os.getuid(),
+                f"snapshot-test temporary directory is unsafe: {path}",
+            )
+            path.chmod(0o700)
+        current.chmod(0o700)
+
+
+def snapshot_test(
+    repo_root: Path,
+    *,
+    runner: AuditRunner = _default_runner,
+) -> dict[str, Any]:
+    """Exercise the exact copied-tree preflight without touching Slurm or run state."""
+
+    reject_inherited_environment()
+    root = _directory_nonsymlink(repo_root, "repository root")
+    bootstrap_manifest = read_json(root / PACKAGE_RELATIVE / "manifest.json")
+    runtime_interpreter = activate_isolated_runtime(bootstrap_manifest)
+    require(
+        not any(name == "treewm" or name.startswith("treewm.") for name in sys.modules),
+        "treewm was imported before snapshot-test containment was established",
+    )
+    campaign = load_campaign(root)
+    manifest = campaign.read_json(root / PACKAGE_RELATIVE / "manifest.json")
+    require(manifest == bootstrap_manifest, "manifest changed during snapshot-test bootstrap")
+    weight_lock = campaign.read_json(root / PACKAGE_RELATIVE / "weight_audit.lock.json")
+    campaign.validate_manifest(manifest, weight_lock, root)
+    protocol = campaign.verify_protocol_lock(root / PACKAGE_RELATIVE)
+    source_before = campaign.source_contract(root)
+    require(
+        source_before["source_sha256"]
+        == manifest["core_binding"]["trainer_code_fingerprint"],
+        "snapshot-test source fingerprint differs",
+    )
+    output_before = _output_tree_fingerprint(manifest)
+    scientific_before = _scientific_output_fingerprint(manifest)
+    inventory = snapshot_inventory(
+        root, campaign, protocol, source_contract=source_before
+    )
+
+    temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
+    task_root: Path | None = None
+    copied: dict[str, Any] | None = None
+    with tempfile.TemporaryDirectory(
+        prefix=f"treewm-exp23-launch2-snapshot-test-{os.getuid()}-",
+        dir=temporary_parent,
+    ) as raw_task_root:
+        task_root = Path(raw_task_root)
+        try:
+            snapshot_root = task_root / "source-snapshot/repo"
+            create_source_snapshot(root, snapshot_root, inventory)
+            copied = _snapshot_preflight(
+                snapshot_root,
+                root,
+                protocol,
+                inventory,
+                runner=runner,
+            )
+            verify_snapshot_files(snapshot_root, inventory)
+        finally:
+            _restore_snapshot_test_permissions(task_root)
+    require(task_root is not None and not task_root.exists(), "snapshot-test temporary tree survived cleanup")
+    require(copied is not None, "snapshot-test copied preflight is absent")
+
+    source_after = campaign.source_contract(root)
+    output_after = _output_tree_fingerprint(manifest)
+    scientific_after = _scientific_output_fingerprint(manifest)
+    require(source_after == source_before, "snapshot-test changed trainer source/runtime")
+    require(campaign.verify_protocol_lock(root / PACKAGE_RELATIVE) == protocol, "snapshot-test changed protocol")
+    require(output_after == output_before, "snapshot-test changed the output tree")
+    require(scientific_after == scientific_before, "snapshot-test changed scientific outputs")
+    require(copied.get("manifest") == manifest, "snapshot-test manifest differs")
+    require(len(copied.get("launches") or []) == 20, "snapshot-test launch matrix differs")
+    verification = copied.get("verification") or {}
+    require(
+        set(verification.get("audit_replays") or {})
+        == {"weight", "prefix_target", "resolved_config", "causal_parity"},
+        "snapshot-test did not replay all four audit locks",
+    )
+    require(
+        verification.get("import_containment")
+        == "all_treewm_modules_inside_snapshot",
+        "snapshot-test import containment is absent",
+    )
+    require(
+        verification.get("audit_input_root") == str(root),
+        "snapshot-test audit input root differs",
+    )
+    return {
+        "schema_version": 1,
+        "status": "snapshot_test_verified",
+        "campaign_id": manifest["campaign_id"],
+        "package_protocol_sha256": protocol,
+        "source_sha256": source_before["source_sha256"],
+        "runtime_sha256": source_before["runtime_sha256"],
+        "orchestration_interpreter": runtime_interpreter,
+        "snapshot_files": len(inventory),
+        "audit_replays": verification["audit_replays"],
+        "cells": len(copied["launches"]),
+        "import_containment": verification["import_containment"],
+        "audit_input_root": verification["audit_input_root"],
+        "full_output_fingerprint_before": output_before,
+        "full_output_fingerprint_after": output_after,
+        "scientific_output_fingerprint_before": scientific_before,
+        "scientific_output_fingerprint_after": scientific_after,
+        "temporary_tree_removed": True,
+        "persistent_writes_performed": 0,
+        "scheduler_calls": 0,
+    }
 
 
 def _submission_contract(
     *,
-    campaign: ModuleType,
     manifest: Mapping[str, Any],
     protocol: str,
     source: Mapping[str, Any],
@@ -1588,7 +2034,7 @@ def _submission_contract(
         "submission_root": str(submission_root.resolve()),
         "snapshot_root": str(snapshot_root.resolve()),
         "package_protocol_sha256": protocol,
-        "manifest_sha256": campaign.manifest_sha256(manifest),
+        "manifest_sha256": stable_hash(manifest),
         "trainer_code_fingerprint": source["source_sha256"],
         "runtime_sha256": source["runtime_sha256"],
         "orchestration_interpreter": dict(preflight["orchestration_interpreter"]),
@@ -1623,6 +2069,42 @@ def _submission_contract(
     return contract
 
 
+def _validated_preflight_inventory(preflight: Mapping[str, Any]) -> dict[str, str]:
+    """Return only the exact inventory frozen by the successful static preflight."""
+
+    raw = preflight.get("snapshot_inventory")
+    require(isinstance(raw, Mapping) and raw, "preflight snapshot inventory is absent")
+    inventory: dict[str, str] = {}
+    for raw_relative, raw_digest in raw.items():
+        relative = str(_safe_relative(raw_relative, "preflight snapshot path"))
+        digest = str(raw_digest)
+        require(SHA256.fullmatch(digest) is not None, "preflight snapshot SHA256 is malformed")
+        require(relative not in inventory, "preflight snapshot path is duplicated")
+        inventory[relative] = digest
+    inventory = dict(sorted(inventory.items()))
+    require(
+        stable_hash(inventory) == preflight.get("snapshot_inventory_sha256"),
+        "preflight snapshot inventory hash differs",
+    )
+    source_contract = preflight.get("source_contract")
+    require(isinstance(source_contract, Mapping), "preflight source contract is absent")
+    source_files = source_contract.get("source_files")
+    require(isinstance(source_files, Mapping) and source_files, "preflight source files are absent")
+    for raw_relative, raw_digest in source_files.items():
+        relative = str(_safe_relative(raw_relative, "preflight source path"))
+        require(
+            inventory.get(relative) == str(raw_digest),
+            f"preflight source is not bound into snapshot inventory: {relative}",
+        )
+    for relative in (
+        PACKAGE_RELATIVE / "manifest.json",
+        PACKAGE_RELATIVE / "submit.py",
+        PACKAGE_RELATIVE / "protocol.sha256",
+    ):
+        require(str(relative) in inventory, f"preflight snapshot omits {relative}")
+    return inventory
+
+
 def _submit_campaign_impl(
     repo_root: Path,
     submission_root: Path,
@@ -1641,6 +2123,7 @@ def _submit_campaign_impl(
     )
     require(preflight["scientific_output_fingerprint_before"] == preflight["scientific_output_fingerprint_after"], "preflight output fingerprint differs")
     manifest = preflight["manifest"]
+    inventory = _validated_preflight_inventory(preflight)
     require(
         activate_isolated_runtime(manifest) == preflight.get("orchestration_interpreter"),
         "orchestration interpreter changed after preflight",
@@ -1664,8 +2147,6 @@ def _submit_campaign_impl(
         },
     )
     protocol = str(preflight["package_protocol_sha256"])
-    live_campaign = load_campaign(root)
-    inventory = snapshot_inventory(root, live_campaign, protocol)
     snapshot_root = submission_root / "source-snapshot" / "repo"
     create_source_snapshot(root, snapshot_root, inventory)
     append_journal(
@@ -1679,7 +2160,7 @@ def _submit_campaign_impl(
         },
     )
     copied_preflight = _snapshot_preflight(
-        snapshot_root, protocol, inventory, runner=audit_runner
+        snapshot_root, root, protocol, inventory, runner=audit_runner
     )
     snapshot_manifest = copied_preflight["manifest"]
     launches = copied_preflight["launches"]
@@ -1727,7 +2208,6 @@ def _submit_campaign_impl(
     logs.mkdir(mode=0o700)
     _fsync_directory(submission_root)
     contract = _submission_contract(
-        campaign=live_campaign,
         manifest=snapshot_manifest,
         protocol=protocol,
         source=preflight["source_contract"],
@@ -1760,8 +2240,8 @@ def _submit_campaign_impl(
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-{token}-train"
-    report_name = f"exp23-{token}-report"
+    train_name = f"exp23-launch2-{token}-train"
+    report_name = f"exp23-launch2-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
@@ -2256,8 +2736,8 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-{token}-train"
-    report_name = f"exp23-{token}-report"
+    train_name = f"exp23-launch2-{token}-train"
+    report_name = f"exp23-launch2-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
     role_names = {"train": train_name, "report": report_name}
     journal_paths = {
@@ -2420,6 +2900,8 @@ def _summary(preflight: Mapping[str, Any]) -> dict[str, Any]:
         "package_protocol_sha256": preflight["package_protocol_sha256"],
         "source_sha256": preflight["source_contract"]["source_sha256"],
         "runtime_sha256": preflight["source_contract"]["runtime_sha256"],
+        "snapshot_files": len(preflight["snapshot_inventory"]),
+        "snapshot_inventory_sha256": preflight["snapshot_inventory_sha256"],
         "audit_replays": preflight["audit_replays"],
         "direct_hydra_compositions": preflight["direct_hydra_compositions"],
         "scientific_output_fingerprint_before": preflight["scientific_output_fingerprint_before"],
@@ -2435,6 +2917,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--test-only", action="store_true", help="read-only verification (default)")
+    actions.add_argument(
+        "--snapshot-test",
+        action="store_true",
+        help="seal and fully verify a temporary copied tree without contacting Slurm",
+    )
     actions.add_argument("--submit", action="store_true", help="explicitly create the seal and submit two jobs")
     parser.add_argument("--repo-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument(
@@ -2449,6 +2936,7 @@ def _internal_snapshot_main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--_snapshot-preflight", action="store_true", required=True)
     parser.add_argument("--snapshot-root", type=Path, required=True)
+    parser.add_argument("--audit-input-root", type=Path, required=True)
     parser.add_argument("--protocol-sha256", required=True)
     parser.add_argument("--inventory-json", required=True)
     args = parser.parse_args(argv)
@@ -2461,9 +2949,14 @@ def _internal_snapshot_main(argv: Sequence[str]) -> int:
     require(isinstance(inventory, dict) and inventory, "snapshot inventory is absent")
     verify_snapshot_files(root, inventory)
     bootstrap_manifest = read_json(root / PACKAGE_RELATIVE / "manifest.json")
+    input_root = _manifest_repository_root(bootstrap_manifest, args.audit_input_root)
     activate_isolated_runtime(bootstrap_manifest)
     value = _snapshot_preflight_in_process(
-        root, args.protocol_sha256, inventory, runner=_default_runner
+        root,
+        input_root,
+        args.protocol_sha256,
+        inventory,
+        runner=_default_runner,
     )
     print("EXP23_SNAPSHOT_PREFLIGHT=" + canonical_json(value), flush=True)
     return 0
@@ -2477,6 +2970,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = _parser().parse_args(raw_argv)
         repo_root = _directory_nonsymlink(args.repo_root, "repository root")
         manifest = read_json(repo_root / PACKAGE_RELATIVE / "manifest.json")
+        if args.snapshot_test:
+            require(
+                args.submission_root is None,
+                "--snapshot-test does not accept a submission root",
+            )
+            verified = snapshot_test(repo_root)
+            print(json.dumps(verified, sort_keys=True, indent=2, allow_nan=False))
+            return 0
         activate_isolated_runtime(manifest)
         submission_root = (
             args.submission_root.absolute()

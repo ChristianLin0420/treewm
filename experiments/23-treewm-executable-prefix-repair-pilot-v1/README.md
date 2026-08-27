@@ -1,10 +1,23 @@
-# Exp23 executable-prefix repair pilot v1
+# Exp23 executable-prefix repair pilot v1 launch2
 
-This is the sealed, launch-capable but unsubmitted package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch2 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-No submission, snapshot, scheduler job, or Exp23 run directory was created while
-building or verifying this package.
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch2`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch2` namespace and
+`exp23-launch2-*` run names. No launch2 submission, snapshot, scheduler job, W&B run,
+checkpoint, optimizer update, or scientific output was created while building or
+verifying this package.
+
+The original identity is permanently negative provenance. Its preserved 137-file
+read-only source snapshot was independently byte-matched, 137/137, to commit
+`85cd77de2d5956944008b4b2b16267858828fa84`; the journal itself contains no git
+provenance. The attempt aborted before the submission contract because its isolated
+audit inputs were unavailable.
+It produced no submission SHA, job ID, receipt, scientific run, checkpoint, W&B run,
+or optimizer update. Its exact protocol, manifest, inventory, claim, fingerprint, and
+journal hashes are sealed in `manifest.superseded_launch`; its namespace, identity,
+snapshot, and state are forbidden as launch2 inputs and cannot be reused or resumed.
 
 ## Scientific design
 
@@ -34,6 +47,17 @@ median base-objective gradient norm across both clipping groups and regimes, the
 common scale capped the summed component-norm upper bound at 10% on every row/group.
 All intended gradients were finite and nonzero; the frozen maximum ratio is
 `0.09999999714797946`.
+
+Before either weight or prefix-target replay can deserialize a historical checkpoint,
+the adjacent weight lock must match the exact file hash frozen by snapshot preflight.
+That lock raw-byte-binds the Exp20 campaign manifest and all ten consumed
+`GAUGE_PILOT_V2_LAUNCH.json` control files. Each checkpoint is opened through
+component-safe `O_NOFOLLOW` descriptors, copied while hashing into a private temporary
+file, and deserialized only from that authenticated copy. Dataset/cache/recipe payloads
+are deliberately not added to this raw-byte control-file map: their non-pickle NumPy
+memmaps and canonical/self-hashed manifests remain content-addressed by the existing
+source, cache, and future-recipe identities, while exact consumed batch and prefix-target
+hashes remain frozen in the scientific locks.
 
 Action application reuses the planner's canonical projection. Loss and planner bounds
 are explicit, equal, and tied to each environment's hash-checked Box. The executable
@@ -75,10 +99,13 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-The snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch2 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` is included as an exact supplemental import
 file with the empty-file SHA-256 recorded in `campaign.SNAPSHOT_IMPORT_FILES`.
+Static preflight freezes that exact inventory once; copying and the isolated snapshot
+bootstrap reopen and verify only the same mapping, so a later mutation or change to the
+campaign file list cannot redefine the sealed execution tree.
 
 ## Commands
 
@@ -98,6 +125,20 @@ Hydra configs, checks Bash/Slurm test-only surfaces, and creates no snapshot, ou
 or job. The worker remains isolated with `-I -S -B`; only the trainer entry uses
 `-P -S -B`, intentionally, so the per-cell `PYTHONHASHSEED` is honored while unsafe
 implicit import paths and site startup remain disabled.
+
+Before any launch attempt, the copied-tree path must also pass its explicit regression:
+
+```bash
+"$PY" -I -S -B "$PKG/submit.py" --snapshot-test
+```
+
+`--snapshot-test` runs the production snapshot inventory, seals a real read-only copy
+under a private task-specific `/tmp` tree, and executes the full isolated copied-tree
+preflight: all four real audit replays plus all 20 direct Hydra compositions. It never
+checks or contacts Slurm clients and never creates submission/run state. Temporary
+snapshot and library-cache files are permission-restored and removed before success is
+reported. A successful `--test-only` does not substitute for this check; this command
+must pass for the final launch namespace and protocol before `--submit` is authorized.
 
 Submission is intentionally explicit and was not run during package construction:
 

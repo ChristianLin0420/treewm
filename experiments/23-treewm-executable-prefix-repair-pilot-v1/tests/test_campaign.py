@@ -38,6 +38,50 @@ def test_full_static_contract_and_matrix():
         "cube-quadruple-100m", "GSEP", 111
     )
     assert [cell.index for cell in cells] == list(range(20))
+    assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
+    assert all(cell.run_name.startswith("exp23-launch2-") for cell in cells)
+
+
+def test_launch2_namespace_and_superseded_precontract_abort_are_exact():
+    manifest, lock = contracts()
+    superseded = manifest["superseded_launch"]
+    assert superseded == campaign.SUPERSEDED_LAUNCH
+    assert superseded["source_commit_claimed_by_journal"] is False
+    assert superseded["snapshot"] == {
+        "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    }
+    assert superseded["submission_sha256"] is None
+    assert superseded["known_job_ids"] == []
+    for key in (
+        "submission_receipt_committed",
+        "scientific_run_started",
+        "checkpoint_created",
+        "wandb_run_created",
+        "results_consumed",
+        "checkpoints_consumed",
+        "reuse_allowed",
+        "resume_allowed",
+    ):
+        assert superseded[key] is False
+    assert superseded["optimizer_updates"] == 0
+    assert manifest["paths"]["run_root"].endswith(
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+    )
+    assert manifest["paths"]["run_root"] != superseded["run_root"]
+    assert manifest["logging"]["wandb_project"].endswith("-launch2")
+    assert manifest["logging"]["wandb_group"].endswith("-launch2")
+
+    tampered = copy.deepcopy(manifest)
+    tampered["paths"]["run_root"] = superseded["run_root"]
+    with pytest.raises(campaign.ContractError):
+        campaign.validate_manifest(tampered, lock, REPO)
+    tampered = copy.deepcopy(manifest)
+    tampered["superseded_launch"]["resume_allowed"] = True
+    with pytest.raises(campaign.ContractError):
+        campaign.validate_manifest(tampered, lock, REPO)
 
 
 def test_each_matched_pair_differs_only_in_three_audited_weights():

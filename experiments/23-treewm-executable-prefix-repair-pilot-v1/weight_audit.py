@@ -16,7 +16,10 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import stat
 import sys
+import tempfile
 from typing import Any, Iterator, Mapping
 
 
@@ -64,6 +67,8 @@ SETTINGS = (
     "puzzle-4x4-100m",
     "cube-quadruple-100m",
 )
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+CHECKPOINT_LOCK_PATH = Path(__file__).resolve().parent / "weight_audit.lock.json"
 
 
 class AuditError(RuntimeError):
@@ -112,12 +117,318 @@ def parameter_mapping_sha256(model: Any) -> str:
     return tensor_mapping_sha256(dict(model.named_parameters()))
 
 
-def read_json(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        value = json.load(handle)
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _json_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in items:
+        if key in result:
+            raise AuditError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_json_bytes(payload: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_json_pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                AuditError(f"non-finite JSON value in {label}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AuditError(f"invalid JSON in {label}: {exc}") from exc
     if not isinstance(value, dict):
-        raise AuditError(f"expected JSON object: {path}")
+        raise AuditError(f"expected JSON object: {label}")
     return value
+
+
+def _open_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
+    parent = _open_directory_components(path.parent, f"{label} parent")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent,
+        )
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise AuditError(f"{label} is not a single-link regular file")
+        return descriptor, info
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    finally:
+        os.close(parent)
+
+
+def _authenticated_regular_bytes(
+    path: Path,
+    expected_sha256: str | None,
+    label: str,
+) -> tuple[bytes, str]:
+    """Read exact bytes from one stable O_NOFOLLOW inode and authenticate them."""
+
+    if expected_sha256 is not None and SHA256.fullmatch(str(expected_sha256)) is None:
+        raise AuditError(f"{label} expected SHA256 is malformed")
+    descriptor, before = _open_regular(path, label)
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    copied = 0
+    try:
+        while block := os.read(descriptor, 16 * 1024 * 1024):
+            digest.update(block)
+            chunks.append(block)
+            copied += len(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if _file_identity(after) != _file_identity(before) or copied != before.st_size:
+        raise AuditError(f"{label} changed while being authenticated")
+    actual = digest.hexdigest()
+    if expected_sha256 is not None and actual != expected_sha256:
+        raise AuditError(f"{label} SHA256 differs from weight-audit lock")
+    return b"".join(chunks), actual
+
+
+def read_json(
+    path: str | Path,
+    *,
+    expected_sha256: str | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    source = Path(path)
+    payload, _digest = _authenticated_regular_bytes(
+        source, expected_sha256, label or str(source)
+    )
+    return _parse_json_bytes(payload, label or str(source))
+
+
+def load_weight_lock(expected_sha256: str) -> dict[str, Any]:
+    return read_json(
+        CHECKPOINT_LOCK_PATH,
+        expected_sha256=expected_sha256,
+        label="adjacent weight-audit lock",
+    )
+
+
+def frozen_checkpoint_sha256(lock: Mapping[str, Any]) -> dict[str, str]:
+    mapping = lock.get("checkpoint_sha256")
+    expected_keys = {
+        f"{setting}/seed{seed}" for setting in SETTINGS for seed in CHECKPOINT_SEEDS
+    }
+    if not isinstance(mapping, dict) or set(mapping) != expected_keys:
+        raise AuditError("frozen checkpoint hash map is missing or has extra entries")
+    result = {str(key): str(value) for key, value in mapping.items()}
+    if not all(SHA256.fullmatch(value) is not None for value in result.values()):
+        raise AuditError("frozen checkpoint hash map contains malformed SHA256")
+    return result
+
+
+def _external_input_keys() -> set[str]:
+    return {
+        "exp20/manifest.json",
+        *(
+            f"{setting}/seed{seed}/GAUGE_PILOT_V2_LAUNCH.json"
+            for setting in SETTINGS
+            for seed in CHECKPOINT_SEEDS
+        ),
+    }
+
+
+def frozen_external_input_sha256(lock: Mapping[str, Any]) -> dict[str, str]:
+    mapping = lock.get("external_input_sha256")
+    expected_keys = _external_input_keys()
+    if not isinstance(mapping, dict) or set(mapping) != expected_keys:
+        raise AuditError(
+            "frozen external-input hash map is missing or has extra entries"
+        )
+    result = {str(key): str(value) for key, value in mapping.items()}
+    if not all(SHA256.fullmatch(value) is not None for value in result.values()):
+        raise AuditError("frozen external-input hash map contains malformed SHA256")
+    return dict(sorted(result.items()))
+
+
+def _open_directory_components(path: Path, label: str) -> int:
+    absolute = path.absolute()
+    if not absolute.is_absolute() or any(part in ("", ".", "..") for part in absolute.parts[1:]):
+        raise AuditError(f"{label} is not an absolute normalized path")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(absolute.anchor, flags)
+    try:
+        for part in absolute.parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise AuditError(f"{label} is not a nonsymlink directory")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def exact_checkpoint_run(output_root: Path, setting: str, seed: int) -> Path:
+    tree_root = output_root / setting / "treewm"
+    descriptor = _open_directory_components(tree_root, f"{setting} checkpoint run root")
+    try:
+        suffix = f"armgs-seed{seed}"
+        candidates = sorted(name for name in os.listdir(descriptor) if name.endswith(suffix))
+        if len(candidates) != 1:
+            raise AuditError(
+                f"{setting}/seed{seed}: expected exactly one frozen GS run, found {len(candidates)}"
+            )
+        info = os.stat(candidates[0], dir_fd=descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode):
+            raise AuditError(f"{setting}/seed{seed}: frozen GS run is not a nonsymlink directory")
+        return tree_root / candidates[0]
+    finally:
+        os.close(descriptor)
+
+
+def load_frozen_external_inputs(
+    project_root: Path,
+    lock: Mapping[str, Any],
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[int, Path]],
+    dict[str, dict[int, dict[str, Any]]],
+    dict[str, str],
+]:
+    """Authenticate every external control JSON before any checkpoint is loaded."""
+
+    expected = frozen_external_input_sha256(lock)
+    manifest_path = (
+        project_root
+        / "experiments"
+        / "20-treewm-grounded-gauge-pilot-v2"
+        / "manifest.json"
+    )
+    output_root = project_root / "outputs" / "treewm-grounded-gauge-pilot-v2-launch2"
+    manifest = read_json(
+        manifest_path,
+        expected_sha256=expected["exp20/manifest.json"],
+        label="frozen Exp20 manifest",
+    )
+    if tuple(setting.get("id") for setting in manifest.get("settings", ())) != SETTINGS:
+        raise AuditError("Exp20 five-setting order differs")
+
+    run_dirs: dict[str, dict[int, Path]] = {}
+    launches: dict[str, dict[int, dict[str, Any]]] = {}
+    for setting in SETTINGS:
+        run_dirs[setting] = {
+            seed: exact_checkpoint_run(output_root, setting, seed)
+            for seed in CHECKPOINT_SEEDS
+        }
+        launches[setting] = {}
+        for seed in CHECKPOINT_SEEDS:
+            key = f"{setting}/seed{seed}/GAUGE_PILOT_V2_LAUNCH.json"
+            launches[setting][seed] = read_json(
+                run_dirs[setting][seed] / "GAUGE_PILOT_V2_LAUNCH.json",
+                expected_sha256=expected[key],
+                label=f"{setting}/seed{seed} frozen Exp20 launch",
+            )
+    return manifest, run_dirs, launches, expected
+
+
+def _open_checkpoint(run_dir: Path) -> tuple[int, os.stat_result]:
+    run_descriptor = _open_directory_components(run_dir, "frozen checkpoint run")
+    checkpoint_descriptor: int | None = None
+    try:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        checkpoints = os.open("checkpoints", directory_flags, dir_fd=run_descriptor)
+        try:
+            checkpoint_descriptor = os.open(
+                "latest.pt",
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=checkpoints,
+            )
+        finally:
+            os.close(checkpoints)
+        info = os.fstat(checkpoint_descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise AuditError("frozen checkpoint is not a single-link regular file")
+        return checkpoint_descriptor, info
+    except BaseException:
+        if checkpoint_descriptor is not None:
+            os.close(checkpoint_descriptor)
+        raise
+    finally:
+        os.close(run_descriptor)
+
+
+def load_frozen_checkpoint(
+    run_dir: Path,
+    expected_sha256: str,
+    torch_module: Any,
+) -> tuple[Any, str]:
+    """Authenticate one source inode into a private copy before pickle executes."""
+
+    if SHA256.fullmatch(str(expected_sha256)) is None:
+        raise AuditError("expected checkpoint SHA256 is malformed")
+    source_descriptor, before = _open_checkpoint(run_dir)
+    digest = hashlib.sha256()
+    copied = 0
+    temporary_directory = os.environ.get("TMPDIR")
+    try:
+        with tempfile.TemporaryFile(mode="w+b", dir=temporary_directory) as verified:
+            private_info = os.fstat(verified.fileno())
+            if (
+                not stat.S_ISREG(private_info.st_mode)
+                or private_info.st_uid != os.getuid()
+                or private_info.st_mode & 0o077
+            ):
+                raise AuditError("private checkpoint copy is not a private regular file")
+            while block := os.read(source_descriptor, 16 * 1024 * 1024):
+                digest.update(block)
+                verified.write(block)
+                copied += len(block)
+            after = os.fstat(source_descriptor)
+            if _file_identity(after) != _file_identity(before) or copied != before.st_size:
+                raise AuditError("frozen checkpoint changed while being authenticated")
+            actual = digest.hexdigest()
+            if actual != expected_sha256:
+                raise AuditError("frozen checkpoint SHA256 differs from weight-audit lock")
+            verified.flush()
+            verified.seek(0)
+            payload = torch_module.load(
+                verified, map_location="cpu", weights_only=False
+            )
+            if os.fstat(verified.fileno()).st_size != copied:
+                raise AuditError("private checkpoint copy changed during torch.load")
+            return payload, actual
+    finally:
+        os.close(source_descriptor)
 
 
 @contextlib.contextmanager
@@ -531,7 +842,7 @@ def _run_fingerprint(run_dir: Path) -> str:
     return stable_hash(rows)
 
 
-def run(project_root: Path) -> dict[str, Any]:
+def run(project_root: Path, expected_weight_lock_sha256: str) -> dict[str, Any]:
     if NUMERICAL_LIBRARY_PREIMPORTED:
         raise AuditError(
             "numpy/torch was imported before the audit pinned its thread environment"
@@ -557,13 +868,14 @@ def run(project_root: Path) -> dict[str, Any]:
     from treewm.models.baselines import tree_config_for
     from treewm.utils import config as cfg_utils
 
-    output_root = project_root / "outputs" / "treewm-grounded-gauge-pilot-v2-launch2"
-    manifest_path = project_root / "experiments" / "20-treewm-grounded-gauge-pilot-v2" / "manifest.json"
-    if not manifest_path.is_file() or not output_root.is_dir():
-        raise AuditError("Exp20 manifest/output root is unavailable")
-    manifest = read_json(manifest_path)
-    if tuple(setting["id"] for setting in manifest["settings"]) != SETTINGS:
-        raise AuditError("Exp20 five-setting order differs")
+    weight_lock = load_weight_lock(expected_weight_lock_sha256)
+    (
+        _exp20_manifest,
+        run_dirs_by_setting,
+        launches_by_setting,
+        locked_external_inputs,
+    ) = load_frozen_external_inputs(project_root, weight_lock)
+    locked_checkpoint_hashes = frozen_checkpoint_sha256(weight_lock)
 
     protected_before: dict[str, str] = {}
     checkpoint_hashes: dict[str, str] = {}
@@ -573,31 +885,18 @@ def run(project_root: Path) -> dict[str, Any]:
     batch_identities: dict[str, Any] = {}
 
     for setting in SETTINGS:
-        run_dirs = {
-            seed: next(
-                iter(
-                    sorted(
-                        (output_root / setting / "treewm").glob(f"*armgs-seed{seed}")
-                    )
-                ),
-                None,
-            )
-            for seed in CHECKPOINT_SEEDS
-        }
-        if any(path is None for path in run_dirs.values()):
-            raise AuditError(f"{setting}: exact GS run directory is missing")
-        launches = {seed: read_json(run_dirs[seed] / "GAUGE_PILOT_V2_LAUNCH.json") for seed in CHECKPOINT_SEEDS}
+        run_dirs = run_dirs_by_setting[setting]
+        launches = launches_by_setting[setting]
         checkpoints: dict[int, Any] = {}
         for seed, run_dir in run_dirs.items():
-            checkpoint_path = run_dir / "checkpoints" / "latest.pt"
             protected_before[str(run_dir)] = _run_fingerprint(run_dir)
-            checkpoint_hashes[f"{setting}/seed{seed}"] = file_sha256(checkpoint_path)
-            try:
-                payload = torch.load(
-                    checkpoint_path, map_location="cpu", weights_only=False, mmap=True
-                )
-            except TypeError:
-                payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            checkpoint_key = f"{setting}/seed{seed}"
+            payload, checkpoint_digest = load_frozen_checkpoint(
+                run_dir,
+                locked_checkpoint_hashes[checkpoint_key],
+                torch,
+            )
+            checkpoint_hashes[checkpoint_key] = checkpoint_digest
             if int(payload.get("completed_updates", -1)) != AUDIT_STEP:
                 raise AuditError(f"{setting}/seed{seed}: checkpoint is not exact 5k")
             checkpoints[seed] = payload
@@ -744,12 +1043,29 @@ def run(project_root: Path) -> dict[str, Any]:
             raise AuditError(f"protected Exp20 run changed during audit: {run_dir}")
     for setting in SETTINGS:
         for seed in CHECKPOINT_SEEDS:
-            run_dir = next(
-                iter(sorted((output_root / setting / "treewm").glob(f"*armgs-seed{seed}")))
+            run_dir = exact_checkpoint_run(
+                project_root
+                / "outputs"
+                / "treewm-grounded-gauge-pilot-v2-launch2",
+                setting,
+                seed,
             )
-            path = run_dir / "checkpoints" / "latest.pt"
-            if file_sha256(path) != checkpoint_hashes[f"{setting}/seed{seed}"]:
-                raise AuditError(f"checkpoint changed during audit: {path}")
+            descriptor, before = _open_checkpoint(run_dir)
+            digest = hashlib.sha256()
+            copied = 0
+            try:
+                while block := os.read(descriptor, 16 * 1024 * 1024):
+                    digest.update(block)
+                    copied += len(block)
+                after = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if (
+                _file_identity(after) != _file_identity(before)
+                or copied != before.st_size
+                or digest.hexdigest() != checkpoint_hashes[f"{setting}/seed{seed}"]
+            ):
+                raise AuditError(f"checkpoint changed during audit: {run_dir}")
 
     source_files = {
         "trainer": project_root / "scripts" / "train.py",
@@ -799,6 +1115,7 @@ def run(project_root: Path) -> dict[str, Any]:
         "derived": derive_weights(rows),
         "rows": rows,
         "checkpoint_sha256": checkpoint_hashes,
+        "external_input_sha256": locked_external_inputs,
         "batch_identities": batch_identities,
         "data_identities": data_identities,
         "action_bounds": bounds_by_setting,
@@ -813,10 +1130,14 @@ def run(project_root: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--weight-lock-sha256", required=True)
     parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
     try:
-        result = run(args.project_root.expanduser().resolve())
+        result = run(
+            args.project_root.expanduser().resolve(),
+            args.weight_lock_sha256,
+        )
     except Exception as exc:
         print(f"weight audit failed: {exc}", file=sys.stderr)
         return 1
@@ -832,6 +1153,7 @@ def main() -> int:
                 "contract",
                 "derived",
                 "checkpoint_sha256",
+                "external_input_sha256",
                 "batch_identities",
                 "data_identities",
                 "action_bounds",

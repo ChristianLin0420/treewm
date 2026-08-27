@@ -1201,9 +1201,7 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         "full_output_fingerprint_before": {},
         "full_output_fingerprint_after": {},
     }
-    campaign = SimpleNamespace(manifest_sha256=lambda _manifest: "f" * 64)
     contract = submit._submission_contract(
-        campaign=campaign,
         manifest=manifest,
         protocol="e" * 64,
         source={"source_sha256": "a" * 64, "runtime_sha256": "b" * 64},

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch2",
   "classification": "bounded_prospective_matched_causal_repair_pilot",
   "status": "sealed_launch_ready_unsubmitted",
   "formal_validation": false,
@@ -10,6 +10,45 @@
     "allowed_actions": ["verify_package", "render_matrix", "evaluate_supplied_report_bundle", "rerun_outcome_blind_weight_audit", "static_launch_test", "dry_run", "explicit_submit"],
     "forbidden_actions": ["implicit_submit", "import_checkpoint", "import_optimizer", "select_at_midpoint", "drop_cell", "write_exp20_exp21_exp22", "consume_exp20_outcomes"],
     "submission_policy": "No command submits unless submit.py is invoked with --submit under the pinned interpreter; --test-only and default dry-run are read-only and create neither snapshot nor job."
+  },
+  "superseded_launch": {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1",
+    "submission_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1/state/submission",
+    "snapshot_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1/state/submission/source-snapshot/repo",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
+    "status": "aborted_before_submission_contract",
+    "source_commit": "85cd77de2d5956944008b4b2b16267858828fa84",
+    "source_commit_claimed_by_journal": false,
+    "source_commit_evidence": "independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": "The preserved journal does not record git provenance. The source commit is linked only by an independent comparison proving that all 137 sealed snapshot files match commit 85cd77de2d5956944008b4b2b16267858828fa84; the journal proves only its own claim, snapshot, and pre-contract abort records.",
+    "package_protocol_sha256": "3e39fb1e6501e3a31e360f569502eb92d1bbb0ad8093c7e747563e50665c2b6e",
+    "manifest_canonical_sha256": "25790db3fe7a9a25c6de4f6b8224ccab33751817dc00f1bcf64d25c7fb497e4e",
+    "manifest_raw_sha256": "bb841c5a9290465f864407a5d6a8ed927c907e9f4c2b07eeb58d23062a18d0db",
+    "snapshot": {
+      "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
+      "file_count": 137,
+      "independently_matched_files": 137,
+      "all_files_match": true
+    },
+    "claim_token": "0e5e1be5eace176f6a51ec3a3beb7e2579f6914699ac3080f9b2b9d10e4127e9",
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "journal_sha256": {
+      "0000_CLAIMED.json": "e9607ea26d07af65b670f2b70abceee9b3f45460159f28a76cd1ec6807a195d4",
+      "0001_SNAPSHOT_SEALED.json": "94945e37ad3b363c04ab89c14230c06a62b30067d28f5c49df35854690de1439",
+      "9998_OUTER_ABORTED.json": "27316555fd705a63bbd24521cadadf7d6d6b51b177d9c28622d654c99da16f02"
+    },
+    "submission_sha256": null,
+    "known_job_ids": [],
+    "submission_receipt_committed": false,
+    "scientific_run_started": false,
+    "checkpoint_created": false,
+    "wandb_run_created": false,
+    "optimizer_updates": 0,
+    "results_consumed": false,
+    "checkpoints_consumed": false,
+    "reuse_allowed": false,
+    "resume_allowed": false
   },
   "method": {
     "arm": "treewm",
@@ -27,7 +66,7 @@
     "seeds": [110, 111],
     "expected_cells": 20,
     "index_mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
-    "fresh_start_policy": "Every cell starts from scratch; no checkpoint, result, optimizer, or model initialization may be imported.",
+    "fresh_start_policy": "Every launch2 cell starts from scratch in the fresh launch2 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from the superseded pre-contract abort may be imported, reused, or resumed.",
     "common_random_numbers": "Within each setting and seed, GS and GSEP use identical initialization seed, published-union data identity/order, validation sample seed, evaluation seed bank, and evaluation profile.",
     "midpoint_policy": "No selection, promotion, dropping, early-stopping, or arm-dependent decision occurs at 5k or 12.5k; all cells continue to 25k.",
     "analysis_boundaries": [5000, 25000],
@@ -60,17 +99,17 @@
   "weight_audit": {
     "lock": "weight_audit.lock.json",
     "audit_source": "weight_audit.py",
-    "artifact_sha256": "130180ce9202e4a83bc59d6bdaf02131885bb1aa74d998de5bb29d43135f5b3e",
+    "artifact_sha256": "d9a5a581aead44219dbfaa4acb614d8e5c4efbb910585c48c1d95b75bb2f0fcc",
     "rows_sha256": "1b9926c4893f90915b3ad87b6d6cd4b0dae0a70633ffb6599a90907b143a23f5",
-    "summary_sha256": "a5eb0de7846e8f58bcf15f6bbce9f92c76d3c3cf3c5778fb1b7eace6c2b10860",
+    "summary_sha256": "a22498ec8cfcea3dfc4b9581669d0822e8043aee9723a35b0b6d46c16903dc3b",
     "outcome_blind": true,
     "weights_frozen_before_package_matrix": true
   },
   "prefix_target_contract": {
     "lock": "prefix_target.lock.json",
     "audit_source": "prefix_target_audit.py",
-    "artifact_sha256": "1540c3172984631396da826f322d958727f9c343d5c564697d3f1c7f77d43fe5",
-    "source_sha256": "6c3fca1b902642dca76007d54a37ce9ed2dfc0aae8b364b7eabee9a674dfbc0c",
+    "artifact_sha256": "dbd59e340607c013adcbf3443c53fdbdef4a0ecf9e83253a1868848a9d0b036a",
+    "source_sha256": "2086d30eaeff74e79054c60cf0ab513e3268d43a3534fe5b1f426bd3fd003962",
     "outcome_blind": true,
     "validation_anchor_count_per_setting": 5120,
     "batch_size": 256,
@@ -80,7 +119,7 @@
   "resolved_config_contract": {
     "lock": "resolved_config.lock.json",
     "audit_source": "resolved_config_audit.py",
-    "artifact_sha256": "e883e6d861a87bfe9462825db22e4584df7c2f572f647cd148ffa994e174a81b",
+    "artifact_sha256": "47779651b2373cf1ec6c2d2ecb081eae5ce251c41b1b1e7f7ce2dbb7bc27f15f",
     "source_sha256": "8d13ebc60f3ba574b8a5a800da915864b36f540f35a22aafeba89be6a92f4150",
     "direct_entrypoint": "scripts/train.py",
     "cell_count": 20,
@@ -89,11 +128,11 @@
   "causal_parity_contract": {
     "lock": "causal_parity.lock.json",
     "audit_source": "causal_parity_audit.py",
-    "artifact_sha256": "a9991bb584f07ac304bd8b310ed11901a18f9f8b654d77b9122b7d203635ee89",
+    "artifact_sha256": "a4233c037eb0e135f9391b62d0b1bfafe079caa9fc0d32ffda2a4e74fc5810af",
     "source_sha256": "3820fb42561cae9b86ddd48186ed1eaee0258d4698bf6f9b521f0ea624eb401d",
-    "audit_manifest_input_sha256": "4a3b2d0790f68a7d2deadb856438bd38406f7bcfd33dd8ad03f619d393d04fa9",
+    "audit_manifest_input_sha256": "e54f9156559a68e1da645e9657495bec7a9a899d044974d77e8171ccb3e17891",
     "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
-    "stdout_sha256": "4db23cc1623c420a914ee89a18e7142ded5729a7729dd686676d4344cabc2422",
+    "stdout_sha256": "538cea2158bc0f712134c4e75f46031b0af2d666f86fad9d14761d5f53ece1c0",
     "stdout_bytes": 91081,
     "clean_and_adversarial_thread_replays_byte_identical": true,
     "outcome_blind": true,
@@ -274,13 +313,13 @@
     "actual_submit_performed": false
   },
   "paths": {
-    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1",
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
+    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch2",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch2",
     "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
   },
   "compatible_v2_recipe_input": {
     "campaign_id": "treewm-50task-1m-v2",
@@ -309,8 +348,8 @@
     "scontrol": "/usr/local/bin/scontrol"
   },
   "logging": {
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
-    "wandb_group": "treewm-executable-prefix-repair-pilot-v1",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch2",
+    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch2",
     "wandb_mode": "online"
   },
   "settings": [

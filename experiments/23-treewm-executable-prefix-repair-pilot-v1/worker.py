@@ -28,7 +28,7 @@ from typing import Any, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",

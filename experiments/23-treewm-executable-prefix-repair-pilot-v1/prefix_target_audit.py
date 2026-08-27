@@ -76,7 +76,7 @@ def _load_weight_audit():
     return module
 
 
-def run(project_root: Path) -> dict[str, Any]:
+def run(project_root: Path, expected_weight_lock_sha256: str) -> dict[str, Any]:
     # Importing this module first also enforces its pre-NumPy/torch thread contract.
     audit = _load_weight_audit()
     import numpy as np
@@ -94,29 +94,24 @@ def run(project_root: Path) -> dict[str, Any]:
     if torch.get_num_threads() != 1 or torch.get_num_interop_threads() != 1:
         raise PrefixTargetAuditError("torch thread pools are not single-threaded")
 
-    output_root = project_root / "outputs/treewm-grounded-gauge-pilot-v2-launch2"
+    weight_lock = audit.load_weight_lock(expected_weight_lock_sha256)
+    (
+        _exp20_manifest,
+        run_dirs_by_setting,
+        launches_by_setting,
+        locked_external_inputs,
+    ) = audit.load_frozen_external_inputs(project_root, weight_lock)
+    locked_checkpoint_hashes = audit.frozen_checkpoint_sha256(weight_lock)
     rows: dict[str, Any] = {}
     for setting in SETTINGS:
-        candidates = sorted(
-            (output_root / setting / "treewm").glob("*armgs-seed108")
+        run_dir = run_dirs_by_setting[setting][108]
+        launch = launches_by_setting[setting][108]
+        payload, _checkpoint_digest = audit.load_frozen_checkpoint(
+            run_dir,
+            locked_checkpoint_hashes[f"{setting}/seed108"],
+            torch,
         )
-        if len(candidates) != 1:
-            raise PrefixTargetAuditError(f"{setting}: sealed Exp20 GS source is missing")
-        run_dir = candidates[0]
-        launch = audit.read_json(run_dir / "GAUGE_PILOT_V2_LAUNCH.json")
-        try:
-            payload = torch.load(
-                run_dir / "checkpoints/latest.pt",
-                map_location="cpu", weights_only=False, mmap=True,
-            )
-        except TypeError:
-            payload = torch.load(
-                run_dir / "checkpoints/latest.pt", map_location="cpu",
-                weights_only=False,
-            )
-        bound = audit.read_json(PACKAGE_DIR / "weight_audit.lock.json")[
-            "action_bounds"
-        ][setting]
+        bound = weight_lock["action_bounds"][setting]
         cfg = audit.prepare_cfg(
             payload["config"], seed=110,
             lower=float(bound["lower"]), upper=float(bound["upper"]),
@@ -258,9 +253,8 @@ def run(project_root: Path) -> dict[str, Any]:
         "audit_id": "treewm_exp23_prefix_target_contract_v1",
         "settings": rows,
         "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "weight_audit_artifact_sha256": audit.read_json(
-            PACKAGE_DIR / "weight_audit.lock.json"
-        )["result_identity"]["artifact_sha256"],
+        "weight_audit_artifact_sha256": weight_lock["result_identity"]["artifact_sha256"],
+        "external_input_sha256": locked_external_inputs,
     }
     result["artifact_sha256"] = stable_hash(result)
     return result
@@ -269,9 +263,10 @@ def run(project_root: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=PROJECT_ROOT)
+    parser.add_argument("--weight-lock-sha256", required=True)
     args = parser.parse_args()
     try:
-        result = run(args.project_root.resolve())
+        result = run(args.project_root.resolve(), args.weight_lock_sha256)
     except Exception as exc:
         print(f"prefix target audit failed: {exc}", file=sys.stderr)
         return 1

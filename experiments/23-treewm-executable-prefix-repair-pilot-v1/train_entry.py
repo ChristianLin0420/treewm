@@ -447,7 +447,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch2", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(contract.get("submission_root") == str(submission), "submission root binding differs")

@@ -82,6 +82,64 @@ SNAPSHOT_IMPORT_FILES = {
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch2"
+SUPERSEDED_LAUNCH = {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
+    "run_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1"
+    ),
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1/state/submission"
+    ),
+    "snapshot_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1/state/submission/"
+        "source-snapshot/repo"
+    ),
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1",
+    "status": "aborted_before_submission_contract",
+    "source_commit": "85cd77de2d5956944008b4b2b16267858828fa84",
+    "source_commit_claimed_by_journal": False,
+    "source_commit_evidence": "independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": (
+        "The preserved journal does not record git provenance. The source commit is "
+        "linked only by an independent comparison proving that all 137 sealed "
+        "snapshot files match commit 85cd77de2d5956944008b4b2b16267858828fa84; "
+        "the journal proves only its own claim, snapshot, and pre-contract abort records."
+    ),
+    "package_protocol_sha256": "3e39fb1e6501e3a31e360f569502eb92d1bbb0ad8093c7e747563e50665c2b6e",
+    "manifest_canonical_sha256": "25790db3fe7a9a25c6de4f6b8224ccab33751817dc00f1bcf64d25c7fb497e4e",
+    "manifest_raw_sha256": "bb841c5a9290465f864407a5d6a8ed927c907e9f4c2b07eeb58d23062a18d0db",
+    "snapshot": {
+        "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    },
+    "claim_token": "0e5e1be5eace176f6a51ec3a3beb7e2579f6914699ac3080f9b2b9d10e4127e9",
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "journal_sha256": {
+        "0000_CLAIMED.json": "e9607ea26d07af65b670f2b70abceee9b3f45460159f28a76cd1ec6807a195d4",
+        "0001_SNAPSHOT_SEALED.json": "94945e37ad3b363c04ab89c14230c06a62b30067d28f5c49df35854690de1439",
+        "9998_OUTER_ABORTED.json": "27316555fd705a63bbd24521cadadf7d6d6b51b177d9c28622d654c99da16f02",
+    },
+    "submission_sha256": None,
+    "known_job_ids": [],
+    "submission_receipt_committed": False,
+    "scientific_run_started": False,
+    "checkpoint_created": False,
+    "wandb_run_created": False,
+    "optimizer_updates": 0,
+    "results_consumed": False,
+    "checkpoints_consumed": False,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+}
 
 
 class ContractError(RuntimeError):
@@ -301,7 +359,7 @@ def expand_matrix(manifest: Mapping[str, Any]) -> list[Cell]:
                         env_config=str(setting["env_config"]),
                         arm=arm,
                         seed=seed,
-                        run_name=f"exp23-{setting['id']}-arm{arm.lower()}-seed{seed}",
+                        run_name=f"exp23-launch2-{setting['id']}-arm{arm.lower()}-seed{seed}",
                     )
                 )
     return result
@@ -613,7 +671,24 @@ def _validate_lock(lock: Mapping[str, Any], manifest: Mapping[str, Any]) -> None
     )
     require(len(lock["checkpoint_sha256"]) == 10, "checkpoint hash inventory incomplete")
     require(len(lock["batch_sha256"]) == 20, "batch hash inventory incomplete")
-    for inventory in (lock["checkpoint_sha256"], lock["batch_sha256"], lock["source_sha256"]):
+    external_keys = {
+        "exp20/manifest.json",
+        *(
+            f"{setting}/seed{seed}/GAUGE_PILOT_V2_LAUNCH.json"
+            for setting in SETTINGS
+            for seed in (108, 109)
+        ),
+    }
+    require(
+        set(lock.get("external_input_sha256") or {}) == external_keys,
+        "external input hash inventory differs",
+    )
+    for inventory in (
+        lock["checkpoint_sha256"],
+        lock["external_input_sha256"],
+        lock["batch_sha256"],
+        lock["source_sha256"],
+    ):
         require(all(SHA256.fullmatch(str(value)) for value in inventory.values()), "invalid audit hash")
     require(file_sha256(PACKAGE_DIR / "weight_audit.py") == lock["source_sha256"]["audit"], "auditor source differs")
     api = lock["fail_closed_api_binding"]
@@ -636,6 +711,11 @@ def _validate_prefix_target_lock(manifest: Mapping[str, Any]) -> dict[str, Any]:
     require(claimed == binding["artifact_sha256"], "manifest prefix-target artifact differs")
     require(file_sha256(PACKAGE_DIR / binding["audit_source"]) == binding["source_sha256"] == lock["source_sha256"], "prefix-target auditor source differs")
     require(lock["weight_audit_artifact_sha256"] == manifest["weight_audit"]["artifact_sha256"], "prefix-target/weight audit binding differs")
+    weight_lock = read_json(WEIGHT_LOCK_PATH)
+    require(
+        lock.get("external_input_sha256") == weight_lock.get("external_input_sha256"),
+        "prefix-target external-input binding differs",
+    )
     require(set(lock["settings"]) == set(SETTINGS), "prefix-target setting coverage differs")
     for setting, row in lock["settings"].items():
         require(row["setting_id"] == setting, f"{setting}: prefix-target setting label differs")
@@ -824,9 +904,39 @@ def validate_manifest(
     verify_causal_parity_lock: bool = True,
 ) -> None:
     require(manifest.get("schema_version") == 1, "manifest schema differs")
+    require(manifest.get("campaign_id") == CAMPAIGN_ID, "campaign ID differs")
     require(manifest.get("status") == "sealed_launch_ready_unsubmitted", "package launch state differs")
     require(manifest.get("formal_validation") is False, "pilot is marked formal")
     require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
+    require(manifest.get("superseded_launch") == SUPERSEDED_LAUNCH, "superseded launch identity differs")
+    require(
+        manifest["paths"]["run_root"] != SUPERSEDED_LAUNCH["run_root"]
+        and manifest["paths"]["wandb_project"] != SUPERSEDED_LAUNCH["wandb_project"],
+        "superseded namespace was reused",
+    )
+    require(
+        manifest["paths"]["prospective_run_root"]
+        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+        and manifest["paths"]["run_root"]
+        == (
+            "/lustre/fs11/portfolios/edgeai/projects/"
+            "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2"
+        ),
+        "launch2 run namespace differs",
+    )
+    require(
+        manifest["paths"]["wandb_project"] == CAMPAIGN_ID
+        and manifest["logging"]["wandb_project"] == CAMPAIGN_ID
+        and manifest["logging"]["wandb_group"] == CAMPAIGN_ID,
+        "launch2 W&B namespace differs",
+    )
+    require(
+        manifest["design"]["fresh_start_policy"].endswith(
+            "may be imported, reused, or resumed."
+        ),
+        "superseded-launch exclusion policy differs",
+    )
     require(manifest["design"]["settings"] == list(SETTINGS), "setting order differs")
     require(manifest["design"]["arms"] == list(ARMS), "arm order differs")
     require(manifest["design"]["seeds"] == list(SEEDS), "seed order differs")
@@ -845,7 +955,12 @@ def validate_manifest(
     require(future["executable_prefix_steps"] == 4, "prefix cap differs")
     require("min(4" in manifest["scientific_contract"]["prefix_length_rule"], "branchwise prefix rule missing")
     require("never compared to 4" in manifest["acceptance"]["prefix_structural_gates"]["target_rule"], "mean==4 gate reintroduced")
-    require(len(expand_matrix(manifest)) == 20, "matrix expansion differs")
+    cells = expand_matrix(manifest)
+    require(len(cells) == 20, "matrix expansion differs")
+    require(
+        all(cell.run_name.startswith("exp23-launch2-") for cell in cells),
+        "launch2 run-name namespace differs",
+    )
     launch = manifest["launch_contract"]
     require(launch["array"] == "0-19%20" and launch["array_cells"] == 20, "launch array differs")
     require(launch["scratch_to_updates"] == 25_000 and launch["analysis_only_boundary_updates"] == 5_000, "launch boundaries differ")
@@ -878,7 +993,6 @@ def validate_manifest(
         require(setting["future_recipe_sha256"] == audit_data["future_recipe_sha256"], f"{setting['id']}: recipe differs")
         require(setting["published_union_train_anchors"] == audit_data["train_population"], f"{setting['id']}: train population differs")
         require(setting["published_union_validation_anchors"] == audit_data["validation_population"], f"{setting['id']}: val population differs")
-    cells = expand_matrix(manifest)
     for setting in SETTINGS:
         for seed in SEEDS:
             pair = [cell for cell in cells if cell.setting == setting and cell.seed == seed]
