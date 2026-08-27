@@ -56,6 +56,30 @@ def build_anchors(maze_spec, num: int = 8, percentile: float = 70.0, seed: int =
     )
 
 
+def expand_xy_anchors(anchors: AnchorSet, normalizer) -> AnchorSet:
+    """Embed XY-only maze anchors in full observations.
+
+    The maze sampler intentionally knows only geometry, whereas encoders and the
+    normalizer consume the environment's complete observation.  Use the training-set
+    mean for nuisance coordinates so the resulting diagnostic is fixed, neutral in
+    normalized space, and valid for both 29-D Ant and 69-D Humanoid observations.
+    """
+    starts_xy = np.asarray(anchors.starts, dtype=np.float32)
+    goals_xy = np.asarray(anchors.goals, dtype=np.float32)
+    if starts_xy.ndim != 2 or starts_xy.shape[1] != 2:
+        raise ValueError("maze anchor starts must have shape [A, 2]")
+    if goals_xy.shape != starts_xy.shape:
+        raise ValueError("maze anchor goals must match the start XY shape")
+    obs_mean = np.asarray(normalizer.obs_mean, dtype=np.float32)
+    if obs_mean.ndim != 1 or obs_mean.size < 2:
+        raise ValueError("maze anchors require a 1-D observation mean with XY dims")
+    starts = np.broadcast_to(obs_mean, (len(anchors), obs_mean.size)).copy()
+    goals = np.broadcast_to(obs_mean, (len(anchors), obs_mean.size)).copy()
+    starts[:, :2] = starts_xy
+    goals[:, :2] = goals_xy
+    return AnchorSet(starts=starts, goals=goals, names=list(anchors.names))
+
+
 def _draw_maze(ax, maze_spec) -> None:
     for i, j in np.argwhere(maze_spec.maze_map == 1):
         c = maze_spec.ij_to_xy(int(i), int(j))

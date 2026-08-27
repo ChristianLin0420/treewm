@@ -94,8 +94,26 @@ def view_object_tree(model, tree, normalizer, domain, goal_obs: np.ndarray,
     return fig
 
 
+def _puzzle_grid_shape(domain, grid: tuple[int, int] | None) -> tuple[int, int]:
+    """Resolve and validate a board shape from the number of puzzle cells."""
+    cells = len(domain.subgoals)
+    if cells <= 0:
+        raise ValueError("puzzle visualisation requires at least one subgoal cell")
+    if grid is None:
+        side = int(np.sqrt(cells))
+        if side * side != cells:
+            raise ValueError(f"cannot infer a square puzzle grid from {cells} cells")
+        return side, side
+    if len(grid) != 2 or any(int(value) <= 0 for value in grid):
+        raise ValueError("puzzle grid must contain two positive dimensions")
+    shape = int(grid[0]), int(grid[1])
+    if shape[0] * shape[1] != cells:
+        raise ValueError(f"puzzle grid {shape} does not match {cells} cells")
+    return shape
+
+
 def view_board_by_depth(model, tree, normalizer, domain, goal_obs: np.ndarray,
-                        grid: tuple[int, int] = (3, 3), title: str = ""):
+                        grid: tuple[int, int] | None = None, title: str = ""):
     """Predicted puzzle board per recursive depth, beside the target board.
 
     Each cell is the argmax of that button's one-hot block, so this shows whether deeper
@@ -107,6 +125,7 @@ def view_board_by_depth(model, tree, normalizer, domain, goal_obs: np.ndarray,
     depth = tree.depth[0].cpu().numpy()
     dims = np.asarray(domain.goal_dims)
     gv = np.asarray(goal_obs, dtype=np.float32)
+    grid = _puzzle_grid_shape(domain, grid)
 
     def board(vec: np.ndarray) -> np.ndarray:
         cells = [int(np.argmax(vec[dims[lo:hi]])) for lo, hi in domain.subgoals]

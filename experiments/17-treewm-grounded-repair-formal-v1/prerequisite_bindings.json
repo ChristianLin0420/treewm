@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-grounded-repair-formal-v1",
+  "status": "unsealed_waiting_for_accepted_exp15_and_exp16",
+  "formal_submission_allowed": false,
+  "exp15": null,
+  "exp16": null,
+  "selected_arm": null,
+  "selected_recipe": null,
+  "selected_recipe_sha256": null,
+  "binding_sha256": null
+}

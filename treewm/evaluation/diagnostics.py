@@ -120,7 +120,15 @@ def branching_diversity_correlation(
 
 
 def _grid_states(maze_spec, normalizer, samples_per_cell: int = 3) -> tuple[np.ndarray, np.ndarray]:
-    """Sample valid xy positions across all free maze cells."""
+    """Sample valid XY positions as full observations across all free maze cells.
+
+    Maze observations are not two-dimensional: AntMaze has 29 observation dimensions
+    and HumanoidMaze has 69.  The old visualisation passed an ``[N, 2]`` XY array to
+    the full-observation normalizer, so every heatmap failed before it could be logged.
+    Hold all nuisance coordinates at their training-set mean (zero after
+    normalization) and vary only the physical XY coordinates.  This is deterministic
+    across runs and makes the slice represented by the heatmap explicit.
+    """
     cells = maze_spec.free_cells()
     offsets = np.linspace(-0.35, 0.35, samples_per_cell)
     pts = []
@@ -130,7 +138,15 @@ def _grid_states(maze_spec, normalizer, samples_per_cell: int = 3) -> tuple[np.n
             for dy in offsets:
                 pts.append(base + np.array([dx, dy]) * maze_spec.unit)
     xy = np.asarray(pts, dtype=np.float32)
-    return xy, normalizer.norm_obs(xy)
+    obs_mean = np.asarray(normalizer.obs_mean, dtype=np.float32)
+    if obs_mean.ndim != 1 or obs_mean.size < 2:
+        raise ValueError("maze visualisation requires a 1-D observation mean with XY dims")
+    raw_obs = np.broadcast_to(obs_mean, (len(xy), obs_mean.size)).copy()
+    raw_obs[:, :2] = xy
+    norm = normalizer.norm_obs(raw_obs)
+    if norm.shape != raw_obs.shape:
+        raise ValueError("maze visualisation normalizer returned a non-observation shape")
+    return xy, norm
 
 
 @torch.no_grad()

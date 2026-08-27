@@ -93,6 +93,7 @@ TREEWM_V2_OBJECTIVES = frozenset(
         "treewm_v2_grounded_pilot_v1",
         "treewm_v2_grounded_formal_v1",
         "treewm_v2_grounded_repair_pilot_v1",
+        "treewm_v2_grounded_repair_formal_v1",
     }
 )
 BOUNDED_PILOT_OBJECTIVES = {
@@ -100,6 +101,9 @@ BOUNDED_PILOT_OBJECTIVES = {
     "treewm_v2_grounded_repair_pilot_v1": 25_000,
 }
 FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
+GROUNDED_FORMAL_OBJECTIVES = frozenset(
+    {"treewm_v2_grounded_formal_v1", "treewm_v2_grounded_repair_formal_v1"}
+)
 
 
 def validate_objective_version(objective_version: str, total_steps: int) -> None:
@@ -112,9 +116,9 @@ def validate_objective_version(objective_version: str, total_steps: int) -> None
             f"{objective_version} is a bounded diagnostic objective: "
             f"train.steps={total_steps} exceeds the {pilot_cap}-update cap"
         )
-    if objective_version == "treewm_v2_grounded_formal_v1" and int(total_steps) != 1_000_000:
+    if objective_version in GROUNDED_FORMAL_OBJECTIVES and int(total_steps) != 1_000_000:
         raise ValueError(
-            "treewm_v2_grounded_formal_v1 requires exactly 1,000,000 scientific updates"
+            f"{objective_version} requires exactly 1,000,000 scientific updates"
         )
 
 
@@ -126,9 +130,9 @@ def resolve_stage_stop_after(
     """Resolve lifecycle-only formal staging without changing scientific identity."""
     if value is None:
         return int(total_steps), False
-    if objective_version != "treewm_v2_grounded_formal_v1":
+    if objective_version not in GROUNDED_FORMAL_OBJECTIVES:
         raise ValueError(
-            "TREEWM_STOP_AFTER_UPDATE is reserved for grounded formal v1 stages"
+            "TREEWM_STOP_AFTER_UPDATE is reserved for grounded formal stages"
         )
     stage = int(value)
     if stage not in FORMAL_STAGE_UPDATES:
@@ -592,6 +596,37 @@ def formal_v2_objective_contract(
     return contract
 
 
+def repaired_formal_recipe_contract(loss_cfg, train_cfg, factorial_arm: str) -> dict[str, bool]:
+    """Require the exp16 arm label and its exact registered repaired loss scale."""
+    loss_weights = (
+        float(loss_cfg.grounded_loss_latent_weight),
+        float(loss_cfg.grounded_loss_action_weight),
+        float(loss_cfg.grounded_loss_horizon_weight),
+        float(loss_cfg.grounded_loss_endpoint_weight),
+    )
+    weights_by_arm = {
+        "exp16-F": (0.25, 0.5, 0.25, 0.5),
+        "exp16-H": (0.125, 0.25, 0.125, 0.25),
+    }
+    return {
+        "balanced_keep_supervision": bool(loss_cfg.keep_balance),
+        "grounded_selector_weights": (
+            float(loss_cfg.grounded_select_action_weight),
+            float(loss_cfg.grounded_select_endpoint_weight),
+            float(loss_cfg.grounded_select_horizon_weight),
+        )
+        == (1.0, 1.0, 0.25),
+        "registered_full_or_half_grounded_loss_weights": loss_weights
+        in set(weights_by_arm.values()),
+        "selected_arm_matches_grounded_loss_weights": weights_by_arm.get(factorial_arm)
+        == loss_weights,
+        "detached_self_fed_parent": bool(
+            loss_cfg.grounded_detach_self_fed_parent
+        ),
+        "registered_world_learning_rate": float(train_cfg.lr) == 3.0e-5,
+    }
+
+
 class TrainingStepModule(torch.nn.Module):
     """Put the complete differentiable training graph behind one DDP forward.
 
@@ -922,14 +957,33 @@ def main(cfg: DictConfig) -> None:
             tree_cfg,
             separate_gain_clip=separate_gain_clip,
             expected_depth=(
-                3 if objective_version == "treewm_v2_grounded_formal_v1" else 16
+                3 if objective_version in GROUNDED_FORMAL_OBJECTIVES else 16
             ),
             require_grounded_multistep=(
-                objective_version == "treewm_v2_grounded_formal_v1"
+                objective_version in GROUNDED_FORMAL_OBJECTIVES
+            ),
+            required_scheduled_sampling_granularity=(
+                "sequence"
+                if objective_version == "treewm_v2_grounded_repair_formal_v1"
+                else None
+            ),
+            required_multistep_transition_mode=(
+                "grounded_execution_v2"
+                if objective_version == "treewm_v2_grounded_repair_formal_v1"
+                else None
             ),
             train_cfg=cfg.train,
         )
         violations = [name for name, passed in v2_contract.items() if not passed]
+        if objective_version == "treewm_v2_grounded_repair_formal_v1":
+            repaired_contract = repaired_formal_recipe_contract(
+                loss_cfg,
+                cfg.train,
+                str(cfg.get("campaign_factorial_arm", "")),
+            )
+            violations.extend(
+                name for name, passed in repaired_contract.items() if not passed
+            )
         if bool(cfg.retrieval.enabled) or int(cfg.retrieval.num_keys) != 0:
             violations.append("unused_latent_retrieval_disabled")
         if violations:
@@ -1033,7 +1087,13 @@ def main(cfg: DictConfig) -> None:
 
     domain = get_domain(cfg.env.name)
     maze_spec = MazeSpec.from_env(env) if has_maze(env) else None
-    anchors = tv.build_anchors(maze_spec, num=int(cfg.train.viz_anchors)) if maze_spec else None
+    anchors = (
+        tv.expand_xy_anchors(
+            tv.build_anchors(maze_spec, num=int(cfg.train.viz_anchors)), normalizer
+        )
+        if maze_spec
+        else None
+    )
     tasks = build_tasks(
         env, str(cfg.eval.task_split), int(cfg.eval.num_hard_tasks),
         float(cfg.eval.hard_percentile), int(cfg.eval.seed),
@@ -1061,7 +1121,7 @@ def main(cfg: DictConfig) -> None:
             "future_sets.cache=false/shared_cache=true, built-in task IDs 1..5, "
             "50 final episodes per task, and a 1M scheduler horizon"
         )
-    if objective_version == "treewm_v2_grounded_formal_v1" and (
+    if objective_version in GROUNDED_FORMAL_OBJECTIVES and (
         str(planner_cfg.score_space) != "decoded"
         or str(planner_cfg.decoded_metric) != "domain_raw"
         or str(planner_cfg.execute_mode) != "clipped"
@@ -1072,7 +1132,7 @@ def main(cfg: DictConfig) -> None:
         or int(tree_cfg.max_depth) != 3
     ):
         raise ValueError(
-            "grounded formal v1 requires decoded domain_raw planning, clipped e4, "
+            "grounded formal objectives require decoded domain_raw planning, clipped e4, "
             "the first-edge improvement guard, and aligned model/tree depth 3"
         )
 
@@ -1117,6 +1177,34 @@ def main(cfg: DictConfig) -> None:
                 "formal 1M runs require valid injected provenance hashes: "
                 + ", ".join(malformed)
             )
+    if objective_version == "treewm_v2_grounded_repair_formal_v1":
+        repaired_binding_hashes = {
+            "campaign_prerequisite_binding_sha256": str(
+                cfg.get("campaign_prerequisite_binding_sha256", "")
+            ),
+            "campaign_selected_recipe_sha256": str(
+                cfg.get("campaign_selected_recipe_sha256", "")
+            ),
+            "TREEWM_PREREQUISITE_BINDING_SHA256": os.environ.get(
+                "TREEWM_PREREQUISITE_BINDING_SHA256"
+            ),
+            "TREEWM_SELECTED_RECIPE_SHA256": os.environ.get(
+                "TREEWM_SELECTED_RECIPE_SHA256"
+            ),
+        }
+        malformed = malformed_sha256_names(repaired_binding_hashes)
+        if malformed:
+            raise ValueError(
+                "repaired formal objective requires sealed prerequisite/recipe hashes: "
+                + ", ".join(malformed)
+            )
+        if (
+            repaired_binding_hashes["campaign_prerequisite_binding_sha256"]
+            != repaired_binding_hashes["TREEWM_PREREQUISITE_BINDING_SHA256"]
+            or repaired_binding_hashes["campaign_selected_recipe_sha256"]
+            != repaired_binding_hashes["TREEWM_SELECTED_RECIPE_SHA256"]
+        ):
+            raise ValueError("repaired formal prerequisite hashes differ between config and environment")
     dataset_reported_sha256 = str(
         getattr(train_ds, "manifest_sha256", getattr(train_ds, "source_manifest_sha256", ""))
     )
@@ -1144,12 +1232,12 @@ def main(cfg: DictConfig) -> None:
             raise ValueError(
                 "TREEWM_FUTURE_RECIPE_SHA256 does not match the loaded future recipe"
             )
-    if objective_version == "treewm_v2_grounded_formal_v1" and (
+    if objective_version in GROUNDED_FORMAL_OBJECTIVES and (
         str(getattr(train_ds, "recipe_anchor_policy", "")) != "published_union"
         or str(getattr(val_ds, "recipe_anchor_policy", "")) != "published_union"
     ):
         raise ValueError(
-            "grounded formal v1 requires the sealed published-union train/validation anchors"
+            "grounded formal objectives require sealed published-union train/validation anchors"
         )
     wandb_project = os.environ.get("WANDB_PROJECT", "treewm")
     wandb_entity = os.environ.get("WANDB_ENTITY", "")
@@ -1187,7 +1275,7 @@ def main(cfg: DictConfig) -> None:
         final_episodes_per_task,
     )
     use_protocol_bound_evaluation_seeds = (
-        objective_version == "treewm_v2_grounded_formal_v1"
+        objective_version in GROUNDED_FORMAL_OBJECTIVES
     )
     run_identity = {
         "schema_version": 1,
@@ -1242,6 +1330,12 @@ def main(cfg: DictConfig) -> None:
             cfg.get("campaign_input_contract_sha256", "")
         ),
         "campaign_factorial_arm": str(cfg.get("campaign_factorial_arm", "")),
+        "campaign_prerequisite_binding_sha256": str(
+            cfg.get("campaign_prerequisite_binding_sha256", "")
+        ),
+        "campaign_selected_recipe_sha256": str(
+            cfg.get("campaign_selected_recipe_sha256", "")
+        ),
         "wandb_project": wandb_project,
         "wandb_entity": wandb_entity,
         "wandb_group": wandb_group,
@@ -1940,7 +2034,11 @@ def main(cfg: DictConfig) -> None:
                             goal_obs=goal_a if tree_cfg.scorer in GOAL_AWARE_SCORERS else None,
                         )
                         node_obs = model.decoder(tree.latent)
-                        gd = torch.linalg.vector_norm(node_obs - goal_a.unsqueeze(1), dim=-1)
+                        gd = torch.linalg.vector_norm(
+                            node_obs[..., domain.goal_dims]
+                            - goal_a[..., domain.goal_dims].unsqueeze(1),
+                            dim=-1,
+                        )
                         gd = gd.masked_fill(~tree.valid, float("inf")); gd[:, 0] = float("inf")
                         r = tv.TreeRender.from_tree(model, tree, normalizer, goal, start, 0,
                                                     int(gd.argmin(dim=1).item()))

@@ -1,0 +1,289 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-grounded-repair-all-ten-bridge-v1",
+  "classification": "bounded_all_ten_bridge",
+  "claim_policy": "This fresh all-ten 25k bridge can deterministically select one global grounded-loss scale for a later formal campaign; it is not formal validation and cannot itself support a 1M claim.",
+  "expected_runs": 40,
+  "prerequisite": {
+    "required": true,
+    "campaign_id": "treewm-grounded-repair-pilot-v1",
+    "acceptance_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-pilot-v1/report/acceptance.json",
+    "launch_plan_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-pilot-v1/state/submission/LAUNCH_PLAN.json",
+    "required_status": "accepted_for_fresh_formal_campaign_design",
+    "required_candidate_arm": "C",
+    "required_control_arm": "A",
+    "required_integrity_runs": 40,
+    "required_aggregate_gates": [
+      "integrity_40_of_40",
+      "preregistered_candidate_setting_quorum",
+      "candidate_not_all_zero_success",
+      "candidate_positive_mean_progress",
+      "candidate_positive_progress_run_quorum",
+      "candidate_success_noninferior_to_control",
+      "candidate_distance_reduction_noninferior_to_control",
+      "adaptive_selection_disabled"
+    ],
+    "package_protocol_sha256": "ec41f19a97ab0c21d341b00baa69a6f50259408adda2d7bc6428ff46398a4f49",
+    "source_sha256": "dc0b5d2c80a25c6ac51495696e83450859de4429fe9e40137572b1e981510d6a",
+    "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b"
+  },
+  "method": {
+    "arm": "treewm",
+    "model_class": "TreeWM",
+    "experiment_config": "treewm_v2_grounded_repair_pilot",
+    "objective_version": "treewm_v2_grounded_repair_pilot_v1",
+    "node_budget": 64,
+    "branch_factor": 4
+  },
+  "inference_choice": {
+    "profile": "learned_guard_on",
+    "profiles": {
+      "learned_guard_on": {"scorer": "learned", "require_first_edge_improvement": true},
+      "learned_guard_off": {"scorer": "learned", "require_first_edge_improvement": false},
+      "bfs_guard_on": {"scorer": "bfs", "require_first_edge_improvement": true},
+      "bfs_guard_off": {"scorer": "bfs", "require_first_edge_improvement": false},
+      "novelty_q_guard_on": {"scorer": "novelty_q", "require_first_edge_improvement": true},
+      "novelty_q_guard_off": {"scorer": "novelty_q", "require_first_edge_improvement": false}
+    },
+    "decision_policy": "This bridge is locked prospectively to the canonical learned scorer with first-edge guard enabled. Prior and concurrent diagnostics are descriptive and cannot change this bridge after protocol lock."
+  },
+  "design": {
+    "seeds": [102, 103],
+    "mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
+    "task_ids": [1, 2, 3, 4, 5],
+    "preferred_arm": "F",
+    "fallback_arm": "H",
+    "selection_order": ["F", "H"],
+    "scale_scope": "one_global_arm_per_campaign_across_all_ten_settings",
+    "gradient_warning_settings": ["cube-triple", "humanoidmaze-medium", "humanoidmaze-large"],
+    "gradient_warning_response": "Compare the exact exp15-C full grounded-loss weights against one globally half-strength grounded-loss arm while keeping selector weights identical; domain-specific tuning is forbidden.",
+    "selection_policy": "Select F if and only if all 40 bridge runs clear integrity; F passes at least 18/20 scientific runs, both seeds in at least 8/10 settings, and at least one seed in every setting; and F has at least one success, positive mean distance reduction, and at least 12/20 positive-progress runs. Otherwise apply the identical scientific and outcome quorums to H and select H only if paired H terminal success and distance reduction are each noninferior to F. Otherwise reject."
+  },
+  "arms": [
+    {
+      "id": "F",
+      "label": "grounded-conservative-full-loss-scale-lr3e-5",
+      "world_lr": 0.00003,
+      "transition_mode": "grounded_execution_v2",
+      "grounded_select_action_weight": 1.0,
+      "grounded_select_endpoint_weight": 1.0,
+      "grounded_select_horizon_weight": 0.25,
+      "grounded_loss_scale": 1.0,
+      "grounded_loss_latent_weight": 0.25,
+      "grounded_loss_action_weight": 0.5,
+      "grounded_loss_horizon_weight": 0.25,
+      "grounded_loss_endpoint_weight": 0.5
+    },
+    {
+      "id": "H",
+      "label": "grounded-conservative-half-loss-scale-lr3e-5",
+      "world_lr": 0.00003,
+      "transition_mode": "grounded_execution_v2",
+      "grounded_select_action_weight": 1.0,
+      "grounded_select_endpoint_weight": 1.0,
+      "grounded_select_horizon_weight": 0.25,
+      "grounded_loss_scale": 0.5,
+      "grounded_loss_latent_weight": 0.125,
+      "grounded_loss_action_weight": 0.25,
+      "grounded_loss_horizon_weight": 0.125,
+      "grounded_loss_endpoint_weight": 0.25
+    }
+  ],
+  "scientific_contract": {
+    "optimizer_updates": 25000,
+    "scheduler_total_steps": 1000000,
+    "checkpoint_every_updates": 1000,
+    "validation_every_updates": 1000,
+    "diagnostics_every_updates": 1000,
+    "periodic_evaluation_every_updates": 12500,
+    "periodic_evaluation_updates": [12500, 25000],
+    "periodic_episodes_per_task": 1,
+    "final_episodes_per_task": 5,
+    "validation_sample_seed": 1701,
+    "evaluation_seed": 2718,
+    "evaluation_seed_protocol_sha256": "96001dcf77f1210ae3bac7c2250f7feafc7bf11cf2ba83627f04cbef87157398",
+    "task_split": "standard",
+    "data_loader_workers": 10,
+    "loader_thread_limit": 1,
+    "gradient_checkpointing": true,
+    "world_weight_decay": 0.001,
+    "model_dropout": 0.1,
+    "model_max_depth": 3,
+    "tree_max_depth": 3,
+    "keep_threshold": 0.5,
+    "keep_balance": true,
+    "multistep_enabled": true,
+    "multistep_weight": 1.0,
+    "multistep_depth_weights": [1.0, 1.0, 1.0],
+    "scheduled_sampling_p": 0.25,
+    "scheduled_sampling_warmup": 5000,
+    "scheduled_sampling_granularity": "sequence",
+    "grounded_detach_self_fed_parent": true,
+    "gain_lr": 0.0003,
+    "gain_weight_decay": 0.0,
+    "gain_loss_every": 1,
+    "gain_training_scorers": ["learned", "novelty_q"],
+    "planner_decoded_metric": "domain_raw",
+    "planner_execute_mode": "clipped",
+    "planner_execute_steps": 4,
+    "min_first_edge_improvement": 0.0,
+    "future_config": {
+      "recipe_anchor_policy": "published_union",
+      "num_neighbors": 24,
+      "query_multiplier": 6,
+      "time_exclusion": 50,
+      "include_self": true,
+      "metric_mode": "rms_v2",
+      "horizons": [4, 8, 16, 32, 64],
+      "h_max": 64,
+      "horizon_rule": "displacement",
+      "fixed_horizon": 32,
+      "cluster_method": "average",
+      "max_modes": 4,
+      "multi_step_depth": 3,
+      "retrieval_pool": 50000,
+      "cache": false,
+      "shared_cache": true
+    }
+  },
+  "compatible_v2_recipe_input": {
+    "campaign_id": "treewm-50task-1m-v2",
+    "objective_version": "treewm_v2_rms_rank_v1",
+    "campaign_protocol_sha256": "1ee9dd8a65ab5b01def3d55826efe34212628e9c1393259ef17e5d12665afc82",
+    "recipe_code_sha256": "4cb70b4421d3eae1a6e947e3b0359336bd64248897ffcf52d4a672ca4adcd30c",
+    "recipe_runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+    "read_only": true
+  },
+  "acceptance": {
+    "integrity_runs_required": 40,
+    "runs_per_arm_required": 20,
+    "settings_per_arm_required": 10,
+    "seeds_per_setting_required": 2,
+    "min_arm_scientific_runs_passing": 18,
+    "min_arm_settings_with_both_seeds_passing": 8,
+    "min_arm_settings_with_at_least_one_seed_passing": 10,
+    "preferred_arm": "F",
+    "fallback_arm": "H",
+    "checkpoint_steps": [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000],
+    "max_validation_regret_fraction": 0.1,
+    "max_self_fed_multistep_validation_regret_fraction": 0.1,
+    "horizon_uniform_cross_entropy": 1.6094379124341003,
+    "horizon_label_fraction_sum_tolerance": 0.02,
+    "min_q_advantage": 0.0,
+    "min_gain_rank_correlation": 0.1,
+    "min_gain_pairwise_accuracy": 0.52,
+    "min_gain_eligible_decision_fraction": 0.2,
+    "min_gain_ordered_pair_count": 1.0,
+    "min_gain_pair_coverage_fraction": 0.01,
+    "gain_recent_window_updates": 5000,
+    "min_support_recall": 0.5,
+    "min_support_precision": 0.25,
+    "min_gradient_norm": 1e-8,
+    "min_clip_coefficient": 0.05,
+    "max_clip_fraction_below_threshold": 0.25,
+    "gradient_gate_scope": "aggregate_world_and_gain_module_norms_and_clip_coefficients",
+    "min_arm_total_successes": 1,
+    "min_arm_runs_with_positive_progress": 12,
+    "min_arm_mean_distance_reduction": 0.0,
+    "min_paired_fallback_success_delta_vs_full": 0.0,
+    "min_paired_fallback_distance_reduction_delta_vs_full": 0.0,
+    "same_scientific_quorum_for_both_arms": true,
+    "selection_precedence": ["F", "H"],
+    "no_domain_specific_tuning": true,
+    "no_posthoc_arm_selection": true
+  },
+  "source_snapshot": {
+    "required_for_submit": true,
+    "marker": "SNAPSHOT.json",
+    "status": "sealed_read_only",
+    "repo_subdirectory": "repo",
+    "writable_files_allowed": false
+  },
+  "execution": {
+    "array": "0-39%40",
+    "gpu_partitions": "polar4,polar3,polar,grizzly",
+    "cpu_partition": "cpu",
+    "gpus_per_task": 1,
+    "cpus_per_task": 12,
+    "memory_per_task": "64G",
+    "walltime": "04:00:00",
+    "signal_seconds_before_end": 420,
+    "sbatch": "/usr/local/bin/sbatch",
+    "srun": "/cm/shared/apps/slurm/current/bin/srun",
+    "scontrol": "/cm/shared/apps/slurm/current/bin/scontrol"
+  },
+  "paths": {
+    "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
+    "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
+    "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
+    "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-all-ten-bridge-v1"
+  },
+  "logging": {
+    "wandb_project": "treewm-grounded-repair-all-ten-bridge-v1",
+    "wandb_group": "treewm-grounded-repair-all-ten-bridge-v1",
+    "wandb_mode": "online"
+  },
+  "settings": [
+    {
+      "id": "scene", "env_config": "scene_play", "env_name": "scene-play-v0", "source_name": "scene-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 32, 33, 36, 38], "relative_endpoints": false, "max_episode_steps": 750,
+      "input_contract_sha256": "0fa8d6c363a88503133669d5715a549a9e4c2b70148d486bc25bda9090958f89", "calibration_sha256": "b2935ffac00eeb409e48066625760b8243d5a6f34fc83e18e1cea46b5c7a051e", "future_recipe_sha256": "8c345a6b855ab1bf378dc84839b0ce8728284cd3620e05336ec6e527d0e8af09",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-3x3", "env_config": "puzzle_3x3_play", "env_name": "puzzle-3x3-play-v0", "source_name": "puzzle-3x3-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "39f7ca2799cf13f876f7bbe4991589f8bf967e4372d9484d21f3bd6dee778e6c", "calibration_sha256": "58263941d8902dfee9d4171ea13930ee8ca3f0ee5f1e316c4151ee28283ed4c7", "future_recipe_sha256": "58c0d8dc7ca10be57d971e1d30031736c972521c0e735cb01b0c2938185adae9",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "puzzle-4x4-100m", "env_config": "puzzle_4x4_play_100m", "env_name": "puzzle-4x4-play-v0", "source_name": "puzzle-4x4-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/puzzle-4x4-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52, 55, 56, 59, 60, 63, 64, 67, 68, 71, 72, 75, 76, 79, 80], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "7ba892f3e4b7eb11b1b1c9712bbf9d9237c66910b13c034f4fbe01c1c34e4883", "calibration_sha256": "03bc78c2b7948093dd752e01ec512338da83f2cf677b6c4fc5e7e900ab51ba18", "future_recipe_sha256": "819a452dc22c3d80fe44aad3848b1e6a11295863b80fe87ba0510f5a2f9a6ff3",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    },
+    {
+      "id": "cube-double", "env_config": "cube_double_play", "env_name": "cube-double-play-v0", "source_name": "cube-double-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 30], "relative_endpoints": true, "max_episode_steps": 500,
+      "input_contract_sha256": "0e493d41ca2ab31e0cc2f446bc02acfa083e5a9d93327471678eb762e679355d", "calibration_sha256": "b148fe9ae0e3964a526deb3fd6fb1c17ff87475bc5497e7104dccb73688f9005", "future_recipe_sha256": "edbedf726f447f8213d9b848c31b07ba67976a39febdac9047a14df2d47cda0b",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "cube-triple", "env_config": "cube_triple_play", "env_name": "cube-triple-play-v0", "source_name": "cube-triple-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "7f9bdfa9810d14bc9eb072bfb945aa3db4b58302946bada0ac4159786f434284", "calibration_sha256": "b8d82d722bd678aa280dccd71be8919089d12b84b824557b440524cbdab7951c", "future_recipe_sha256": "546fbe6584827fb96a9aa2d1a38b780bbeff6655aceb73da0f02b9b747f2aa5a",
+      "published_union_train_anchors": 1030685, "published_union_validation_anchors": 102824
+    },
+    {
+      "id": "cube-quadruple-100m", "env_config": "cube_quadruple_play_100m", "env_name": "cube-quadruple-play-v0", "source_name": "cube-quadruple-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/cube-quadruple-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39, 46, 47, 48], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "cfd70e8f04c396e9ea88720d483e5190bed4ff1ae36b27e2da81b5324542e9a6", "calibration_sha256": "3240b1462484bca29e10e8d3c8a59a4df12c2989ab74066bd6484b038bba4928", "future_recipe_sha256": "42aec1a4b9de2b4c98efd0bb7b51edad0330f7241adf5ad148dfbbded0eeca5f",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473
+    },
+    {
+      "id": "antmaze-large", "env_config": "antmaze_large_navigate", "env_name": "antmaze-large-navigate-v0", "source_name": "antmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "9009f22bcf2007341a6e3040b5f8a325fdd542520e852c372b90cdd50cad9d6e", "calibration_sha256": "77d33a07fa5862150472b6bf8d97e3ed7e7c3a4c803fb0c3c121ebe7cb234a62", "future_recipe_sha256": "34087d2bab3b42f5fe96a2148a96975a757def976ec69bab2d9b206ffe953598",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816
+    },
+    {
+      "id": "antmaze-giant", "env_config": "antmaze_giant_navigate", "env_name": "antmaze-giant-navigate-v0", "source_name": "antmaze-giant-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "4894df8940189d2d16e463b9c42d0b3e3fbc7dfc82ada803095737de2b207e93", "calibration_sha256": "1a0902b21d32a424cb6dd404a223b3b0aa2d9d29471ece9337f5a934ccec87f1", "future_recipe_sha256": "003529d2da3672d8bc51e3c55aa676db4e09bdcb1f2dc70d695397a2c2bb7715",
+      "published_union_train_anchors": 759154, "published_union_validation_anchors": 76196
+    },
+    {
+      "id": "humanoidmaze-medium", "env_config": "humanoidmaze_medium_navigate", "env_name": "humanoidmaze-medium-navigate-v0", "source_name": "humanoidmaze-medium-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 2000,
+      "input_contract_sha256": "f2614d844fea24878e59fcbc8e2512eac6d4e32cb88437e57d26e7f1161a5575", "calibration_sha256": "9c98a93fa0b2434057d05e2c3b08284ac15fd463ab684fb00b3477eeb1dc316c", "future_recipe_sha256": "9aa71c7c792f553ec7c20397d401efbd1fec208b69b774e8fc8771382b132a59",
+      "published_union_train_anchors": 955698, "published_union_validation_anchors": 95746
+    },
+    {
+      "id": "humanoidmaze-large", "env_config": "humanoidmaze_large_navigate", "env_name": "humanoidmaze-large-navigate-v0", "source_name": "humanoidmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 2000,
+      "input_contract_sha256": "5dbf92877f842ff2673ee30eef6796d482502a063e24967a5843371b6c81d87a", "calibration_sha256": "2cd142dfa3d07ec315733da4b0953a519df02de52181f2b60a8339c8f075bf50", "future_recipe_sha256": "430c2a2cf18233de8071b39ed17d95f93f203b76531e2c413fa76dfc66423995",
+      "published_union_train_anchors": 955698, "published_union_validation_anchors": 95746
+    }
+  ]
+}

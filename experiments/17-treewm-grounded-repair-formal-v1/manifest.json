@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-grounded-repair-formal-v1",
+  "classification": "fresh_formal_validation",
+  "claim_policy": "Formal claims require accepted, byte-bound exp15 and exp16 prerequisites, all four fail-closed training stage gates, and the separate preregistered 200-element paired learned/BFS final evaluation aggregate.",
+  "expected_training_runs": 40,
+  "expected_final_eval_tasks": 200,
+  "promotion_authority": {
+    "pilot_gate": "accepted_exp15_repair_pilot",
+    "recipe_gate": "deterministic_exp16_all_ten_bridge_selection",
+    "bindings_file": "prerequisite_bindings.json",
+    "old_checkpoints_allowed": false,
+    "no_outcome_based_recipe_selection_within_formal": true
+  },
+  "method": {
+    "arm": "treewm",
+    "model_class": "TreeWM",
+    "experiment_config": "treewm_v2_grounded_repair_formal",
+    "objective_version": "treewm_v2_grounded_repair_formal_v1",
+    "scorer": "learned",
+    "final_eval_rails": ["learned", "bfs"],
+    "node_budget": 64,
+    "branch_factor": 4,
+    "regularization": {
+      "lr": 0.00003,
+      "weight_decay": 0.001,
+      "dropout": 0.1
+    },
+    "grounded_multistep": {
+      "enabled": true,
+      "weight": 1.0,
+      "depth_weights": [1.0, 1.0, 1.0],
+      "scheduled_sampling_p": 0.25,
+      "scheduled_sampling_warmup": 5000,
+      "scheduled_sampling_granularity": "sequence",
+      "transition_mode": "grounded_execution_v2",
+      "selector_weights": {"action": 1.0, "endpoint": 1.0, "horizon": 0.25},
+      "detach_self_fed_parent": true,
+      "keep_balance": true,
+      "selected_recipe_source": "exp16_SELECTED_RECIPE.json"
+    }
+  },
+  "prerequisites": {
+    "bindings_file": "prerequisite_bindings.json",
+    "exp15": {
+      "campaign_id": "treewm-grounded-repair-pilot-v1",
+      "acceptance_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-pilot-v1/report/acceptance.json",
+      "launch_plan_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-pilot-v1/state/submission/LAUNCH_PLAN.json",
+      "required_status": "accepted_for_fresh_formal_campaign_design",
+      "required_candidate_arm": "C",
+      "required_control_arm": "A",
+      "required_integrity_runs": 40,
+      "required_aggregate_gates": [
+        "integrity_40_of_40",
+        "preregistered_candidate_setting_quorum",
+        "candidate_not_all_zero_success",
+        "candidate_positive_mean_progress",
+        "candidate_positive_progress_run_quorum",
+        "candidate_success_noninferior_to_control",
+        "candidate_distance_reduction_noninferior_to_control",
+        "adaptive_selection_disabled"
+      ],
+      "raw_report_recomputation": {
+        "settings": ["antmaze-large", "scene", "puzzle-3x3", "puzzle-4x4-100m", "cube-quadruple-100m"],
+        "arms": ["A", "B", "C", "D"],
+        "seeds": [100, 101],
+        "required_integrity_gates": [
+          "exact_launch_completion_and_provenance",
+          "identical_terminal_evaluation_bank",
+          "fixed_common_validation_sample",
+          "exact_1k_validation_axis",
+          "finite_terminal_method_telemetry",
+          "midpoint_and_terminal_rollouts"
+        ],
+        "required_scientific_gates": [
+          "validation_regret_le_1p10",
+          "self_fed_multistep_regret_le_1p10",
+          "horizon_below_uniform_and_empirical_prior",
+          "q_advantage",
+          "gain_rank_pair_eligibility_and_coverage",
+          "support_recall_and_precision",
+          "aggregate_shared_module_gradients_and_clipping"
+        ],
+        "terminal_episodes_per_run": 25,
+        "candidate_settings_required": 4,
+        "candidate_seeds_per_passing_setting": 2,
+        "min_candidate_total_successes": 1,
+        "min_candidate_runs_with_positive_progress": 6,
+        "min_candidate_mean_distance_reduction_exclusive": 0.0,
+        "min_paired_success_delta_vs_control": 0.0,
+        "min_paired_distance_reduction_delta_vs_control": 0.0,
+        "nonpromotable_sensitivity_arms": ["B", "D"],
+        "no_adaptive_arm_selection": true
+      },
+      "package_protocol_sha256": "ec41f19a97ab0c21d341b00baa69a6f50259408adda2d7bc6428ff46398a4f49",
+      "source_sha256": "dc0b5d2c80a25c6ac51495696e83450859de4429fe9e40137572b1e981510d6a",
+      "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b"
+    },
+    "exp16": {
+      "campaign_id": "treewm-grounded-repair-all-ten-bridge-v1",
+      "acceptance_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-all-ten-bridge-v1/reports/acceptance.json",
+      "selected_recipe_path": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-all-ten-bridge-v1/reports/SELECTED_RECIPE.json",
+      "accepted_statuses": ["selected_full_for_fresh_formal_campaign_design", "selected_half_for_fresh_formal_campaign_design"],
+      "allowed_selected_arms": ["F", "H"],
+      "selection_precedence": ["F", "H"],
+      "manifest_sha256": "6028a37b1174bafe04dd20a026f58fe7285158eda14615a3430494ffd27e5fa3",
+      "package_protocol_sha256": "e53b35b5118b45fa5dec416a8c6b662a94bfd989a1f72a10f756fd908c2b3bbe",
+      "source_sha256": "28ebcd66ac25cfb1cbf23359448a065a3f32cd8e5766320e85833eff16f2d74f",
+      "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+      "required_selection_quorum": {
+        "bridge_seeds": [102, 103],
+        "integrity_runs": 40,
+        "runs_per_arm": 20,
+        "min_scientific_runs_per_arm": 18,
+        "min_settings_with_both_seeds": 8,
+        "min_settings_with_at_least_one_seed": 10,
+        "min_total_successes_per_arm": 1,
+        "min_mean_distance_reduction_exclusive": 0.0,
+        "min_positive_progress_runs_per_arm": 12,
+        "min_half_minus_full_success_rate": 0.0,
+        "min_half_minus_full_distance_reduction": 0.0
+      }
+    },
+    "allowed_selected_recipes": {
+      "F": {"grounded_loss_latent_weight": 0.25, "grounded_loss_action_weight": 0.5, "grounded_loss_horizon_weight": 0.25, "grounded_loss_endpoint_weight": 0.5},
+      "H": {"grounded_loss_latent_weight": 0.125, "grounded_loss_action_weight": 0.25, "grounded_loss_horizon_weight": 0.125, "grounded_loss_endpoint_weight": 0.25}
+    }
+  },
+  "design": {
+    "seeds": [200, 201, 202, 203],
+    "mapping": "training_index=setting_index*4+seed_index; final_eval_index=training_index*5+(task_id-1)",
+    "task_ids": [1, 2, 3, 4, 5]
+  },
+  "scientific_contract": {
+    "optimizer_updates": 1000000,
+    "scheduler_total_steps": 1000000,
+    "checkpoint_every_updates": 1000,
+    "training_log_every_updates": 50,
+    "validation_every_updates": 2000,
+    "periodic_evaluation_every_updates": 25000,
+    "periodic_episodes_per_task": 1,
+    "final_episodes_per_task": 50,
+    "validation_sample_seed": 1701,
+    "evaluation_seed": 2718,
+    "task_split": "standard",
+    "data_loader_workers": 10,
+    "loader_thread_limit": 1,
+    "gradient_checkpointing": true,
+    "model_max_depth": 3,
+    "tree_max_depth": 3,
+    "planner_score_space": "decoded",
+    "planner_decoded_metric": "domain_raw",
+    "planner_execute_mode": "clipped",
+    "planner_execute_steps": 4,
+    "require_first_edge_improvement": true,
+    "min_first_edge_improvement": 0.0,
+    "tree_search_nodes_per_full_budget_replan": 64,
+    "first_edge_guard_extra_root_predictions_per_replan": 4,
+    "effective_world_predictions_per_full_budget_replan": 68,
+    "future_config": {
+      "recipe_anchor_policy": "published_union",
+      "num_neighbors": 24,
+      "query_multiplier": 6,
+      "time_exclusion": 50,
+      "include_self": true,
+      "metric_mode": "rms_v2",
+      "horizons": [4, 8, 16, 32, 64],
+      "h_max": 64,
+      "horizon_rule": "displacement",
+      "fixed_horizon": 32,
+      "cluster_method": "average",
+      "max_modes": 4,
+      "multi_step_depth": 3,
+      "retrieval_pool": 50000,
+      "cache": false,
+      "shared_cache": true
+    }
+  },
+  "compatible_v2_recipe_input": {
+    "campaign_id": "treewm-50task-1m-v2",
+    "objective_version": "treewm_v2_rms_rank_v1",
+    "campaign_protocol_sha256": "1ee9dd8a65ab5b01def3d55826efe34212628e9c1393259ef17e5d12665afc82",
+    "recipe_code_sha256": "4cb70b4421d3eae1a6e947e3b0359336bd64248897ffcf52d4a672ca4adcd30c",
+    "recipe_runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
+    "read_only": true
+  },
+  "lifecycle": {
+    "stage_targets": [2000, 25000, 100000, 1000000],
+    "stop_environment": "TREEWM_STOP_AFTER_UPDATE",
+    "trainer_marker": "stage-gates/AWAITING_GATE_<step>.json",
+    "stage_gate_directory": "state/stage-gates",
+    "stage_gate_policy": "A later stage is submit-eligible only after an immutable all-40 gate for the immediately preceding target.",
+    "resume_policy": "auto only inside this fresh campaign run directory; no external or old checkpoint is accepted"
+  },
+  "stage_acceptance": {
+    "required_finite_tags": [
+      "val/loss_total",
+      "val/loss_horizon",
+      "val/loss_multistep",
+      "val/loss_multistep_self_fed",
+      "data/validation_fixed_sample_count",
+      "data/validation_horizon_label_fraction_h4",
+      "data/validation_horizon_label_fraction_h8",
+      "data/validation_horizon_label_fraction_h16",
+      "data/validation_horizon_label_fraction_h32",
+      "data/validation_horizon_label_fraction_h64",
+      "control/q_advantage_over_z",
+      "control/q_advantage_over_random_proj",
+      "control/retrieval_uses_task_metric_endpoint",
+      "expansion/gain_rank_correlation",
+      "expansion/gain_pairwise_accuracy",
+      "expansion/gain_eligible_decision_fraction",
+      "expansion/gain_ordered_pair_count",
+      "expansion/gain_pair_coverage_fraction",
+      "tree/support_recall",
+      "tree/support_precision",
+      "train/grad_norm_world",
+      "train/grad_norm_gain",
+      "train/grad_clip_coefficient_world",
+      "train/grad_clip_coefficient_gain"
+    ],
+    "telemetry_freshness": {
+      "training_exact_target_tags": [
+        "train/grad_norm_world",
+        "train/grad_norm_gain",
+        "train/grad_clip_coefficient_world",
+        "train/grad_clip_coefficient_gain"
+      ],
+      "training_every_updates": 50,
+      "validation_diagnostic_every_updates": 2000
+    },
+    "min_q_advantage": 0.0,
+    "horizon_uniform_cross_entropy": 1.6094379124341003,
+    "horizon_label_fraction_sum_tolerance": 0.02,
+    "min_gain_rank_correlation": 0.1,
+    "min_gain_pairwise_accuracy": 0.52,
+    "min_gain_eligible_decision_fraction": 0.2,
+    "min_gain_ordered_pair_count": 1.0,
+    "min_gain_pair_coverage_fraction": 0.01,
+    "min_support_recall": 0.5,
+    "min_support_precision": 0.25,
+    "min_gradient_norm": 1e-8,
+    "gradient_recent_window_updates": 5000,
+    "min_clip_coefficient": 0.05,
+    "max_clip_fraction_below_threshold": 0.25,
+    "max_validation_regret_fraction": 0.1,
+    "max_self_fed_multistep_validation_regret_fraction": 0.1,
+    "scientific_gate_stage": 25000,
+    "outcome_sanity_stage": 100000,
+    "post_100k_policy": "integrity_and_numerical_health_only",
+    "monitor_episodes_per_run": 5,
+    "min_fleet_monitor_successes": 1,
+    "min_fleet_mean_distance_reduction": 0.0,
+    "min_runs_with_positive_progress": 1
+  },
+  "final_evaluation": {
+    "array": "0-199%40",
+    "episodes_per_task_per_rail": 50,
+    "rails": ["learned", "bfs"],
+    "paired_seed_policy": "one protocol-bound table per setting, shared by all four training seeds and both rails",
+    "seed_table": "eval_seed_table.json",
+    "aggregate_requires": 200,
+    "adaptive_selection": false,
+    "promotion_criterion": {
+      "min_learned_total_successes": 1,
+      "min_paired_seed_delta_ci_lower": 0.0,
+      "min_settings_learned_noninferior": 7,
+      "primary_inference_unit": "training_seed",
+      "training_seed_replicates": 4,
+      "t_critical_975_df3": 3.182446
+    }
+  },
+  "source_snapshot": {
+    "required_for_submit": true,
+    "marker": "SNAPSHOT.json",
+    "status": "sealed_read_only",
+    "repo_subdirectory": "repo",
+    "writable_files_allowed": false
+  },
+  "execution": {
+    "training_array": "0-39%40",
+    "gpu_partitions": "polar4,polar3,polar,grizzly",
+    "cpu_partition": "cpu",
+    "gpus_per_task": 1,
+    "cpus_per_task": 12,
+    "memory_per_task": "64G",
+    "walltime": "04:00:00",
+    "signal_seconds_before_end": 420,
+    "sbatch": "/usr/local/bin/sbatch",
+    "srun": "/cm/shared/apps/slurm/current/bin/srun",
+    "scontrol": "/cm/shared/apps/slurm/current/bin/scontrol"
+  },
+  "paths": {
+    "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
+    "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
+    "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
+    "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-formal-v1",
+    "final_eval_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-grounded-repair-formal-v1-final-eval"
+  },
+  "logging": {
+    "wandb_project": "treewm-grounded-repair-formal-v1",
+    "wandb_group": "treewm-grounded-repair-formal-v1",
+    "wandb_mode": "online"
+  },
+  "settings": [
+    {
+      "id": "scene", "env_config": "scene_play", "env_name": "scene-play-v0", "source_name": "scene-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 32, 33, 36, 38], "relative_endpoints": false, "max_episode_steps": 750,
+      "input_contract_sha256": "0fa8d6c363a88503133669d5715a549a9e4c2b70148d486bc25bda9090958f89", "calibration_sha256": "b2935ffac00eeb409e48066625760b8243d5a6f34fc83e18e1cea46b5c7a051e", "future_recipe_sha256": "8c345a6b855ab1bf378dc84839b0ce8728284cd3620e05336ec6e527d0e8af09",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816, "evaluation_seed_protocol_sha256": "46399da38c9769edc1c7ce45d2293170d55115e57aecbbb7ca19667b80cc96a6"
+    },
+    {
+      "id": "puzzle-3x3", "env_config": "puzzle_3x3_play", "env_name": "puzzle-3x3-play-v0", "source_name": "puzzle-3x3-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "39f7ca2799cf13f876f7bbe4991589f8bf967e4372d9484d21f3bd6dee778e6c", "calibration_sha256": "58263941d8902dfee9d4171ea13930ee8ca3f0ee5f1e316c4151ee28283ed4c7", "future_recipe_sha256": "58c0d8dc7ca10be57d971e1d30031736c972521c0e735cb01b0c2938185adae9",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816, "evaluation_seed_protocol_sha256": "29be53427477877cf22f472b7ad61d3c542ebdff70e320cd3c29b54b49aac1fd"
+    },
+    {
+      "id": "puzzle-4x4-100m", "env_config": "puzzle_4x4_play_100m", "env_name": "puzzle-4x4-play-v0", "source_name": "puzzle-4x4-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/puzzle-4x4-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 23, 24, 27, 28, 31, 32, 35, 36, 39, 40, 43, 44, 47, 48, 51, 52, 55, 56, 59, 60, 63, 64, 67, 68, 71, 72, 75, 76, 79, 80], "relative_endpoints": false, "max_episode_steps": 500,
+      "input_contract_sha256": "7ba892f3e4b7eb11b1b1c9712bbf9d9237c66910b13c034f4fbe01c1c34e4883", "calibration_sha256": "03bc78c2b7948093dd752e01ec512338da83f2cf677b6c4fc5e7e900ab51ba18", "future_recipe_sha256": "819a452dc22c3d80fe44aad3848b1e6a11295863b80fe87ba0510f5a2f9a6ff3",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473, "evaluation_seed_protocol_sha256": "0ece4ca1435738fd96c941b81202bb2274511d185362e6c5d4735ea56bf80432"
+    },
+    {
+      "id": "cube-double", "env_config": "cube_double_play", "env_name": "cube-double-play-v0", "source_name": "cube-double-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 30], "relative_endpoints": true, "max_episode_steps": 500,
+      "input_contract_sha256": "0e493d41ca2ab31e0cc2f446bc02acfa083e5a9d93327471678eb762e679355d", "calibration_sha256": "b148fe9ae0e3964a526deb3fd6fb1c17ff87475bc5497e7104dccb73688f9005", "future_recipe_sha256": "edbedf726f447f8213d9b848c31b07ba67976a39febdac9047a14df2d47cda0b",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816, "evaluation_seed_protocol_sha256": "2a9d2fecd4129f12875358f81b91199435b55bfbec20c9237501497a2886e165"
+    },
+    {
+      "id": "cube-triple", "env_config": "cube_triple_play", "env_name": "cube-triple-play-v0", "source_name": "cube-triple-play-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "7f9bdfa9810d14bc9eb072bfb945aa3db4b58302946bada0ac4159786f434284", "calibration_sha256": "b8d82d722bd678aa280dccd71be8919089d12b84b824557b440524cbdab7951c", "future_recipe_sha256": "546fbe6584827fb96a9aa2d1a38b780bbeff6655aceb73da0f02b9b747f2aa5a",
+      "published_union_train_anchors": 1030685, "published_union_validation_anchors": 102824, "evaluation_seed_protocol_sha256": "369984937ca71b26c5d844a4310c88773484b085ef81b0b1e1e52a495b716604"
+    },
+    {
+      "id": "cube-quadruple-100m", "env_config": "cube_quadruple_play_100m", "env_name": "cube-quadruple-play-v0", "source_name": "cube-quadruple-play-100m-v0", "dataset_kind": "sharded_100m_full", "data_subdir": "100m/cube-quadruple-play-100m-v0", "expected_shards": 100,
+      "task_metric_dims": [19, 20, 21, 28, 29, 30, 37, 38, 39, 46, 47, 48], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "cfd70e8f04c396e9ea88720d483e5190bed4ff1ae36b27e2da81b5324542e9a6", "calibration_sha256": "3240b1462484bca29e10e8d3c8a59a4df12c2989ab74066bd6484b038bba4928", "future_recipe_sha256": "42aec1a4b9de2b4c98efd0bb7b51edad0330f7241adf5ad148dfbbded0eeca5f",
+      "published_union_train_anchors": 1194586, "published_union_validation_anchors": 119473, "evaluation_seed_protocol_sha256": "ff811caa64c91e63dc6a8dd433b6c3c3b695e4ba1cdf7ea1ba81966e7bf7e00f"
+    },
+    {
+      "id": "antmaze-large", "env_config": "antmaze_large_navigate", "env_name": "antmaze-large-navigate-v0", "source_name": "antmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "9009f22bcf2007341a6e3040b5f8a325fdd542520e852c372b90cdd50cad9d6e", "calibration_sha256": "77d33a07fa5862150472b6bf8d97e3ed7e7c3a4c803fb0c3c121ebe7cb234a62", "future_recipe_sha256": "34087d2bab3b42f5fe96a2148a96975a757def976ec69bab2d9b206ffe953598",
+      "published_union_train_anchors": 758084, "published_union_validation_anchors": 75816, "evaluation_seed_protocol_sha256": "76fea0d4174657a7b31fbe5077bd76e394ec60fd0405863fa4ae42d67a3a27ac"
+    },
+    {
+      "id": "antmaze-giant", "env_config": "antmaze_giant_navigate", "env_name": "antmaze-giant-navigate-v0", "source_name": "antmaze-giant-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 1000,
+      "input_contract_sha256": "4894df8940189d2d16e463b9c42d0b3e3fbc7dfc82ada803095737de2b207e93", "calibration_sha256": "1a0902b21d32a424cb6dd404a223b3b0aa2d9d29471ece9337f5a934ccec87f1", "future_recipe_sha256": "003529d2da3672d8bc51e3c55aa676db4e09bdcb1f2dc70d695397a2c2bb7715",
+      "published_union_train_anchors": 759154, "published_union_validation_anchors": 76196, "evaluation_seed_protocol_sha256": "0fe2e28e4c17504363e044b4b44082ef90d509f79f0a4a072661d93a84000af0"
+    },
+    {
+      "id": "humanoidmaze-medium", "env_config": "humanoidmaze_medium_navigate", "env_name": "humanoidmaze-medium-navigate-v0", "source_name": "humanoidmaze-medium-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 2000,
+      "input_contract_sha256": "f2614d844fea24878e59fcbc8e2512eac6d4e32cb88437e57d26e7f1161a5575", "calibration_sha256": "9c98a93fa0b2434057d05e2c3b08284ac15fd463ab684fb00b3477eeb1dc316c", "future_recipe_sha256": "9aa71c7c792f553ec7c20397d401efbd1fec208b69b774e8fc8771382b132a59",
+      "published_union_train_anchors": 955698, "published_union_validation_anchors": 95746, "evaluation_seed_protocol_sha256": "bc9c3a46067df2d2785d8e33311edd157443540976c5a2b58b744004f2e01bc6"
+    },
+    {
+      "id": "humanoidmaze-large", "env_config": "humanoidmaze_large_navigate", "env_name": "humanoidmaze-large-navigate-v0", "source_name": "humanoidmaze-large-navigate-v0", "dataset_kind": "standard", "data_subdir": "standard",
+      "task_metric_dims": [0, 1], "relative_endpoints": true, "max_episode_steps": 2000,
+      "input_contract_sha256": "5dbf92877f842ff2673ee30eef6796d482502a063e24967a5843371b6c81d87a", "calibration_sha256": "2cd142dfa3d07ec315733da4b0953a519df02de52181f2b60a8339c8f075bf50", "future_recipe_sha256": "430c2a2cf18233de8071b39ed17d95f93f203b76531e2c413fa76dfc66423995",
+      "published_union_train_anchors": 955698, "published_union_validation_anchors": 95746, "evaluation_seed_protocol_sha256": "7a87a22d10cdf3610cb6383e20a111e6c41b5c77035a10f44dc74b44f8b37312"
+    }
+  ]
+}
