@@ -17,6 +17,7 @@ from scripts.checkpoint_ablation import (
     compact_grid,
     discover_checkpoints,
     factorial_grid,
+    grounded_repair_grid,
     preregistered_contrasts,
     select_work,
     evaluate_arm,
@@ -52,6 +53,36 @@ def test_compact_grid_is_unique_and_covers_every_preregistered_axis():
 def test_factorial_grid_has_48_cells_plus_one_fixed_horizon_reference():
     assert len(factorial_grid(include_fixed16=False)) == 2 * 3 * 2 * 4
     assert len(factorial_grid(include_fixed16=True)) == 2 * 3 * 2 * 4 + 1
+
+
+def test_grounded_repair_grid_locks_support_guard_and_control_contrasts():
+    arms = grounded_repair_grid()
+    assert len(arms) == 8
+    assert len({arm.arm_id for arm in arms}) == 8
+    assert arms[0] == AblationArm("domain_raw", 3, 4, "learned")
+    assert {arm.keep_threshold for arm in arms[1:]} == {0.42, 0.50}
+    assert {arm.require_first_edge_improvement for arm in arms[1:]} == {
+        True,
+        False,
+    }
+    assert {arm.scorer for arm in arms} == {"learned", "bfs", "novelty_q"}
+    assert any(arm.horizon_mode == "fixed" and arm.fixed_horizon == 16 for arm in arms)
+
+
+def test_grounded_formal_run_names_are_filterable(tmp_path):
+    path = (
+        tmp_path / "outputs" / "treewm-grounded-formal-v1" / "puzzle-3x3"
+        / "treewm" / "grounded-formal-puzzle-3x3-seed2" / "checkpoints" / "latest.pt"
+    )
+    path.parent.mkdir(parents=True)
+    path.touch()
+    selected = discover_checkpoints(
+        ["outputs/treewm-grounded-formal-v1/*/treewm/*/checkpoints/latest.pt"],
+        repo_root=tmp_path,
+        settings=["puzzle-3x3"],
+        seeds=[2],
+    )
+    assert selected == [path.resolve()]
 
 
 def _checkpoint(root: Path, setting: str, seed: int) -> Path:
@@ -175,7 +206,10 @@ def test_evaluate_arm_applies_inference_overrides_without_checkpoint_mutation():
         env=_OneStepEnv(),
         domain=domain,
         tasks=[{"task_id": 1}],
-        arm=AblationArm("domain_raw", 2, 4, "bfs"),
+        arm=AblationArm(
+            "domain_raw", 2, 4, "bfs", keep_threshold=0.42,
+            require_first_edge_improvement=False,
+        ),
         episodes_per_task=1,
         max_env_steps=1,
         eval_seed=0,
@@ -185,4 +219,6 @@ def test_evaluate_arm_applies_inference_overrides_without_checkpoint_mutation():
     assert outcome["metrics"]["eval/success_rate"] == 1.0
     assert outcome["effective"]["tree_scorer"] == "bfs"
     assert outcome["effective"]["tree_max_depth"] == 2
+    assert outcome["effective"]["tree_keep_threshold"] == 0.42
+    assert outcome["effective"]["require_first_edge_improvement"] is False
     assert model.cfg.horizon_mode == original_mode

@@ -7,9 +7,15 @@ import pytest
 import torch
 
 from treewm.evaluation.tree_stats import structural_summary
-from treewm.losses.recursive_losses import multi_step_recursive_loss, scheduled_sampling_schedule
+from treewm.losses.recursive_losses import (
+    _decoded_task_endpoint_rms,
+    _grounded_execution_candidates,
+    multi_step_recursive_loss,
+    scheduled_sampling_schedule,
+)
 from treewm.utils.rng import make_generator
 from treewm.models.baselines import build_model, tree_config_for
+from treewm.models.branch_transformer import BranchOutputs
 from treewm.models.treewm import TreeWMConfig
 from treewm.tree.expansion import TreeConfig
 from treewm.tree.frontier import SCORERS, ScoringContext, get_scorer
@@ -26,6 +32,7 @@ def _batch(b=4, d=3, h_max=64, obs_dim=2, act_dim=2):
         "ms_obs": torch.randn(b, d, obs_dim),
         "ms_horizon_idx": torch.zeros(b, d, dtype=torch.long),
         "ms_valid": torch.ones(b, d),
+        "task_metric_dims": torch.arange(min(obs_dim, 2)).expand(b, -1).clone(),
     }
 
 
@@ -64,6 +71,424 @@ def test_scheduled_sampling_changes_the_rollout():
     assert m1["recursive/scheduled_sampling_p"] == 1.0
     # depth-1 is identical (both start from the encoded anchor); deeper depths diverge
     assert m0["recursive/loss_depth1"] == pytest.approx(m1["recursive/loss_depth1"], rel=1e-4)
+
+
+def test_stepwise_scheduled_sampling_remains_the_exact_default():
+    torch.manual_seed(19)
+    model = build_model("randomtreewm", SMALL).eval()
+    batch = _batch()
+    default_generator = torch.Generator().manual_seed(811)
+    explicit_generator = torch.Generator().manual_seed(811)
+
+    default_loss, default_metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=0.5,
+        generator=default_generator,
+    )
+    explicit_loss, explicit_metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=0.5,
+        scheduled_sampling_granularity="step",
+        generator=explicit_generator,
+        transition_mode="teacher_action",
+        grounded_select_action_weight=0.0,
+        grounded_select_endpoint_weight=0.0,
+        grounded_select_horizon_weight=0.0,
+        grounded_loss_latent_weight=0.0,
+        grounded_loss_action_weight=0.0,
+        grounded_loss_horizon_weight=0.0,
+        grounded_loss_endpoint_weight=0.0,
+        grounded_detach_self_fed_parent=True,
+    )
+
+    torch.testing.assert_close(default_loss, explicit_loss, rtol=0, atol=0)
+    assert default_metrics == explicit_metrics
+    torch.testing.assert_close(
+        default_generator.get_state(), explicit_generator.get_state(), rtol=0, atol=0
+    )
+    assert default_metrics["recursive/scheduled_sampling_sequence_level"] == 0.0
+    assert "recursive/transition_mode_grounded_execution_v2" not in default_metrics
+
+
+def test_teacher_action_mode_never_touches_the_decoder():
+    class ExplodingDecoder(torch.nn.Module):
+        def forward(self, _z):
+            raise AssertionError("legacy recursive training must not decode")
+
+    model = build_model("randomtreewm", SMALL)
+    model.decoder = ExplodingDecoder()
+    loss, _ = multi_step_recursive_loss(model, _batch(), transition_mode="teacher_action")
+    assert torch.isfinite(loss)
+
+
+def test_sequence_sampling_reuses_one_decision_for_the_complete_chain(monkeypatch):
+    torch.manual_seed(23)
+    model = build_model("randomtreewm", SMALL).eval()
+    batch = _batch(b=4)
+    draws: list[torch.Tensor] = []
+
+    def controlled_rand(*shape, **kwargs):
+        assert shape == (4, 1)
+        value = torch.tensor([[0.1], [0.2], [0.8], [0.9]])
+        draws.append(value)
+        return value.to(device=kwargs.get("device"))
+
+    monkeypatch.setattr(torch, "rand", controlled_rand)
+    _, metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=0.5,
+        scheduled_sampling_granularity="sequence",
+    )
+
+    assert len(draws) == 1
+    assert metrics["recursive/scheduled_sampling_sequence_level"] == 1.0
+    assert metrics["recursive/predicted_feed_fraction"] == pytest.approx(0.5)
+    # The same two examples are prediction-fed at both recursive transitions.
+    assert metrics["recursive/fully_self_fed_chain_fraction"] == pytest.approx(0.5)
+
+
+def test_step_sampling_exposes_fewer_complete_chains_at_the_same_marginal_p(monkeypatch):
+    torch.manual_seed(29)
+    model = build_model("randomtreewm", SMALL).eval()
+    batch = _batch(b=4)
+    values = iter(
+        [
+            torch.tensor([[0.1], [0.2], [0.8], [0.9]]),
+            torch.tensor([[0.1], [0.8], [0.2], [0.9]]),
+            # Historical step sampling also draws after the final depth. It does not
+            # affect the objective, but retaining it preserves legacy RNG semantics.
+            torch.tensor([[0.9], [0.9], [0.9], [0.9]]),
+        ]
+    )
+    draws = 0
+
+    def controlled_rand(*shape, **kwargs):
+        nonlocal draws
+        assert shape == (4, 1)
+        draws += 1
+        return next(values).to(device=kwargs.get("device"))
+
+    monkeypatch.setattr(torch, "rand", controlled_rand)
+    _, metrics = multi_step_recursive_loss(
+        model,
+        batch,
+        scheduled_sampling_p=0.5,
+        scheduled_sampling_granularity="step",
+    )
+
+    assert draws == 3
+    assert metrics["recursive/predicted_feed_fraction"] == pytest.approx(0.5)
+    assert metrics["recursive/fully_self_fed_chain_fraction"] == pytest.approx(0.25)
+
+
+def test_scheduled_sampling_granularity_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="scheduled_sampling_granularity"):
+        multi_step_recursive_loss(
+            build_model("randomtreewm", SMALL),
+            _batch(),
+            scheduled_sampling_granularity="per_token",
+        )
+
+
+def _grounded_kwargs(**overrides):
+    values = {
+        "transition_mode": "grounded_execution_v2",
+        "grounded_select_action_weight": 1.0,
+        "grounded_select_endpoint_weight": 1.0,
+        "grounded_select_horizon_weight": 1.0,
+        "grounded_loss_latent_weight": 1.0,
+        "grounded_loss_action_weight": 1.0,
+        "grounded_loss_horizon_weight": 1.0,
+        "grounded_loss_endpoint_weight": 1.0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_grounded_recursive_loss_reaches_action_horizon_and_decoder_heads():
+    torch.manual_seed(31)
+    model = build_model("randomtreewm", SMALL)
+    loss, metrics = multi_step_recursive_loss(
+        model,
+        _batch(b=2, d=2),
+        scheduled_sampling_p=1.0,
+        **_grounded_kwargs(),
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert sum(
+        float(parameter.grad.abs().sum())
+        for parameter in model.heads.action_head.parameters()
+        if parameter.grad is not None
+    ) > 0.0
+    assert sum(
+        float(parameter.grad.abs().sum())
+        for parameter in model.heads.horizon_head.parameters()
+        if parameter.grad is not None
+    ) > 0.0
+    assert sum(
+        float(parameter.grad.abs().sum())
+        for parameter in model.decoder.parameters()
+        if parameter.grad is not None
+    ) > 0.0
+    for name in ("latent", "action", "horizon", "endpoint"):
+        assert f"recursive/grounded/loss_{name}" in metrics
+        assert f"recursive/grounded/loss_{name}_depth1" in metrics
+
+
+def test_grounded_endpoint_only_loss_backpropagates_through_predicted_action():
+    torch.manual_seed(37)
+    model = build_model("randomtreewm", SMALL)
+    loss, _ = multi_step_recursive_loss(
+        model,
+        _batch(b=2, d=1),
+        **_grounded_kwargs(
+            grounded_select_action_weight=1.0,
+            grounded_select_endpoint_weight=0.0,
+            grounded_select_horizon_weight=0.0,
+            grounded_loss_latent_weight=0.0,
+            grounded_loss_action_weight=0.0,
+            grounded_loss_horizon_weight=0.0,
+            grounded_loss_endpoint_weight=1.0,
+        ),
+    )
+    loss.backward()
+    action_gradient = sum(
+        float(parameter.grad.abs().sum())
+        for parameter in model.heads.action_head.parameters()
+        if parameter.grad is not None
+    )
+    assert action_gradient > 0.0
+
+
+def test_decoded_endpoint_metric_ignores_nuisance_observation_dimensions():
+    decoded = torch.tensor(
+        [[[1.0, 100.0, 4.0, -100.0], [2.0, 200.0, 7.0, -200.0]]]
+    )
+    target = torch.tensor([[0.0, 3.0, 1.0, 5.0]])
+    dims = torch.tensor([0, 2])
+    reference = _decoded_task_endpoint_rms(decoded, target, dims)
+
+    nuisance_changed = decoded.clone()
+    nuisance_changed[..., 1] += 1.0e6
+    nuisance_changed[..., 3] -= 1.0e6
+    target_changed = target.clone()
+    target_changed[..., 1] -= 1.0e6
+    target_changed[..., 3] += 1.0e6
+    torch.testing.assert_close(
+        _decoded_task_endpoint_rms(nuisance_changed, target_changed, dims), reference
+    )
+
+
+class _TieGroundedModel:
+    decoder = None
+
+    def __init__(self) -> None:
+        self.masks: list[torch.Tensor] = []
+        self.horizons: list[torch.Tensor] = []
+
+    def branch(self, z, depth):
+        del depth
+        b = z.shape[0]
+        zeros = z.new_zeros
+        return BranchOutputs(
+            embedding=zeros(b, 3, 1),
+            action=zeros(b, 3, 2, 1),
+            horizon_logits=zeros(b, 3, 2),
+            keep_logit=zeros(b, 3),
+            mass_logit=zeros(b, 3),
+            uncertainty=zeros(b, 3),
+            gain_prior=zeros(b, 3),
+        )
+
+    def dynamics(self, z, action, mask, horizon_idx, embedding):
+        del action, embedding
+        self.masks.append(mask.detach().clone())
+        self.horizons.append(horizon_idx.detach().clone())
+        return z.unsqueeze(1).expand(-1, 3, -1)
+
+
+def test_grounded_selection_is_tie_stable_rng_free_and_broadcasts_alignment():
+    model = _TieGroundedModel()
+    z = torch.zeros(2, 1)
+    action = torch.zeros(2, 2, 1)
+    mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    horizon = torch.tensor([0, 1])
+    rng_before = torch.random.get_rng_state().clone()
+
+    first = _grounded_execution_candidates(
+        model,
+        z,
+        torch.zeros(2, dtype=torch.long),
+        action,
+        mask,
+        horizon,
+        torch.zeros(2, 1),
+        None,
+        selection_action_weight=1.0,
+        selection_endpoint_weight=0.0,
+        selection_horizon_weight=0.0,
+    )
+    second = _grounded_execution_candidates(
+        model,
+        z,
+        torch.zeros(2, dtype=torch.long),
+        action,
+        mask,
+        horizon,
+        torch.zeros(2, 1),
+        None,
+        selection_action_weight=1.0,
+        selection_endpoint_weight=0.0,
+        selection_horizon_weight=0.0,
+    )
+
+    torch.testing.assert_close(first[2], torch.zeros(2, dtype=torch.long))
+    torch.testing.assert_close(second[2], first[2])
+    assert bool(((first[3]["horizon_error"] >= 0.0) & (first[3]["horizon_error"] <= 1.0)).all())
+    assert bool((first[3]["horizon_ce"] > 0.0).all())
+    torch.testing.assert_close(torch.random.get_rng_state(), rng_before, rtol=0, atol=0)
+    torch.testing.assert_close(model.masks[0], mask.unsqueeze(1).expand(-1, 3, -1))
+    torch.testing.assert_close(model.horizons[0], horizon.unsqueeze(1).expand(-1, 3))
+
+
+class _EndpointSelectionModel(_TieGroundedModel):
+    def decoder(self, z):
+        return z
+
+    def branch(self, z, depth):
+        out = super().branch(z, depth)
+        action = z.new_tensor([0.0, 2.0, 5.0]).view(1, 3, 1, 1)
+        out.action = action.expand(z.shape[0], -1, -1, -1)
+        return out
+
+    def dynamics(self, z, action, mask, horizon_idx, embedding):
+        del z, mask, horizon_idx, embedding
+        return action[..., 0, 0].unsqueeze(-1)
+
+
+def test_grounded_composite_selection_can_trade_action_for_physical_endpoint():
+    model = _EndpointSelectionModel()
+    common = (
+        model,
+        torch.zeros(1, 1),
+        torch.zeros(1, dtype=torch.long),
+        torch.zeros(1, 1, 1),
+        torch.ones(1, 1),
+        torch.zeros(1, dtype=torch.long),
+        torch.tensor([[2.0]]),
+        torch.tensor([0]),
+    )
+    action_pick = _grounded_execution_candidates(
+        *common,
+        selection_action_weight=1.0,
+        selection_endpoint_weight=0.0,
+        selection_horizon_weight=0.0,
+    )[2]
+    endpoint_pick = _grounded_execution_candidates(
+        *common,
+        selection_action_weight=0.0,
+        selection_endpoint_weight=1.0,
+        selection_horizon_weight=0.0,
+    )[2]
+    torch.testing.assert_close(action_pick, torch.tensor([0]))
+    torch.testing.assert_close(endpoint_pick, torch.tensor([1]))
+
+
+class _RecordedParentGroundedModel:
+    decoder = None
+
+    def __init__(self) -> None:
+        self.parents: list[torch.Tensor] = []
+        self.parent_requires_grad: list[bool] = []
+
+    def encode(self, obs):
+        return obs
+
+    def branch(self, z, depth):
+        del depth
+        self.parents.append(z.detach().clone())
+        self.parent_requires_grad.append(z.requires_grad)
+        b = z.shape[0]
+        action = torch.tensor(
+            [2.0, 3.0], device=z.device, requires_grad=torch.is_grad_enabled()
+        ).view(1, 2, 1, 1).expand(b, -1, -1, -1)
+        logits = z.new_tensor([[8.0, -8.0], [-8.0, 8.0]]).unsqueeze(0).expand(b, -1, -1)
+        zeros = z.new_zeros
+        return BranchOutputs(
+            embedding=zeros(b, 2, 1),
+            action=action,
+            horizon_logits=logits,
+            keep_logit=zeros(b, 2),
+            mass_logit=zeros(b, 2),
+            uncertainty=zeros(b, 2),
+            gain_prior=zeros(b, 2),
+        )
+
+    def dynamics(self, z, action, mask, horizon_idx, embedding):
+        del mask, horizon_idx, embedding
+        return z.unsqueeze(1) + action[..., 0, 0].unsqueeze(-1)
+
+
+def _recorded_parent_batch():
+    return {
+        "obs": torch.tensor([[0.0]]),
+        "ms_actions": torch.zeros(1, 2, 1, 1),
+        "ms_action_mask": torch.ones(1, 2, 1),
+        "ms_obs": torch.tensor([[[10.0], [20.0]]]),
+        "ms_horizon_idx": torch.zeros(1, 2, dtype=torch.long),
+        "ms_valid": torch.ones(1, 2),
+    }
+
+
+def test_grounded_p1_feeds_selected_predicted_action_successor():
+    model = _RecordedParentGroundedModel()
+    multi_step_recursive_loss(
+        model,
+        _recorded_parent_batch(),
+        scheduled_sampling_p=1.0,
+        **_grounded_kwargs(
+            grounded_select_action_weight=0.0,
+            grounded_select_endpoint_weight=0.0,
+            grounded_select_horizon_weight=1.0,
+            grounded_loss_latent_weight=1.0,
+            grounded_loss_action_weight=0.0,
+            grounded_loss_horizon_weight=0.0,
+            grounded_loss_endpoint_weight=0.0,
+        ),
+    )
+    # Calls are main depth 0, teacher reference depth 0, main depth 1, teacher depth 1.
+    torch.testing.assert_close(model.parents[2], torch.tensor([[2.0]]))
+    assert not torch.equal(model.parents[2], torch.tensor([[10.0]]))
+    assert model.parent_requires_grad[2] is False
+
+
+def test_grounded_decoded_terms_require_decoder_and_task_dimensions():
+    model = _RecordedParentGroundedModel()
+    with pytest.raises(ValueError, match="model.decoder"):
+        multi_step_recursive_loss(
+            model,
+            _recorded_parent_batch(),
+            **_grounded_kwargs(
+                grounded_select_endpoint_weight=1.0,
+                grounded_loss_endpoint_weight=0.0,
+            ),
+        )
+
+    real_model = build_model("randomtreewm", SMALL)
+    batch = _batch()
+    del batch["task_metric_dims"]
+    with pytest.raises(ValueError, match="task_metric_dims"):
+        multi_step_recursive_loss(real_model, batch, **_grounded_kwargs())
+
+    inconsistent = _batch(b=2)
+    inconsistent["task_metric_dims"][1] = torch.tensor([1, 0])
+    with pytest.raises(ValueError, match="identical within a batch"):
+        multi_step_recursive_loss(real_model, inconsistent, **_grounded_kwargs())
 
 
 def test_scheduled_sampling_warmup_is_linear_and_clamped():

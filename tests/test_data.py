@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from treewm.data.future_sets import FutureSetBuilder, FutureSetConfig
-from treewm.data.ogbench_dataset import Normalizer, TrajectoryIndex
+from treewm.data.ogbench_dataset import Normalizer, TrajectoryIndex, build_datasets
 from treewm.data.samplers import InfiniteLoader, build_dataloader
 
 
@@ -38,6 +38,49 @@ def test_trajectory_index_handles_missing_final_terminal():
     idx = TrajectoryIndex.from_terminals(data["terminals"])
     assert len(idx.traj_id) == 30
     assert idx.num_trajectories == 3
+
+
+def test_validation_anchor_seed_can_be_shared_across_model_seeds(monkeypatch):
+    train = make_synthetic(num_traj=8, length=20, seed=3)
+    validation = make_synthetic(num_traj=8, length=20, seed=5)
+    monkeypatch.setattr(
+        "treewm.data.ogbench_dataset.load_ogbench",
+        lambda *_args, **_kwargs: (object(), train, validation),
+    )
+    future_cfg = FutureSetConfig(
+        num_neighbors=1,
+        horizons=(4,),
+        h_max=4,
+        multi_step_depth=1,
+    )
+
+    _, train_seed_1, val_seed_1, _ = build_datasets(
+        "synthetic",
+        future_cfg,
+        max_train_anchors=20,
+        max_val_anchors=20,
+        seed=1,
+        validation_sample_seed=71,
+    )
+    _, train_seed_2, val_seed_2, _ = build_datasets(
+        "synthetic",
+        future_cfg,
+        max_train_anchors=20,
+        max_val_anchors=20,
+        seed=2,
+        validation_sample_seed=71,
+    )
+
+    np.testing.assert_array_equal(val_seed_1.anchors, val_seed_2.anchors)
+    assert not np.array_equal(train_seed_1.anchors, train_seed_2.anchors)
+
+    _, _, historical_val_1, _ = build_datasets(
+        "synthetic", future_cfg, max_val_anchors=20, seed=1
+    )
+    _, _, historical_val_2, _ = build_datasets(
+        "synthetic", future_cfg, max_val_anchors=20, seed=2
+    )
+    assert not np.array_equal(historical_val_1.anchors, historical_val_2.anchors)
 
 
 def test_infinite_loader_resumes_at_exact_batch_cursor():

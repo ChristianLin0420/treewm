@@ -30,6 +30,17 @@ def test_formal_requirements_are_explicit_in_base_config():
     cfg = OmegaConf.load(Path(__file__).parents[1] / "configs" / "base.yaml")
     assert cfg.train.gradient_checkpointing is True
     assert cfg.eval.final_episodes_per_task == 50
+    assert cfg.losses.scheduled_sampling_granularity == "step"
+    assert cfg.train.validation_sample_seed is None
+    assert cfg.losses.multistep_transition_mode == "teacher_action"
+    assert cfg.losses.grounded_select_action_weight == 0.0
+    assert cfg.losses.grounded_select_endpoint_weight == 0.0
+    assert cfg.losses.grounded_select_horizon_weight == 0.0
+    assert cfg.losses.grounded_loss_latent_weight == 0.0
+    assert cfg.losses.grounded_loss_action_weight == 0.0
+    assert cfg.losses.grounded_loss_horizon_weight == 0.0
+    assert cfg.losses.grounded_loss_endpoint_weight == 0.0
+    assert cfg.losses.grounded_detach_self_fed_parent is True
 
 
 def test_horizon_mask_matches_horizons():
@@ -316,6 +327,57 @@ def test_evaluation_emits_per_task_metrics_and_resumes_prefix(monkeypatch):
     )
     assert len(calls) == 2
     assert resumed["eval/num_episodes"] == 6
+
+
+def test_evaluation_aggregates_no_action_and_guard_diagnostics(monkeypatch):
+    results = iter(
+        [
+            rollout.EpisodeResult(
+                success=False,
+                steps=0,
+                replans=1,
+                nodes=8,
+                final_goal_distance=2.0,
+                best_goal_distance=2.0,
+                no_action_plans=1,
+                guard_plans=1,
+                guard_rejections=1,
+                guard_candidate_count=4,
+                guard_accepted_count=0,
+                guard_best_predicted_improvements=[-0.25],
+            ),
+            rollout.EpisodeResult(
+                success=False,
+                steps=4,
+                replans=2,
+                nodes=16,
+                final_goal_distance=1.0,
+                best_goal_distance=0.9,
+                guard_plans=2,
+                guard_candidate_count=8,
+                guard_accepted_count=3,
+                guard_best_predicted_improvements=[0.5, 0.25],
+                guard_selected_predicted_improvements=[0.4, 0.2],
+            ),
+        ]
+    )
+    monkeypatch.setattr(rollout, "run_episode", lambda *_args, **_kwargs: next(results))
+
+    metrics = rollout.evaluate(
+        object(), object(), [{"task_id": 1}], episodes_per_task=2
+    )
+
+    assert metrics["eval/no_action_plan_rate"] == pytest.approx(1.0 / 3.0)
+    assert metrics["eval/no_action_episode_fraction"] == pytest.approx(0.5)
+    assert metrics["eval/guard/plan_fraction"] == pytest.approx(1.0)
+    assert metrics["eval/guard/rejection_rate"] == pytest.approx(1.0 / 3.0)
+    assert metrics["eval/guard/candidate_acceptance_rate"] == pytest.approx(0.25)
+    assert metrics["eval/guard/best_predicted_executable_improvement"] == pytest.approx(
+        1.0 / 6.0
+    )
+    assert metrics[
+        "eval/guard/selected_predicted_executable_improvement"
+    ] == pytest.approx(0.3)
 
 
 def test_budget_sweep_propagates_domain_to_planner_and_evaluator(monkeypatch):

@@ -92,9 +92,13 @@ TREEWM_V2_OBJECTIVES = frozenset(
         "treewm_v2_rms_rank_v1",
         "treewm_v2_grounded_pilot_v1",
         "treewm_v2_grounded_formal_v1",
+        "treewm_v2_grounded_repair_pilot_v1",
     }
 )
-BOUNDED_PILOT_OBJECTIVES = {"treewm_v2_grounded_pilot_v1": 20_000}
+BOUNDED_PILOT_OBJECTIVES = {
+    "treewm_v2_grounded_pilot_v1": 20_000,
+    "treewm_v2_grounded_repair_pilot_v1": 25_000,
+}
 FORMAL_STAGE_UPDATES = frozenset({2_000, 25_000, 100_000, 1_000_000})
 
 
@@ -204,10 +208,81 @@ def fixed_validation_rng(seed: int, rank: int = 0, *, strict_cuda: bool = False)
         yield
 
 
+def resolve_validation_sample_seed(train_cfg, model_seed: int) -> int:
+    """Resolve the held-out anchor/sampler/RNG seed without changing old configs."""
+    configured = train_cfg.get("validation_sample_seed")
+    return int(model_seed) if configured is None else int(configured)
+
+
+def multistep_transition_kwargs(loss_cfg) -> dict[str, object]:
+    """One auditable argument bundle shared by training and both held-out rails."""
+    return {
+        "transition_mode": str(loss_cfg.multistep_transition_mode),
+        "grounded_select_action_weight": float(
+            loss_cfg.grounded_select_action_weight
+        ),
+        "grounded_select_endpoint_weight": float(
+            loss_cfg.grounded_select_endpoint_weight
+        ),
+        "grounded_select_horizon_weight": float(
+            loss_cfg.grounded_select_horizon_weight
+        ),
+        "grounded_loss_latent_weight": float(loss_cfg.grounded_loss_latent_weight),
+        "grounded_loss_action_weight": float(loss_cfg.grounded_loss_action_weight),
+        "grounded_loss_horizon_weight": float(loss_cfg.grounded_loss_horizon_weight),
+        "grounded_loss_endpoint_weight": float(
+            loss_cfg.grounded_loss_endpoint_weight
+        ),
+        "grounded_detach_self_fed_parent": bool(
+            loss_cfg.grounded_detach_self_fed_parent
+        ),
+    }
+
+
+def validate_multistep_transition_configuration(
+    objective_version: str,
+    loss_cfg,
+    model=None,
+) -> None:
+    """Fail closed before training if the opt-in recursive transition is incoherent."""
+    mode = str(loss_cfg.multistep_transition_mode)
+    if mode not in {"teacher_action", "grounded_execution_v2"}:
+        raise ValueError(f"unsupported multistep_transition_mode: {mode!r}")
+    if mode == "teacher_action":
+        return
+    if objective_version not in TREEWM_V2_OBJECTIVES:
+        raise ValueError("grounded_execution_v2 is restricted to TreeWM-v2 objectives")
+    if not loss_cfg.on("multistep"):
+        raise ValueError("grounded_execution_v2 requires the multistep objective")
+    kwargs = multistep_transition_kwargs(loss_cfg)
+    weight_names = tuple(name for name in kwargs if name.endswith("_weight"))
+    invalid = [
+        name
+        for name in weight_names
+        if not math.isfinite(float(kwargs[name])) or float(kwargs[name]) < 0.0
+    ]
+    if invalid:
+        raise ValueError(
+            "grounded recursive weights must be finite and nonnegative: "
+            + ", ".join(invalid)
+        )
+    if sum(float(kwargs[name]) for name in weight_names if "_select_" in name) <= 0:
+        raise ValueError("grounded recursive branch selection requires a positive weight")
+    if sum(float(kwargs[name]) for name in weight_names if "_loss_" in name) <= 0:
+        raise ValueError("grounded recursive objective requires a positive loss weight")
+    decoded_active = (
+        float(loss_cfg.grounded_select_endpoint_weight) > 0.0
+        or float(loss_cfg.grounded_loss_endpoint_weight) > 0.0
+    )
+    if decoded_active and model is not None and getattr(model, "decoder", None) is None:
+        raise ValueError("grounded decoded recursive terms require model.decoder")
+
+
 def heldout_multistep_validation(
     model,
     batch: dict[str, torch.Tensor],
     depth_weights: tuple[float, ...] | None,
+    transition_kwargs: Mapping[str, object] | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
     """Measure both teacher-forced and fully self-fed recursive generalisation.
 
@@ -217,17 +292,20 @@ def heldout_multistep_validation(
     Validation runs under :func:`fixed_validation_rng`, so both measurements use an
     identical private stream at every checkpoint and cannot perturb training RNG.
     """
+    shared_transition_kwargs = dict(transition_kwargs or {})
     teacher_loss, teacher_metrics = multi_step_recursive_loss(
         model,
         batch,
         scheduled_sampling_p=0.0,
         depth_weights=depth_weights,
+        **shared_transition_kwargs,
     )
     self_fed_loss, self_fed_metrics = multi_step_recursive_loss(
         model,
         batch,
         scheduled_sampling_p=1.0,
         depth_weights=depth_weights,
+        **shared_transition_kwargs,
     )
     metrics: dict[str, torch.Tensor | float] = {
         "train/loss_multistep_teacher_forced": teacher_loss,
@@ -240,10 +318,16 @@ def heldout_multistep_validation(
             depth = key.removeprefix("recursive/loss_depth")
             # Preserve the pre-existing per-depth validation names.
             metrics[f"train/loss_multistep_depth{depth}"] = value
+        elif key.startswith("recursive/grounded/"):
+            suffix = key.removeprefix("recursive/grounded/")
+            metrics[f"train/grounded/multistep_teacher_forced/{suffix}"] = value
     for key, value in self_fed_metrics.items():
         if key.startswith("recursive/loss_depth"):
             depth = key.removeprefix("recursive/loss_depth")
             metrics[f"train/loss_multistep_self_fed_depth{depth}"] = value
+        elif key.startswith("recursive/grounded/"):
+            suffix = key.removeprefix("recursive/grounded/")
+            metrics[f"train/grounded/multistep_self_fed/{suffix}"] = value
     return teacher_loss, metrics
 
 
@@ -393,9 +477,24 @@ def formal_v2_objective_contract(
     separate_gain_clip: bool,
     expected_depth: int = 16,
     require_grounded_multistep: bool = False,
+    required_scheduled_sampling_granularity: str | None = None,
+    required_multistep_transition_mode: str | None = None,
     train_cfg=None,
 ) -> dict[str, bool]:
     """Pure, testable formal-v2 contract evaluated before optimiser construction."""
+    if required_scheduled_sampling_granularity not in {None, "step", "sequence"}:
+        raise ValueError(
+            "required_scheduled_sampling_granularity must be None, 'step', or 'sequence'"
+        )
+    if required_multistep_transition_mode not in {
+        None,
+        "teacher_action",
+        "grounded_execution_v2",
+    }:
+        raise ValueError(
+            "required_multistep_transition_mode must be None, 'teacher_action', "
+            "or 'grounded_execution_v2'"
+        )
     contract = {
         "one_q_scale": int(model.controllability.num_scales) == 1,
         # The bounded q-distance and normalized matching formulas are valid only for
@@ -476,6 +575,20 @@ def formal_v2_objective_contract(
                 == ("learned", "novelty_q"),
             }
         )
+    if required_scheduled_sampling_granularity is not None:
+        # Existing formal identities pass None and retain their historical contract.
+        # A fresh objective can bind the revised sampling semantics explicitly.
+        contract["scheduled_sampling_granularity"] = (
+            str(loss_cfg.scheduled_sampling_granularity)
+            == required_scheduled_sampling_granularity
+        )
+    if required_multistep_transition_mode is not None:
+        # Existing formal identities pass None. A fresh v2 identity can bind the
+        # grounded execution semantics without retroactively changing sealed runs.
+        contract["multistep_transition_mode"] = (
+            str(loss_cfg.multistep_transition_mode)
+            == required_multistep_transition_mode
+        )
     return contract
 
 
@@ -539,7 +652,11 @@ class TrainingStepModule(torch.nn.Module):
                 self.model,
                 batch,
                 scheduled_sampling_p=p_ss,
+                scheduled_sampling_granularity=str(
+                    self.loss_cfg.scheduled_sampling_granularity
+                ),
                 depth_weights=self.loss_cfg.multistep_depth_weights or None,
+                **multistep_transition_kwargs(self.loss_cfg),
             )
             raw_terms["multistep"] = ms_loss
             metrics.update(ms_metrics)
@@ -648,6 +765,7 @@ def main(cfg: DictConfig) -> None:
     )
     if validation_every <= 0 or checkpoint_every <= 0:
         raise ValueError("train.val_every and train.ckpt_every must be positive")
+    validation_sample_seed = resolve_validation_sample_seed(cfg.train, int(cfg.seed))
     gradient_checkpointing = bool(cfg.train.gradient_checkpointing)
     if total_steps == 1_000_000 and not gradient_checkpointing:
         raise ValueError("formal 1M TreeWM training requires train.gradient_checkpointing=true")
@@ -690,6 +808,7 @@ def main(cfg: DictConfig) -> None:
         recipe_anchor_policy=str(
             cfg.future_sets.get("recipe_anchor_policy", "selected_seed")
         ),
+        validation_sample_seed=validation_sample_seed,
     )
     # Prove the shared cache is actually backing the loader rather than merely present.
     cache_metrics = getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
@@ -719,8 +838,9 @@ def main(cfg: DictConfig) -> None:
     )
     val_loader, val_sampler = build_fixed_validation_dataloader(
         val_ds, int(cfg.train.batch_size), int(cfg.train.val_batches),
-        num_workers=max(2, int(cfg.train.num_workers) // 4), seed=int(cfg.seed),
-        generator=make_generator(int(cfg.seed), "viz"),
+        num_workers=max(2, int(cfg.train.num_workers) // 4),
+        seed=validation_sample_seed,
+        generator=make_generator(validation_sample_seed, "viz"),
     )
     # Materialise the first representative batch directly from the sampler once. Every
     # diagnostic checkpoint reuses these exact anchors instead of constructing another
@@ -760,6 +880,7 @@ def main(cfg: DictConfig) -> None:
     )
     match_cfg = cfg_utils.matching_config(cfg)
     loss_cfg = cfg_utils.loss_config(cfg)
+    validate_multistep_transition_configuration(objective_version, loss_cfg, model)
     planner_cfg = cfg_utils.planner_config(cfg)
     # The v2 scorer creates its set-attention modules lazily. This must precede both
     # optimiser construction and checkpoint restore so parameters/state are identical.
@@ -1690,7 +1811,7 @@ def main(cfg: DictConfig) -> None:
             # no_grad. A different validation/checkpoint cadence (the 5k pilot uses a
             # tighter one) must not perturb subsequent training RNG or parameters.
             with fixed_validation_rng(
-                int(cfg.seed),
+                validation_sample_seed,
                 dist_info.rank,
                 strict_cuda=(total_steps == 1_000_000),
             ):
@@ -1717,6 +1838,7 @@ def main(cfg: DictConfig) -> None:
                                     model,
                                     vbatch,
                                     tuple(loss_cfg.multistep_depth_weights) or None,
+                                    multistep_transition_kwargs(loss_cfg),
                                 )
                             )
                             validation_raw_terms["multistep"] = validation_multistep
@@ -1735,7 +1857,9 @@ def main(cfg: DictConfig) -> None:
                             {
                                 k.replace("train/", "val/"): v
                                 for k, v in vmetrics.items()
-                                if "loss" in k or "objective_" in k
+                                if "loss" in k
+                                or "objective_" in k
+                                or "grounded/" in k
                             },
                             count=vbatch["obs"].shape[0],
                         )

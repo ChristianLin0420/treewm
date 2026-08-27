@@ -226,6 +226,13 @@ class EpisodeResult:
     displacement: float = 0.0
     path_length: float = 0.0
     action_magnitude: float = 0.0
+    no_action_plans: int = 0
+    guard_plans: int = 0
+    guard_rejections: int = 0
+    guard_candidate_count: int = 0
+    guard_accepted_count: int = 0
+    guard_best_predicted_improvements: list[float] = field(default_factory=list)
+    guard_selected_predicted_improvements: list[float] = field(default_factory=list)
     trajectory: list[np.ndarray] = field(default_factory=list)
     progress: dict = field(default_factory=dict)
     task_index: int = -1
@@ -306,6 +313,11 @@ def run_episode(
     act_mag: list[float] = []
 
     steps = replans = nodes = 0
+    no_action_plans = 0
+    guard_plans = guard_rejections = 0
+    guard_candidate_count = guard_accepted_count = 0
+    guard_best_predicted_improvements: list[float] = []
+    guard_selected_predicted_improvements: list[float] = []
     # Some fixed tasks can reset directly into a solved state. A planner that correctly
     # returns no action under the non-regression guard must not turn that into a false
     # failure merely because success was historically checked only after env.step().
@@ -323,7 +335,21 @@ def run_episode(
         plan = planner.plan(np.asarray(ob, dtype=np.float32), goal)
         replans += 1
         nodes += plan.num_nodes
+        if plan.guard_applied:
+            guard_plans += 1
+            guard_rejections += int(plan.guard_rejected_all)
+            guard_candidate_count += int(plan.guard_candidate_count)
+            guard_accepted_count += int(plan.guard_accepted_count)
+            if plan.guard_candidate_count > 0:
+                guard_best_predicted_improvements.append(
+                    float(plan.guard_best_predicted_improvement)
+                )
+            if plan.selected_node != 0:
+                guard_selected_predicted_improvements.append(
+                    float(plan.guard_selected_predicted_improvement)
+                )
         if len(plan.actions) == 0:
+            no_action_plans += 1
             break
         chunks.append(len(plan.actions))
         depths.append(plan.selected_depth)
@@ -384,6 +410,15 @@ def run_episode(
         displacement=float(np.linalg.norm(gv(ob) - start_gv)),
         path_length=path_len,
         action_magnitude=float(np.mean(act_mag)) if act_mag else 0.0,
+        no_action_plans=no_action_plans,
+        guard_plans=guard_plans,
+        guard_rejections=guard_rejections,
+        guard_candidate_count=guard_candidate_count,
+        guard_accepted_count=guard_accepted_count,
+        guard_best_predicted_improvements=guard_best_predicted_improvements,
+        guard_selected_predicted_improvements=(
+            guard_selected_predicted_improvements
+        ),
         trajectory=traj,
         progress=extra,
     )
@@ -473,6 +508,27 @@ def evaluate(
     init_d = np.array([r.initial_goal_distance for r in results], dtype=np.float32)
     path_len = np.array([r.path_length for r in results], dtype=np.float32)
     act_mag = np.array([r.action_magnitude for r in results], dtype=np.float32)
+    no_action_plans = sum(r.no_action_plans for r in results)
+    guard_plans = sum(r.guard_plans for r in results)
+    guard_rejections = sum(r.guard_rejections for r in results)
+    guard_candidates = sum(r.guard_candidate_count for r in results)
+    guard_accepted = sum(r.guard_accepted_count for r in results)
+    guard_best_improvements = np.asarray(
+        [
+            value
+            for result in results
+            for value in result.guard_best_predicted_improvements
+        ],
+        dtype=np.float32,
+    )
+    guard_selected_improvements = np.asarray(
+        [
+            value
+            for result in results
+            for value in result.guard_selected_predicted_improvements
+        ],
+        dtype=np.float32,
+    )
 
     has_success = bool(successes.any())
     nodes_per_success = float(nodes[successes > 0].mean()) if has_success else 0.0
@@ -500,6 +556,29 @@ def evaluate(
         "eval/path_length": float(path_len.mean()),
         "eval/action_magnitude": float(act_mag.mean()),
         "eval/fraction_moving": float((disp > 1.0).mean()),
+        # A no-action plan ends the episode immediately. Keep this distinct from the
+        # guard-specific rejection rate so a root-only/empty tree is diagnosable too.
+        "eval/no_action_plan_rate": float(no_action_plans / max(float(replans.sum()), 1.0)),
+        "eval/no_action_episode_fraction": float(
+            np.mean([result.no_action_plans > 0 for result in results])
+        ),
+        "eval/guard/plan_fraction": float(guard_plans / max(float(replans.sum()), 1.0)),
+        "eval/guard/rejection_rate": float(
+            guard_rejections / max(float(guard_plans), 1.0)
+        ),
+        "eval/guard/candidate_acceptance_rate": float(
+            guard_accepted / max(float(guard_candidates), 1.0)
+        ),
+        "eval/guard/best_predicted_executable_improvement": float(
+            guard_best_improvements.mean() if guard_best_improvements.size else 0.0
+        ),
+        "eval/guard/selected_predicted_executable_improvement": float(
+            guard_selected_improvements.mean()
+            if guard_selected_improvements.size
+            else 0.0
+        ),
+        "eval/guard/plans": float(guard_plans),
+        "eval/guard/rejections": float(guard_rejections),
         "eval/planning_wall_clock_s": float(
             np.mean([result.planning_wall_clock_s for result in results])
         ),

@@ -100,6 +100,8 @@ class AblationArm:
     scorer: str
     horizon_mode: str = "learned"
     fixed_horizon: int | None = None
+    keep_threshold: float | None = None
+    require_first_edge_improvement: bool | None = None
 
     def __post_init__(self) -> None:
         if self.decoded_metric not in DECODED_METRICS:
@@ -118,6 +120,8 @@ class AblationArm:
             raise ValueError("fixed horizon mode requires fixed_horizon")
         if self.horizon_mode != "fixed" and self.fixed_horizon is not None:
             raise ValueError("fixed_horizon is only valid in fixed horizon mode")
+        if self.keep_threshold is not None and not 0.0 <= self.keep_threshold <= 1.0:
+            raise ValueError("keep_threshold must lie in [0, 1]")
 
     @property
     def arm_id(self) -> str:
@@ -126,10 +130,15 @@ class AblationArm:
             if self.horizon_mode == "fixed"
             else self.horizon_mode
         )
-        return (
+        base = (
             f"{self.decoded_metric}-d{self.max_depth}-e{self.execute_steps}-"
             f"{self.scorer}-h{horizon}"
         )
+        if self.keep_threshold is not None:
+            base += f"-k{int(round(100 * self.keep_threshold)):02d}"
+        if self.require_first_edge_improvement is not None:
+            base += "-guard" if self.require_first_edge_improvement else "-noguard"
+        return base
 
 
 def _unique_arms(values: Iterable[AblationArm]) -> tuple[AblationArm, ...]:
@@ -179,6 +188,35 @@ def factorial_grid(include_fixed16: bool = True) -> tuple[AblationArm, ...]:
     return _unique_arms(arms)
 
 
+def grounded_repair_grid() -> tuple[AblationArm, ...]:
+    """Frozen-checkpoint screen for support admission and executable-edge gating.
+
+    The current arm is retained verbatim.  Every intervention changes only inference;
+    no checkpoint tensor is modified.  A 0.42 KEEP threshold is the sealed midpoint of
+    the failed puzzle settings' observed positive priors (0.415 and 0.442), while the
+    learned/BFS and guard contrasts isolate allocation from action execution.
+    """
+    return _unique_arms(
+        (
+            AblationArm("domain_raw", 3, 4, "learned"),
+            AblationArm("domain_raw", 3, 4, "learned", keep_threshold=0.42,
+                        require_first_edge_improvement=True),
+            AblationArm("domain_raw", 3, 4, "learned", keep_threshold=0.50,
+                        require_first_edge_improvement=False),
+            AblationArm("domain_raw", 3, 4, "learned", keep_threshold=0.42,
+                        require_first_edge_improvement=False),
+            AblationArm("domain_raw", 3, 4, "bfs", keep_threshold=0.42,
+                        require_first_edge_improvement=True),
+            AblationArm("domain_raw", 3, 4, "bfs", keep_threshold=0.42,
+                        require_first_edge_improvement=False),
+            AblationArm("domain_raw", 3, 4, "novelty_q", keep_threshold=0.42,
+                        require_first_edge_improvement=False),
+            AblationArm("domain_raw", 3, 4, "bfs", "fixed", 16,
+                        keep_threshold=0.42, require_first_edge_improvement=False),
+        )
+    )
+
+
 def preregistered_contrasts(arms: Sequence[AblationArm]) -> dict[str, list[str]]:
     """Named paired contrasts; no result-dependent arm selection is permitted."""
     available = {arm.arm_id for arm in arms}
@@ -220,7 +258,7 @@ def _run_descriptor(path: Path) -> tuple[str, int | None]:
         return run_name, None
     prefix = match.group("prefix")
     # Formal names are treewm-v2-<setting>-seedN. Keep arbitrary names usable too.
-    setting = prefix.removeprefix("treewm-v2-")
+    setting = prefix.removeprefix("treewm-v2-").removeprefix("grounded-formal-")
     return setting, int(match.group("seed"))
 
 
@@ -533,6 +571,11 @@ def evaluate_arm(
         max_depth=int(arm.max_depth),
         scorer=str(arm.scorer),
         scorer_override=str(arm.scorer),
+        **(
+            {"keep_threshold": float(arm.keep_threshold)}
+            if arm.keep_threshold is not None
+            else {}
+        ),
     )
     tree_cfg = tree_config_for(str(run_cfg.arm), tree_cfg, model)
     planner_cfg = replace(
@@ -542,6 +585,11 @@ def evaluate_arm(
         execute_mode="clipped",
         execute_steps=int(arm.execute_steps),
         max_env_steps=int(max_env_steps),
+        **(
+            {"require_first_edge_improvement": bool(arm.require_first_edge_improvement)}
+            if arm.require_first_edge_improvement is not None
+            else {}
+        ),
     )
     # Every arm starts from identical global and owned RNG streams. In particular, the
     # random frontier control is paired rather than inheriting state from a prior arm.
@@ -572,8 +620,10 @@ def evaluate_arm(
             "tree_max_depth": tree_cfg.max_depth,
             "tree_node_budget": tree_cfg.node_budget,
             "tree_scorer": tree_cfg.scorer,
+            "tree_keep_threshold": tree_cfg.keep_threshold,
             "planner_execute_mode": planner_cfg.execute_mode,
             "planner_execute_steps": planner_cfg.execute_steps,
+            "require_first_edge_improvement": planner_cfg.require_first_edge_improvement,
             "horizon_mode": arm.horizon_mode,
             "fixed_horizon": arm.fixed_horizon,
             "fixed_horizon_index": fixed_index,
@@ -718,7 +768,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated setting IDs, or 'all'; overrides the stage's setting set",
     )
     parser.add_argument("--seeds", default="0", help="comma-separated training seeds")
-    parser.add_argument("--grid", choices=("compact", "factorial"), default="compact")
+    parser.add_argument(
+        "--grid", choices=("compact", "factorial", "grounded-repair"),
+        default="compact",
+    )
     parser.add_argument(
         "--fixed16", action=argparse.BooleanOptionalAction, default=True,
         help="include the paired fixed-16 horizon arm (default: enabled)",
@@ -789,7 +842,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(
             f"no checkpoints matched patterns={patterns}, settings={settings}, seeds={seeds}"
         )
-    arms = compact_grid(args.fixed16) if args.grid == "compact" else factorial_grid(args.fixed16)
+    if args.grid == "compact":
+        arms = compact_grid(args.fixed16)
+    elif args.grid == "factorial":
+        arms = factorial_grid(args.fixed16)
+    else:
+        arms = grounded_repair_grid()
     if args.arms:
         requested = parse_csv(args.arms)
         by_id = {arm.arm_id: arm for arm in arms}
@@ -821,6 +879,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "eval/progress/best_subgoal_gain",
             "eval/action_magnitude",
             "eval/selected_leaf_depth",
+            "eval/no_action_plan_rate",
+            "eval/no_action_episode_fraction",
+            "eval/guard/rejection_rate",
+            "eval/guard/candidate_acceptance_rate",
+            "eval/guard/best_predicted_executable_improvement",
+            "eval/guard/selected_predicted_executable_improvement",
         ],
         "pairing": "same checkpoint, task ID, episode index, environment seed, and node budget",
         "adaptive_arm_selection": False,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from treewm.evaluation.domains import Domain
@@ -258,6 +259,7 @@ def test_plan_rejects_full_horizon_winner_when_its_executed_prefix_regresses():
 
         def __init__(self):
             self.executed_horizons = None
+            self.prefix_latent = torch.tensor([[[6.0], [3.0]]])
 
         @staticmethod
         def encode(obs):
@@ -275,7 +277,7 @@ def test_plan_rejects_full_horizon_winner_when_its_executed_prefix_regresses():
             assert root_z.tolist() == [[5.0]]
             assert depth.tolist() == [0]
             self.executed_horizons = torch.tensor(self.cfg.horizons)[horizon_override]
-            return {"latent": torch.tensor([[[6.0], [3.0]]])}
+            return {"latent": self.prefix_latent}
 
     model = FakeModel()
     guarded = GoalPlanner(
@@ -303,6 +305,27 @@ def test_plan_rejects_full_horizon_winner_when_its_executed_prefix_regresses():
     )
     # Five search-tree nodes plus the two actually evaluated e4 prefix successors.
     assert plan.num_nodes == 7
+    assert plan.guard_applied
+    assert plan.guard_candidate_count == 4
+    assert plan.guard_accepted_count == 2
+    assert not plan.guard_rejected_all
+    assert plan.guard_best_predicted_improvement == pytest.approx(2.0)
+    assert plan.guard_selected_predicted_improvement == pytest.approx(2.0)
+
+    # Both executable root prefixes now regress from the actual current score of five.
+    # Endpoint slot 3 still looks excellent, so only the guard can make this no-action.
+    model.prefix_latent = torch.tensor([[[6.0], [7.0]]])
+    rejected = guarded.plan(
+        np.asarray([5.0], dtype=np.float32),
+        np.asarray([0.0], dtype=np.float32),
+    )
+    assert rejected.actions.shape == (0, 1)
+    assert rejected.guard_applied
+    assert rejected.guard_candidate_count == 4
+    assert rejected.guard_accepted_count == 0
+    assert rejected.guard_rejected_all
+    assert rejected.guard_best_predicted_improvement == pytest.approx(-1.0)
+    assert rejected.guard_selected_predicted_improvement == 0.0
 
 
 def test_root_only_latent_planner_fails_closed_without_decoded_score():

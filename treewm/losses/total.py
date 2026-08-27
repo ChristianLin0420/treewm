@@ -74,6 +74,24 @@ class LossConfig:
     # multi-step rollout, warmed up linearly over scheduled_sampling_warmup steps.
     scheduled_sampling_p: float = 0.0
     scheduled_sampling_warmup: int = 2000
+    # Historical experiments sample an independent Bernoulli decision at each depth.
+    # Revised objectives may opt into one decision reused across the whole sequence so
+    # the configured fraction of examples sees a complete self-fed chain.
+    scheduled_sampling_granularity: str = "step"  # step | sequence
+    # The historical recursive objective selects a branch by action proximity but
+    # executes the logged action. A fresh v2 objective can instead execute every
+    # branch's predicted action, select one against logged physical targets, and train
+    # explicit recursive action/horizon/endpoint terms. All defaults below leave the
+    # historical graph untouched.
+    multistep_transition_mode: str = "teacher_action"  # teacher_action | grounded_execution_v2
+    grounded_select_action_weight: float = 0.0
+    grounded_select_endpoint_weight: float = 0.0
+    grounded_select_horizon_weight: float = 0.0
+    grounded_loss_latent_weight: float = 0.0
+    grounded_loss_action_weight: float = 0.0
+    grounded_loss_horizon_weight: float = 0.0
+    grounded_loss_endpoint_weight: float = 0.0
+    grounded_detach_self_fed_parent: bool = True
     # Track H2: relative weight of each recursive depth (empty -> uniform).
     multistep_depth_weights: tuple[float, ...] = ()
     redundancy_temperature: float = 0.25

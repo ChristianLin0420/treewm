@@ -319,6 +319,7 @@ def build_datasets(
     data_manifest_sha256: str | None = None,
     task_metric_dims: tuple[int, ...] | None = None,
     recipe_anchor_policy: str = "selected_seed",
+    validation_sample_seed: int | None = None,
 ) -> tuple[Any, ChunkDataset, ChunkDataset, Normalizer]:
     """Load ``dataset_name`` and build train/val :class:`ChunkDataset` objects.
 
@@ -330,6 +331,10 @@ def build_datasets(
         raise ValueError(
             "recipe_anchor_policy must be 'selected_seed' or 'published_union'"
         )
+    # Historically validation used ``seed + 1`` everywhere while training used
+    # ``seed``. Keep that exact relationship by default, but let a fresh campaign pin
+    # the validation anchor population independently across model seeds.
+    validation_seed = seed if validation_sample_seed is None else int(validation_sample_seed)
     source_name = source_name or dataset_name
     sharded = dataset_kind == "sharded_100m_full"
     if dataset_kind not in (None, "standard", "sharded_100m_full"):
@@ -363,7 +368,7 @@ def build_datasets(
         )
         val_ds = ChunkDataset(
             {}, normalizer, future_cfg, xy_dims=xy_dims,
-            max_anchors=max_val_anchors, seed=seed + 1, shared=cache.val,
+            max_anchors=max_val_anchors, seed=validation_seed + 1, shared=cache.val,
             task_metric_dims=task_metric_dims,
         )
         train_ds.cache_metrics = cache.assert_consumed_by(train_ds, val_ds)
@@ -396,7 +401,7 @@ def build_datasets(
         )
         val_ds = ChunkDataset(
             {}, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors,
-            seed=seed + 1, shared=cache.val, task_metric_dims=task_metric_dims,
+            seed=validation_seed + 1, shared=cache.val, task_metric_dims=task_metric_dims,
         )
         # Fails loudly if the arrays were copied rather than mapped.
         train_ds.cache_metrics = cache.assert_consumed_by(train_ds, val_ds)
@@ -424,7 +429,7 @@ def build_datasets(
     )
     val_ds = ChunkDataset(
         val, normalizer, future_cfg, xy_dims=xy_dims, max_anchors=max_val_anchors,
-        seed=seed + 1, task_metric_dims=task_metric_dims,
+        seed=validation_seed + 1, task_metric_dims=task_metric_dims,
     )
     return env, train_ds, val_ds, normalizer
 

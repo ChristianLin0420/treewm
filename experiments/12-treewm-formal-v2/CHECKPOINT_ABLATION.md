@@ -47,3 +47,28 @@ sbatch --array=0-89%40 experiments/12-treewm-formal-v2/checkpoint_ablation.slurm
 Use `python scripts/checkpoint_ablation.py --dry-run` (or `--stage full --dry-run`) to
 print the exact immutable work map before submission. `--resume` only verifies and
 skips an identical result; there is no overwrite mode.
+
+## Grounded-repair diagnostic grid
+
+`--grid grounded-repair` is a separate, post-failure diagnostic for the stopped
+grounded-v1 25k checkpoints. It locks eight inference-only arms spanning the current
+recipe, KEEP thresholds 0.50/0.42, first-edge guard on/off, learned/BFS/exact-q frontier
+allocation, and one fixed-16 horizon control. The 0.42 threshold was fixed from the
+midpoint of the two puzzle settings' observed target support priors before evaluating
+any rollout outcomes. It is a diagnostic of score calibration and tree admission; the
+replacement training recipe retains the formal 0.50 decision threshold and instead
+trains KEEP with mode-balanced BCE.
+
+For five settings, four model seeds, and eight arms the exact work map contains 160
+items:
+
+```bash
+python scripts/checkpoint_ablation.py \
+  --checkpoint-glob 'outputs/treewm-grounded-formal-v1/*/treewm/*/checkpoints/latest.pt' \
+  --settings antmaze-large,scene,puzzle-3x3,puzzle-4x4-100m,cube-quadruple-100m \
+  --seeds 0,1,2,3 --grid grounded-repair --dry-run
+```
+
+As with the original study, run all work from one immutable source snapshot and use a
+separate content-addressed output root. No arm is promotable when every success count is
+zero; progress and guard telemetry are causal diagnostics only.

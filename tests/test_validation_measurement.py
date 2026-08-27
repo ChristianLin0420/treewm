@@ -10,7 +10,11 @@ from treewm.data.samplers import (
     build_fixed_validation_dataloader,
 )
 from treewm.evaluation import diagnostics
-from scripts.train import fixed_validation_rng, heldout_multistep_validation
+from scripts.train import (
+    fixed_validation_rng,
+    heldout_multistep_validation,
+    resolve_validation_sample_seed,
+)
 
 
 class _IndexDataset(Dataset):
@@ -79,8 +83,14 @@ def test_fixed_validation_rng_repeats_measurement_and_restores_training_stream()
     torch.testing.assert_close(first, second, rtol=0, atol=0)
 
 
+def test_validation_sample_seed_defaults_to_model_seed_but_can_be_shared():
+    assert resolve_validation_sample_seed({"validation_sample_seed": None}, 17) == 17
+    assert resolve_validation_sample_seed({"validation_sample_seed": 91}, 17) == 91
+    assert resolve_validation_sample_seed({"validation_sample_seed": 91}, 23) == 91
+
+
 def test_heldout_multistep_logs_teacher_and_self_fed_deterministically(monkeypatch):
-    calls: list[tuple[float, tuple[float, ...] | None]] = []
+    calls: list[tuple[float, tuple[float, ...] | None, dict[str, object]]] = []
 
     def fake_multistep(
         _model,
@@ -88,8 +98,9 @@ def test_heldout_multistep_logs_teacher_and_self_fed_deterministically(monkeypat
         *,
         scheduled_sampling_p,
         depth_weights,
+        **transition_kwargs,
     ):
-        calls.append((scheduled_sampling_p, depth_weights))
+        calls.append((scheduled_sampling_p, depth_weights, transition_kwargs))
         # Deliberately consume the private validation stream so this test covers both
         # repeatability and restoration, not merely deterministic arithmetic.
         loss = torch.rand(()) + 10.0 * float(scheduled_sampling_p)
@@ -101,14 +112,18 @@ def test_heldout_multistep_logs_teacher_and_self_fed_deterministically(monkeypat
     monkeypatch.setattr("scripts.train.multi_step_recursive_loss", fake_multistep)
     torch.manual_seed(2027)
     training_state = torch.random.get_rng_state().clone()
+    transition_kwargs = {
+        "transition_mode": "grounded_execution_v2",
+        "grounded_select_action_weight": 1.0,
+    }
     with fixed_validation_rng(11, rank=3):
         first_loss, first = heldout_multistep_validation(
-            object(), {}, (1.0, 2.0, 3.0)
+            object(), {}, (1.0, 2.0, 3.0), transition_kwargs
         )
     torch.testing.assert_close(torch.random.get_rng_state(), training_state, rtol=0, atol=0)
     with fixed_validation_rng(11, rank=3):
         second_loss, second = heldout_multistep_validation(
-            object(), {}, (1.0, 2.0, 3.0)
+            object(), {}, (1.0, 2.0, 3.0), transition_kwargs
         )
 
     torch.testing.assert_close(first_loss, second_loss, rtol=0, atol=0)
@@ -119,10 +134,10 @@ def test_heldout_multistep_logs_teacher_and_self_fed_deterministically(monkeypat
         else:
             assert first[key] == second[key]
     assert calls == [
-        (0.0, (1.0, 2.0, 3.0)),
-        (1.0, (1.0, 2.0, 3.0)),
-        (0.0, (1.0, 2.0, 3.0)),
-        (1.0, (1.0, 2.0, 3.0)),
+        (0.0, (1.0, 2.0, 3.0), transition_kwargs),
+        (1.0, (1.0, 2.0, 3.0), transition_kwargs),
+        (0.0, (1.0, 2.0, 3.0), transition_kwargs),
+        (1.0, (1.0, 2.0, 3.0), transition_kwargs),
     ]
     assert first["train/loss_multistep_teacher_forced"] is first_loss
     assert float(first["train/loss_multistep_self_fed"]) > 10.0

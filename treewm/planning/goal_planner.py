@@ -235,6 +235,13 @@ class PlanResult:
     selected_depth: int
     goal_distance: float
     tree: object = None
+    # Additive diagnostics only: these fields do not participate in selection.
+    guard_applied: bool = False
+    guard_candidate_count: int = 0
+    guard_accepted_count: int = 0
+    guard_rejected_all: bool = False
+    guard_best_predicted_improvement: float = 0.0
+    guard_selected_predicted_improvement: float = 0.0
 
 
 class GoalPlanner:
@@ -412,6 +419,11 @@ class GoalPlanner:
 
         invalid = ~tree.valid
         guard_extra_predictions = 0
+        guard_candidate_count = 0
+        guard_accepted_count = 0
+        guard_rejected_all = False
+        guard_best_predicted_improvement = 0.0
+        guard_predicted_improvement = None
         if self.cfg.require_first_edge_improvement:
             if self.cfg.score_space != "decoded" or model.decoder is None:
                 raise ValueError(
@@ -430,6 +442,20 @@ class GoalPlanner:
                 current_observation_score=current_observation_score,
                 minimum_improvement=float(self.cfg.min_first_edge_improvement),
             )
+            guard_candidates = tree.valid.clone()
+            guard_candidates[:, 0] = False
+            guard_predicted_improvement = (
+                current_observation_score.unsqueeze(1) - executable_first_edge_score
+            )
+            guard_candidate_count = int(guard_candidates[0].sum().item())
+            guard_accepted_count = int(allowed[0].sum().item())
+            guard_rejected_all = (
+                guard_candidate_count > 0 and guard_accepted_count == 0
+            )
+            if guard_candidate_count > 0:
+                guard_best_predicted_improvement = float(
+                    guard_predicted_improvement[0, guard_candidates[0]].max().item()
+                )
             invalid = invalid | ~allowed
         if self.cfg.exclude_root:
             # The root is the current state: selecting it would mean "do nothing".
@@ -444,6 +470,11 @@ class GoalPlanner:
         else:
             best = int(score.argmin(dim=1).item())
             selected_score = score[0, best]
+        guard_selected_predicted_improvement = 0.0
+        if guard_predicted_improvement is not None and best != 0:
+            guard_selected_predicted_improvement = float(
+                guard_predicted_improvement[0, best].item()
+            )
         chain = tree.path_to_root(torch.tensor([best], device=self.device))
         path = [int(c.item()) for c in chain]
         # Drop the root and any repeats introduced by padding shallower paths.
@@ -482,4 +513,12 @@ class GoalPlanner:
             selected_depth=int(tree.depth[0, best].item()),
             goal_distance=float(selected_score.item()),
             tree=tree if return_tree else None,
+            guard_applied=bool(self.cfg.require_first_edge_improvement),
+            guard_candidate_count=guard_candidate_count,
+            guard_accepted_count=guard_accepted_count,
+            guard_rejected_all=guard_rejected_all,
+            guard_best_predicted_improvement=guard_best_predicted_improvement,
+            guard_selected_predicted_improvement=(
+                guard_selected_predicted_improvement
+            ),
         )

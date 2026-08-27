@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import random
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from scripts.train import (
     objective_finite,
     preserve_global_rng_state,
     required_formal_provenance_hashes,
+    validate_multistep_transition_configuration,
 )
 from treewm.losses.controllability_losses import future_set_distance_loss
 from treewm.losses.expansion_losses import (
@@ -611,6 +613,52 @@ def test_formal_v2_active_step_reaches_every_trainable_parameter():
         train_cfg=formal_train_cfg,
     )
     assert all(contract.values()), contract
+    sequence_contract = formal_v2_objective_contract(
+        model,
+        loss_cfg,
+        MatchingConfig(normalization_version="rms_v2", num_horizons=5),
+        SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
+        tree_cfg,
+        separate_gain_clip=True,
+        required_scheduled_sampling_granularity="sequence",
+        train_cfg=formal_train_cfg,
+    )
+    assert not sequence_contract["scheduled_sampling_granularity"]
+    transition_contract = formal_v2_objective_contract(
+        model,
+        loss_cfg,
+        MatchingConfig(normalization_version="rms_v2", num_horizons=5),
+        SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
+        tree_cfg,
+        separate_gain_clip=True,
+        required_multistep_transition_mode="grounded_execution_v2",
+        train_cfg=formal_train_cfg,
+    )
+    assert not transition_contract["multistep_transition_mode"]
+    loss_cfg.multistep_transition_mode = "grounded_execution_v2"
+    assert formal_v2_objective_contract(
+        model,
+        loss_cfg,
+        MatchingConfig(normalization_version="rms_v2", num_horizons=5),
+        SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
+        tree_cfg,
+        separate_gain_clip=True,
+        required_multistep_transition_mode="grounded_execution_v2",
+        train_cfg=formal_train_cfg,
+    )["multistep_transition_mode"]
+    loss_cfg.multistep_transition_mode = "teacher_action"
+    loss_cfg.scheduled_sampling_granularity = "sequence"
+    assert formal_v2_objective_contract(
+        model,
+        loss_cfg,
+        MatchingConfig(normalization_version="rms_v2", num_horizons=5),
+        SimpleNamespace(metric_mode="rms_v2", num_horizons=5),
+        tree_cfg,
+        separate_gain_clip=True,
+        required_scheduled_sampling_granularity="sequence",
+        train_cfg=formal_train_cfg,
+    )["scheduled_sampling_granularity"]
+    loss_cfg.scheduled_sampling_granularity = "step"
     loss_cfg.future_scale = 0.5
     assert not formal_v2_objective_contract(
         model,
@@ -765,3 +813,55 @@ def test_formal_v2_requires_explicit_calibration_hash():
     )
     assert "TREEWM_CALIBRATION_SHA256" not in legacy
     assert "TREEWM_FUTURE_RECIPE_SHA256" not in legacy
+
+
+def test_grounded_transition_preflight_is_v2_only_and_fail_closed():
+    enabled = dict(LossConfig().enabled)
+    enabled["multistep"] = True
+    loss_cfg = LossConfig(
+        weights=LossWeights(multistep=1.0),
+        enabled=enabled,
+        multistep_transition_mode="grounded_execution_v2",
+        grounded_select_action_weight=1.0,
+        grounded_loss_action_weight=1.0,
+    )
+    model = build_model(
+        "treewm",
+        TreeWMConfig(
+            obs_dim=2,
+            action_dim=1,
+            z_dim=8,
+            q_dim=4,
+            hidden_dim=16,
+            encoder_hidden=16,
+            num_layers=1,
+            num_heads=4,
+            branch_factor=2,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="restricted to TreeWM-v2"):
+        validate_multistep_transition_configuration("treewm_v1", loss_cfg, model)
+    validate_multistep_transition_configuration(
+        "treewm_v2_grounded_repair_pilot_v1", loss_cfg, model
+    )
+
+    loss_cfg.grounded_loss_action_weight = -1.0
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        validate_multistep_transition_configuration(
+            "treewm_v2_grounded_repair_pilot_v1", loss_cfg, model
+        )
+    loss_cfg.grounded_loss_action_weight = 1.0
+
+    loss_cfg.grounded_select_endpoint_weight = 1.0
+    no_decoder = build_model("treewm", replace(model.cfg, reconstruction=False))
+    with pytest.raises(ValueError, match="model.decoder"):
+        validate_multistep_transition_configuration(
+            "treewm_v2_grounded_repair_pilot_v1", loss_cfg, no_decoder
+        )
+
+    loss_cfg.multistep_transition_mode = "unknown"
+    with pytest.raises(ValueError, match="unsupported multistep_transition_mode"):
+        validate_multistep_transition_configuration(
+            "treewm_v2_grounded_repair_pilot_v1", loss_cfg, model
+        )

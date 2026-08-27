@@ -54,6 +54,9 @@ train:
   # Formal campaigns may checkpoint more often than their fixed held-out evaluation.
   val_every: null
   val_batches: 20
+  # Null preserves the historical seed coupling. Fresh campaigns can pin one held-out
+  # anchor sample and validation RNG stream across all independently seeded models.
+  validation_sample_seed: null
   # Historical/v1 cadence. Corrected v2 recipes explicitly override this to every step.
   gain_loss_every: 4
   gain_batch_size: 64
@@ -141,6 +144,20 @@ losses:
   # Track A2 -- scheduled sampling on the multi-step recursive rollout.
   scheduled_sampling_p: 0.0
   scheduled_sampling_warmup: 2000
+  # step preserves all historical objectives; revised recipes may select sequence.
+  scheduled_sampling_granularity: step  # step | sequence
+  # Historical recursive training executes the logged action. Fresh v2 objectives may
+  # opt into all-branch predicted-action execution with independently weighted physical
+  # selection and supervision. Zeroed defaults do not alter any existing campaign.
+  multistep_transition_mode: teacher_action  # teacher_action | grounded_execution_v2
+  grounded_select_action_weight: 0.0
+  grounded_select_endpoint_weight: 0.0
+  grounded_select_horizon_weight: 0.0
+  grounded_loss_latent_weight: 0.0
+  grounded_loss_action_weight: 0.0
+  grounded_loss_horizon_weight: 0.0
+  grounded_loss_endpoint_weight: 0.0
+  grounded_detach_self_fed_parent: true
   # Track H2 -- per-depth weights for the multi-step loss ([] -> uniform).
   multistep_depth_weights: []
   redundancy_temperature: 0.25
