@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
   "classification": "bounded_prospective_matched_causal_repair_pilot",
   "status": "sealed_launch_ready_unsubmitted",
   "formal_validation": false,
@@ -171,6 +171,134 @@
     "resume_allowed": false,
     "retry_allowed": false,
     "recovery_allowed": false
+  }, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4",
+    "submission_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4/state/submission",
+    "snapshot_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4/state/submission/source-snapshot/repo",
+    "transaction_lock": "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch4",
+    "status": "aborted_after_scheduler_submission_before_any_job_runtime",
+    "failure_phase": "canonical_array_dependency_validation_after_report_submission",
+    "canonical_array_dependency_validator_error": "SubmissionError('accepted report dependency differs')",
+    "source_commit": "62fbf4631e950187506293138f13be691df1fa37",
+    "source_commit_claimed_by_contract": true,
+    "source_commit_claimed_by_journal": false,
+    "source_commit_evidence": "contract_clean_head_origin_and_independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": "The sealed contract records clean HEAD and origin/main at commit 62fbf4631e950187506293138f13be691df1fa37, and all 137 snapshot files were independently byte-matched to that commit. Durable contract and journal bytes prove both scheduler IDs were accepted, the exact submit arguments, the canonical dependency validator exception, cancellation, and the absence of a receipt. The canonical report dependency afterok:33211846_*(unfulfilled) and KillOInInvalidDependent=Yes were observed live immediately after the abort and before slurmctld purged the records; that unsealed observation is corroborative and is not claimed as preserved journal stdout. Current exact-ID squeue absence from the active queue establishes present absence; current sacct rows corroborate zero-runtime cancellation. Neither is used alone as historical proof.",
+    "package_protocol_sha256": "a838d23a396439dac585a1d4fe72f89b385df1e432f5795d85c5d7a2d818c02b",
+    "manifest_canonical_sha256": "7e1130dcc0f781c21e74a323880699e23ae6778d1752c64fe38cdb31a64aa7f8",
+    "manifest_raw_sha256": "72342c585b3988df3d410131d33705e06b1eaf99494f027dea3830adb7326534",
+    "snapshot": {
+      "inventory_sha256": "1a4e42ee751964ab704d2fae6f736862d46174d3eafd1ffe42b4f4f018cf1cbb",
+      "file_count": 137,
+      "independently_matched_files": 137,
+      "all_files_match": true
+    },
+    "preserved_tree": {
+      "regular_file_count": 164,
+      "symlink_count": 0,
+      "snapshot_file_count": 137,
+      "launch_file_count": 20,
+      "contract_file_count": 1,
+      "journal_file_count": 6,
+      "log_file_count": 0,
+      "aggregate_schema_version": 1,
+      "aggregate_algorithm": "sha256(json.dumps({schema_version:1,files:{relative_posix_path:raw_file_sha256}},sort_keys=True,separators=(',',':')).encode('utf-8'))",
+      "aggregate_sha256": "d67768c00795e209a0b1998058cd475360b98cd3aab331b416d1b6934142adb5"
+    },
+    "claim_token": "4c61d6fffc30ed2861ba6d3aaefb94ab6535616c9a6ce63bf9a097d4aa6162a9",
+    "transaction_lock_state": {
+      "regular_file": true,
+      "symlink": false,
+      "mode": "0600",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "contract_sha256": "0aa63e5787fbdb06331265f03dd5e1aa32c32c32bb9b74728cd3060be7200336",
+    "submission_sha256": "0aa63e5787fbdb06331265f03dd5e1aa32c32c32bb9b74728cd3060be7200336",
+    "journal_sha256": {
+      "0000_CLAIMED.json": "ce5361cf48b00b61e3ae7d12d1e06fb50a2429ecafad3f9453f7c38e1b1c594c",
+      "0001_SNAPSHOT_SEALED.json": "a150558bbe7ff1c39caff10f8a48329f42142230bb6f1e1862721111b3505efa",
+      "0002_CONTRACT_SEALED.json": "6b6b375e539bf64ceb3bccf2e3f4533b1913ed455a20b0db2ddfd36ee9727c3b",
+      "0003_TRAIN_SUBMITTED.json": "196ad9be4302d6d1262914a8d42aaa0201d0b3c8f3a1d1496c1db5614fe6c271",
+      "9999_ABORTED.json": "d73201fb9c7a6f89afacdf057613016a85c303ffd5ec2320972a6813ca524701",
+      "9998_OUTER_ABORTED.json": "458285c797d33534deb5250cc4766a5a4f383afc3f195165cca46d8648d265d9"
+    },
+    "durable_failure_evidence": {
+      "journal_error": "SubmissionError('accepted report dependency differs')",
+      "outer_journal_error": "SchedulerSubmissionError(\"submission transaction aborted: SubmissionError('accepted report dependency differs')\")",
+      "report_submit_dependency_argument": "--dependency=afterok:33211846",
+      "report_submit_kill_argument": "--kill-on-invalid-dep=yes",
+      "scontrol_command_preserved": true,
+      "scontrol_stdout_preserved": false
+    },
+    "unsealed_time_bounded_live_observation": {
+      "provenance": "independent_operator_observation_immediately_after_abort_before_slurmctld_purge",
+      "preserved_in_launch4_bytes": false,
+      "canonical_report_dependency": "afterok:33211846_*(unfulfilled)",
+      "kill_on_invalid_dependent": "Yes"
+    },
+    "scheduler_history": {
+      "environment": {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"},
+      "history_start_utc": "2026-08-01",
+      "observation_date_utc": "2026-08-28",
+      "squeue_command": ["/usr/local/bin/squeue", "-h", "-j", "33211846,33211848", "-o", "%A|%a|%j|%u|%T|%k|%R"],
+      "squeue_matching_rows": 0,
+      "sacct_command": ["/usr/local/bin/sacct", "-X", "-n", "-P", "-S", "2026-08-01", "-j", "33211846,33211848", "-o", "JobIDRaw,JobName%100,State,ElapsedRaw,AllocNodes,NodeList%100,Submit,Start,End,ExitCode,DerivedExitCode,Reason%100"],
+      "sacct_rows": [{
+        "job_id": "33211848",
+        "job_name": "exp23-launch4-0aa63e5787fbdb06-report",
+        "state": "CANCELLED",
+        "raw_state": "CANCELLED by 147230",
+        "elapsed_raw": 0,
+        "allocated_nodes": 0,
+        "node_list": "None assigned",
+        "submitted_at": "2026-08-28T02:14:39",
+        "started_at": "2026-08-28T02:14:40",
+        "ended_at": "2026-08-28T02:14:40",
+        "exit_code": "0:0",
+        "derived_exit_code": "0:0",
+        "reason": "None"
+      }, {
+        "job_id": "33211846",
+        "job_name": "exp23-launch4-0aa63e5787fbdb06-train",
+        "state": "CANCELLED",
+        "raw_state": "CANCELLED by 147230",
+        "elapsed_raw": 0,
+        "allocated_nodes": 0,
+        "node_list": "None assigned",
+        "submitted_at": "2026-08-28T02:14:39",
+        "started_at": "2026-08-28T02:14:40",
+        "ended_at": "2026-08-28T02:14:40",
+        "exit_code": "0:0",
+        "derived_exit_code": "0:0",
+        "reason": "None"
+      }],
+      "top_level_row_count": 2,
+      "array_task_row_count": 0
+    },
+    "actual_sbatch_calls": 2,
+    "known_job_ids": ["33211846", "33211848"],
+    "job_ids_by_role": {"train": ["33211846"], "report": ["33211848"]},
+    "submission_contract_committed": true,
+    "submission_receipt_committed": false,
+    "train_submission_journal_committed": true,
+    "report_submission_journal_committed": false,
+    "ready_marker_committed": false,
+    "report_journal_committed": false,
+    "jobs_cancelled_before_runtime": true,
+    "scientific_run_started": false,
+    "checkpoint_created": false,
+    "wandb_run_created": false,
+    "optimizer_updates": 0,
+    "results_consumed": false,
+    "checkpoints_consumed": false,
+    "reuse_allowed": false,
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false
   }],
   "method": {
     "arm": "treewm",
@@ -188,7 +316,7 @@
     "seeds": [110, 111],
     "expected_cells": 20,
     "index_mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
-    "fresh_start_policy": "Every launch4 cell starts from scratch in the fresh launch4 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from any superseded abort may be imported, reused, or resumed.",
+    "fresh_start_policy": "Every launch5 cell starts from scratch in the fresh launch5 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from any superseded abort may be imported, reused, or resumed.",
     "common_random_numbers": "Within each setting and seed, GS and GSEP use identical initialization seed, published-union data identity/order, validation sample seed, evaluation seed bank, and evaluation profile.",
     "midpoint_policy": "No selection, promotion, dropping, early-stopping, or arm-dependent decision occurs at 5k or 12.5k; all cells continue to 25k.",
     "analysis_boundaries": [5000, 25000],
@@ -241,7 +369,7 @@
   "resolved_config_contract": {
     "lock": "resolved_config.lock.json",
     "audit_source": "resolved_config_audit.py",
-    "artifact_sha256": "f13cfad8e5edf0e5821fe4d6b76c662ee3dc6ee450d778dbd24af1cf8273059e",
+    "artifact_sha256": "e1b7152db52662573f41008356a8b58c24dcd8defee43fccbca674a55e257416",
     "source_sha256": "8d13ebc60f3ba574b8a5a800da915864b36f540f35a22aafeba89be6a92f4150",
     "direct_entrypoint": "scripts/train.py",
     "cell_count": 20,
@@ -250,11 +378,11 @@
   "causal_parity_contract": {
     "lock": "causal_parity.lock.json",
     "audit_source": "causal_parity_audit.py",
-    "artifact_sha256": "d50fb113304989503605717e0d1e6e25e1bd95a76e94bef9862906c79475b03c",
+    "artifact_sha256": "d916da583596b55fd687b3dab44e9bb4e5c041e62703dd259fbd80a677d19bb2",
     "source_sha256": "7ed6e6f7f9f68480b42e17f6af7b276c7f4151703e2689971438b011b74ace40",
-    "audit_manifest_input_sha256": "fec119e5662222399533eee8821cf07997ca9d0267625245ac38b133289b4a54",
+    "audit_manifest_input_sha256": "2b04a9e72a091fbe2c71fb74e61a07c722da675a3712ebec1127226349754986",
     "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
-    "stdout_sha256": "cb52751dd34dcc633b62a4452d240bb636a989a52e0dcef4a78ee2df5ade712a",
+    "stdout_sha256": "734d08ff32be847662c06e5cbc2c00838d19d148cb688d9ce9a79c821adc2a8b",
     "stdout_bytes": 91081,
     "clean_and_adversarial_thread_replays_byte_identical": true,
     "outcome_blind": true,
@@ -435,14 +563,14 @@
     "actual_submit_performed": false
   },
   "paths": {
-    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch4",
-    "transaction_lock": "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock",
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch4",
+    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch5",
+    "transaction_lock": "outputs/.exp23-9066d1c600046ae2.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch5",
     "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
   },
   "compatible_v2_recipe_input": {
     "campaign_id": "treewm-50task-1m-v2",
@@ -482,8 +610,8 @@
     "scontrol": "/usr/local/bin/scontrol"
   },
   "logging": {
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch4",
-    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch4",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch5",
+    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch5",
     "wandb_mode": "online"
   },
   "settings": [

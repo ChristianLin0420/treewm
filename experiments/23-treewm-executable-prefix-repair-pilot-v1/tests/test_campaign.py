@@ -39,10 +39,10 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch4-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch5-") for cell in cells)
 
 
-def test_launch4_namespace_and_ordered_superseded_aborts_are_exact():
+def test_launch5_namespace_and_ordered_superseded_aborts_are_exact():
     manifest, lock = contracts()
     superseded = manifest["superseded_launches"]
     assert superseded == campaign.SUPERSEDED_LAUNCHES
@@ -50,8 +50,9 @@ def test_launch4_namespace_and_ordered_superseded_aborts_are_exact():
         "treewm-executable-prefix-repair-pilot-v1",
         "treewm-executable-prefix-repair-pilot-v1-launch2",
         "treewm-executable-prefix-repair-pilot-v1-launch3",
+        "treewm-executable-prefix-repair-pilot-v1-launch4",
     ]
-    launch1, launch2, launch3 = superseded
+    launch1, launch2, launch3, launch4 = superseded
     assert launch1["source_commit_claimed_by_journal"] is False
     assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
@@ -145,6 +146,104 @@ def test_launch4_namespace_and_ordered_superseded_aborts_are_exact():
     assert observation["history_start_utc"] == "2026-08-01"
     assert observation["squeue_matching_rows"] == 0
     assert observation["sacct_matching_rows"] == 0
+    assert launch4["status"] == "aborted_after_scheduler_submission_before_any_job_runtime"
+    assert launch4["failure_phase"] == (
+        "canonical_array_dependency_validation_after_report_submission"
+    )
+    assert launch4["canonical_array_dependency_validator_error"] == (
+        "SubmissionError('accepted report dependency differs')"
+    )
+    assert launch4["source_commit"] == "62fbf4631e950187506293138f13be691df1fa37"
+    assert launch4["source_commit_claimed_by_contract"] is True
+    assert launch4["source_commit_claimed_by_journal"] is False
+    assert launch4["package_protocol_sha256"] == (
+        "a838d23a396439dac585a1d4fe72f89b385df1e432f5795d85c5d7a2d818c02b"
+    )
+    assert launch4["manifest_raw_sha256"] == (
+        "72342c585b3988df3d410131d33705e06b1eaf99494f027dea3830adb7326534"
+    )
+    assert launch4["manifest_canonical_sha256"] == (
+        "7e1130dcc0f781c21e74a323880699e23ae6778d1752c64fe38cdb31a64aa7f8"
+    )
+    assert launch4["snapshot"] == {
+        "inventory_sha256": "1a4e42ee751964ab704d2fae6f736862d46174d3eafd1ffe42b4f4f018cf1cbb",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    }
+    assert launch4["preserved_tree"] == {
+        "regular_file_count": 164,
+        "symlink_count": 0,
+        "snapshot_file_count": 137,
+        "launch_file_count": 20,
+        "contract_file_count": 1,
+        "journal_file_count": 6,
+        "log_file_count": 0,
+        "aggregate_schema_version": 1,
+        "aggregate_algorithm": (
+            "sha256(json.dumps({schema_version:1,files:{relative_posix_path:"
+            "raw_file_sha256}},sort_keys=True,separators=(',',':')).encode('utf-8'))"
+        ),
+        "aggregate_sha256": "d67768c00795e209a0b1998058cd475360b98cd3aab331b416d1b6934142adb5",
+    }
+    assert launch4["claim_token"] == (
+        "4c61d6fffc30ed2861ba6d3aaefb94ab6535616c9a6ce63bf9a097d4aa6162a9"
+    )
+    assert launch4["transaction_lock_state"] == {
+        "regular_file": True,
+        "symlink": False,
+        "mode": "0600",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }
+    assert launch4["contract_sha256"] == launch4["submission_sha256"] == (
+        "0aa63e5787fbdb06331265f03dd5e1aa32c32c32bb9b74728cd3060be7200336"
+    )
+    assert launch4["journal_sha256"] == {
+        "0000_CLAIMED.json": "ce5361cf48b00b61e3ae7d12d1e06fb50a2429ecafad3f9453f7c38e1b1c594c",
+        "0001_SNAPSHOT_SEALED.json": "a150558bbe7ff1c39caff10f8a48329f42142230bb6f1e1862721111b3505efa",
+        "0002_CONTRACT_SEALED.json": "6b6b375e539bf64ceb3bccf2e3f4533b1913ed455a20b0db2ddfd36ee9727c3b",
+        "0003_TRAIN_SUBMITTED.json": "196ad9be4302d6d1262914a8d42aaa0201d0b3c8f3a1d1496c1db5614fe6c271",
+        "9999_ABORTED.json": "d73201fb9c7a6f89afacdf057613016a85c303ffd5ec2320972a6813ca524701",
+        "9998_OUTER_ABORTED.json": "458285c797d33534deb5250cc4766a5a4f383afc3f195165cca46d8648d265d9",
+    }
+    assert launch4["actual_sbatch_calls"] == 2
+    assert launch4["known_job_ids"] == ["33211846", "33211848"]
+    assert launch4["job_ids_by_role"] == {
+        "train": ["33211846"],
+        "report": ["33211848"],
+    }
+    assert launch4["submission_contract_committed"] is True
+    assert launch4["submission_receipt_committed"] is False
+    assert launch4["jobs_cancelled_before_runtime"] is True
+    durable = launch4["durable_failure_evidence"]
+    assert durable["scontrol_command_preserved"] is True
+    assert durable["scontrol_stdout_preserved"] is False
+    live = launch4["unsealed_time_bounded_live_observation"]
+    assert live == {
+        "provenance": (
+            "independent_operator_observation_immediately_after_abort_before_slurmctld_purge"
+        ),
+        "preserved_in_launch4_bytes": False,
+        "canonical_report_dependency": "afterok:33211846_*(unfulfilled)",
+        "kill_on_invalid_dependent": "Yes",
+    }
+    history = launch4["scheduler_history"]
+    assert history["squeue_matching_rows"] == 0
+    assert history["sacct_command"][4:6] == ["-S", "2026-08-01"]
+    assert history["top_level_row_count"] == 2
+    assert history["array_task_row_count"] == 0
+    assert [row["job_id"] for row in history["sacct_rows"]] == ["33211848", "33211846"]
+    assert all(
+        row["state"] == "CANCELLED"
+        and row["elapsed_raw"] == 0
+        and row["allocated_nodes"] == 0
+        and row["node_list"] == "None assigned"
+        and row["exit_code"] == "0:0"
+        and row["derived_exit_code"] == "0:0"
+        and row["reason"] == "None"
+        for row in history["sacct_rows"]
+    )
     for row in superseded[:2]:
         assert row["submission_sha256"] is None
         assert row["known_job_ids"] == []
@@ -165,14 +264,14 @@ def test_launch4_namespace_and_ordered_superseded_aborts_are_exact():
         assert row["optimizer_updates"] == 0
     assert launch2["submission_contract_committed"] is False
     assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
     )
     assert manifest["paths"]["transaction_lock"] == (
-        "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock"
+        "outputs/.exp23-9066d1c600046ae2.transaction.lock"
     )
     assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
-    assert manifest["logging"]["wandb_project"].endswith("-launch4")
-    assert manifest["logging"]["wandb_group"].endswith("-launch4")
+    assert manifest["logging"]["wandb_project"].endswith("-launch5")
+    assert manifest["logging"]["wandb_group"].endswith("-launch5")
 
     tampered = copy.deepcopy(manifest)
     tampered["paths"]["run_root"] = launch2["run_root"]
@@ -282,6 +381,20 @@ def test_prefix_target_lock_proves_exact_logged_horizon_set():
         histogram = row["logged_selected_horizon_histogram"]
         assert set(histogram) == {"4", "8", "16", "32", "64"}
         assert sum(histogram.values()) == row["matched_branch_count"]
+
+
+def test_generated_config_and_causal_locks_are_exact_prefix_stripped_payloads():
+    for name in ("resolved_config.lock.json", "causal_parity.lock.json"):
+        path = PACKAGE / name
+        raw = path.read_bytes()
+        value = campaign.read_json(path)
+        # Both auditors print PREFIX + canonical_json(result) + newline.  The lock
+        # must be the exact suffix, not a jq/pretty-print round trip that can coerce
+        # JSON floats such as 1.0 into integers while leaving Python equality true.
+        assert raw == (campaign.canonical_json(value) + "\n").encode("ascii")
+        body = dict(value)
+        claimed = body.pop("artifact_sha256")
+        assert claimed == campaign.stable_hash(body)
 
 
 def test_protocol_inventory_is_closed_and_deterministic():

@@ -205,13 +205,13 @@ def interpreter_identity(submit):
     }
 
 
-def test_launch4_transaction_lock_path_is_exact(submit):
+def test_launch5_transaction_lock_path_is_exact(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     run_root = Path(manifest["paths"]["run_root"])
     submission_root = run_root / "state" / "submission"
     expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
     assert submit._transaction_lock_path(submission_root) == expected
-    assert expected.name == ".exp23-d3765ecc9f5b5f7a.transaction.lock"
+    assert expected.name == ".exp23-9066d1c600046ae2.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -2621,7 +2621,8 @@ def test_accepted_report_dependency_is_verified_before_ready(
             0,
             stdout=(
                 "JobId=7001 JobName=exact-report JobState=PENDING "
-                "Dependency=afterok:7000(unfulfilled) "
+                "Dependency=afterok:7000_*(unfulfilled) "
+                "KillOInInvalidDependent=Yes "
                 f"Comment=treewm-exp23:{'c' * 64}\n"
             ),
             stderr="",
@@ -2639,11 +2640,96 @@ def test_accepted_report_dependency_is_verified_before_ready(
         expected_observation=stable,
         observations=observations,
     )
-    assert evidence["dependency"] == "afterok:7000(unfulfilled)"
+    assert evidence["dependency"] == "afterok:7000_*(unfulfilled)"
+    assert evidence["kill_on_invalid_dependency"] == "Yes"
     assert len(observations) == 1
     with pytest.raises(submit.SubmissionError, match="Dependency"):
         submit._scontrol_oneliner_field(
             "Dependency=afterok:7000 Dependency=afterany:7000\n", "Dependency"
+        )
+
+
+@pytest.mark.parametrize(
+    "dependency_fields,kill_fields,error",
+    [
+        (["afterok:7000(unfulfilled)"], ["Yes"], "dependency differs"),
+        (["afterok:7000_0(unfulfilled)"], ["Yes"], "dependency differs"),
+        (["afterok:7001_*(unfulfilled)"], ["Yes"], "dependency differs"),
+        (["afterok:7000_[0-19](unfulfilled)"], ["Yes"], "dependency differs"),
+        (["afterok:7000_*"], ["Yes"], "dependency differs"),
+        (["afterok:7000_*(fulfilled)"], ["Yes"], "dependency differs"),
+        (
+            ["afterok:7000_*(unfulfilled),afterany:7000_*(unfulfilled)"],
+            ["Yes"],
+            "dependency differs",
+        ),
+        ([], ["Yes"], "Dependency"),
+        (
+            ["afterok:7000_*(unfulfilled)", "afterok:7000_*(unfulfilled)"],
+            ["Yes"],
+            "Dependency",
+        ),
+        (["afterok:7000_*(unfulfilled)"], ["No"], "invalid-dependency policy"),
+        (["afterok:7000_*(unfulfilled)"], [], "KillOInInvalidDependent"),
+        (
+            ["afterok:7000_*(unfulfilled)"],
+            ["Yes", "Yes"],
+            "KillOInInvalidDependent",
+        ),
+    ],
+    ids=[
+        "scalar",
+        "single-array-task",
+        "wrong-parent",
+        "wrong-array-suffix",
+        "missing-state",
+        "fulfilled-state",
+        "multiple-dependencies",
+        "missing-dependency",
+        "duplicate-dependency",
+        "kill-disabled",
+        "kill-missing",
+        "kill-duplicate",
+    ],
+)
+def test_accepted_report_dependency_rejects_noncanonical_scheduler_records(
+    submit,
+    tmp_path,
+    monkeypatch,
+    dependency_fields,
+    kill_fields,
+    error,
+):
+    stable = scheduler_observation(submit)
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: stable
+    )
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        fields = [
+            "JobId=7001",
+            "JobName=exact-report",
+            "JobState=PENDING",
+            *(f"Dependency={value}" for value in dependency_fields),
+            *(f"KillOInInvalidDependent={value}" for value in kill_fields),
+            f"Comment=treewm-exp23:{'c' * 64}",
+        ]
+        return subprocess.CompletedProcess(
+            list(command), 0, stdout=" ".join(fields) + "\n", stderr=""
+        )
+
+    with pytest.raises(submit.SubmissionError, match=error):
+        submit._accepted_report_dependency_evidence(
+            scontrol="scontrol",
+            report_id="7001",
+            train_id="7000",
+            report_name="exact-report",
+            comment="treewm-exp23:" + "c" * 64,
+            cwd=tmp_path,
+            runner=runner,
+            control_plane=scheduler_contract(),
+            expected_observation=stable,
+            observations=[],
         )
 
 
@@ -3199,7 +3285,7 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3257,7 +3343,7 @@ def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3308,7 +3394,7 @@ def test_explicit_cancel_retries_exact_ids_when_canonical_failure_closes_on_drif
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
         "submission_sha256": "d" * 64,
         "train_array_job_id": "200",
         "report_job_id": "201",

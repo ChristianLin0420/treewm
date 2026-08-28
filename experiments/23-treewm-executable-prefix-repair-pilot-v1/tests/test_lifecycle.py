@@ -146,8 +146,8 @@ def _scheduler_preclaim() -> dict:
         ],
         "zero_job_proof": {
             "job_names": {
-                "train": "exp23-launch4-scheduler-test-train",
-                "report": "exp23-launch4-scheduler-test-report",
+                "train": "exp23-launch5-scheduler-test-train",
+                "report": "exp23-launch5-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,

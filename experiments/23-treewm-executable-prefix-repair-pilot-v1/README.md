@@ -1,16 +1,16 @@
-# Exp23 executable-prefix repair pilot v1 launch4
+# Exp23 executable-prefix repair pilot v1 launch5
 
-This is the sealed, launch-capable but unsubmitted launch4 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch5 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch4`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch4` namespace,
-`outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock`, and `exp23-launch4-*` run names.
-No launch4 submission, persistent submission snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch5`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch5` namespace,
+`outputs/.exp23-9066d1c600046ae2.transaction.lock`, and `exp23-launch5-*` run names.
+No launch5 submission, persistent submission snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
 verifying this package; the required private snapshot-test copy was removed on success.
 
-Launch1, launch2, and launch3 are permanently ordered negative provenance. Each
+Launch1, launch2, launch3, and launch4 are permanently ordered negative provenance. Each
 preserved read-only source snapshot was independently byte-matched 137/137 to its
 recorded commit. Launch1 aborted before the submission contract because its isolated
 audit inputs were unavailable. Launch2 also aborted before the contract: its causal
@@ -27,10 +27,30 @@ Both abort journals record empty train/report job-ID sets, no receipt exists, th
 committed source order places both absence checks before the first submission call,
 and independent exact-name `squeue` plus `sacct` observations found no matching jobs.
 Launch3 produced no scheduler job, run, checkpoint, W&B run, scientific result, or
-optimizer update. Exact protocols, manifests, inventories, claims, contracts,
-fingerprints, no-job evidence, and journals for all three attempts are sealed in order
+optimizer update.
+
+Launch4 sealed contract
+`0aa63e5787fbdb06331265f03dd5e1aa32c32c32bb9b74728cd3060be7200336`
+and the scheduler accepted train ID `33211846` and report ID `33211848`, but the
+post-submit canonical array-dependency validator rejected the report dependency. The
+fail-closed abort cancelled both allocations before runtime: current `sacct` history
+records both `CANCELLED`, elapsed zero, zero allocated nodes, and no array-task rows;
+exact-ID `squeue` has no active rows. No receipt, READY marker, report-submitted journal,
+log, task directory, checkpoint, W&B run, scientific result, or optimizer update exists.
+The preserved launch4 root contains exactly 164 regular nonsymlink files: 137 snapshot
+files, 20 launch records, one contract, and six journals. Its canonical path/content
+inventory hash is
+`d67768c00795e209a0b1998058cd475360b98cd3aab331b416d1b6934142adb5`.
+The exception and scheduler submit/cancel commands are durable journal evidence. The
+canonical `afterok:33211846_*(unfulfilled)` dependency and
+`KillOInInvalidDependent=Yes` were instead an independent, unsealed live observation
+immediately after abort and before slurmctld purged the records; the package does not
+claim that value was preserved in journal stdout.
+
+Exact protocols, manifests, inventories, claims, contracts,
+fingerprints, scheduler evidence, and journals for all four attempts are sealed in order
 in `manifest.superseded_launches`; no superseded namespace, identity, snapshot, or
-state may be reused or resumed by launch4. Launch1–3 must never be retried, recovered
+state may be reused or resumed by launch5. Launch1–4 must never be retried, recovered
 into submission, or used as a recovery source.
 
 ## Scientific design
@@ -113,7 +133,7 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-Any launch4 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch5 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` is included as an exact supplemental import
 file with the empty-file SHA-256 recorded in `campaign.SNAPSHOT_IMPORT_FILES`.

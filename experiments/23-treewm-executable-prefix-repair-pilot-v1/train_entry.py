@@ -517,7 +517,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch4", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch5", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(
@@ -530,7 +530,7 @@ def bootstrap_submission(
         and scheduler_preclaim.get("schema_version") == 1
         and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
         and scheduler_preclaim.get("campaign_id")
-        == "treewm-executable-prefix-repair-pilot-v1-launch4"
+        == "treewm-executable-prefix-repair-pilot-v1-launch5"
         and scheduler_preclaim.get("scheduler_calls") == 7
         and scheduler_preclaim.get("scheduler_mutation_calls") == 0
         and scheduler_preclaim.get("persistent_writes_performed") == 0,
@@ -544,8 +544,8 @@ def bootstrap_submission(
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch4-scheduler-test-train",
-                "report": "exp23-launch4-scheduler-test-report",
+                "train": "exp23-launch5-scheduler-test-train",
+                "report": "exp23-launch5-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
