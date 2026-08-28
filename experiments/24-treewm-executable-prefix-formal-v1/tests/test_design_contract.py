@@ -103,37 +103,139 @@ def test_heldout_matrix_and_primary_inference_are_exact() -> None:
     }
 
 
-def test_launch7_dependency_and_all_ten_gap_are_explicit() -> None:
+def test_launch7_negative_and_future_launch8_dependencies_are_explicit() -> None:
     manifest = campaign.load_manifest()
     dependency = manifest["launch_dependency"]
+    negative = manifest["launch7_negative_dependency"]
+    assert negative["binding_state"] == "sealed_authenticated_terminal_negative_no_reuse"
+    assert negative["negative_binding_sha256"] == (
+        "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd"
+    )
+    assert negative["accepted"] is negative["reusable"] is False
+    assert dependency["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch8"
     assert dependency["required_status"] == "accepted_engineering_pilot"
+    assert dependency["launch7_positive_authority_forbidden"] is True
     assert set(dependency["pilot_covered_settings"]) == campaign.PILOT_COVERED_SETTINGS
     assert set(dependency["additional_formal_settings_requiring_outcome_blind_audits"]) == campaign.ADDITIONAL_FORMAL_SETTINGS
     assert campaign.ADDITIONAL_FORMAL_SETTINGS == {
         "cube-double", "cube-triple", "antmaze-giant", "humanoidmaze-medium", "humanoidmaze-large"
     }
-    status = campaign.upstream_binding_status(manifest)
+    status = campaign.prerequisite_binding_status(manifest)
     assert status["accepted"] is False
-    assert status["status"] == "awaiting_launch7_accepted_engineering_pilot"
-    with pytest.raises(campaign.ContractError, match="blocked until Launch7"):
+    assert status["status"] == "launch7_negative_authenticated_launch8_positive_unbound"
+    with pytest.raises(campaign.ContractError, match="Launch8 semantic adapter"):
         campaign.assert_launch_authorized(manifest)
 
 
-def test_scientific_protocol_remains_unsealed_and_accepted_looking_binding_is_inert(tmp_path: Path) -> None:
+def test_scientific_protocol_remains_unsealed_and_positive_placeholder_is_exact(tmp_path: Path) -> None:
     manifest = campaign.load_manifest()
     assert manifest["scientific_protocol_sealed"] is False
     assert manifest["per_setting_contract_state"] == "unbound_pending_all_ten_audits"
     assert all(row["formal_contract_sha256"] is None for row in manifest["design"]["settings"])
+    assert manifest["m2a_authority"]["formal_submission_allowed"] is False
+    assert manifest["m2a_authority"]["execution_readiness_ready"] is False
+    assert manifest["m2a_authority"]["launch7_terminal_negative_binding_state"] == (
+        "sealed_authenticated_terminal_negative_no_reuse"
+    )
+    assert manifest["m2a_authority"]["accepted_engineering_pilot_binding_state"] == "unbound"
     forged = tmp_path / "binding.json"
     forged.write_text(
         json.dumps({"schema_version": 1, "status": "sealed_accepted_engineering_pilot"}) + "\n",
         encoding="utf-8",
     )
-    status = campaign.upstream_binding_status(manifest, forged)
-    assert status["accepted"] is False
-    assert status["status"] == "accepted_looking_binding_unusable_in_design_phase"
-    with pytest.raises(campaign.ContractError, match="hardened Launch7 report binder"):
+    with pytest.raises(campaign.ContractError, match="placeholder differs"):
+        campaign.prerequisite_binding_status(manifest, forged)
+    with pytest.raises(campaign.ContractError, match="placeholder differs"):
         campaign.assert_launch_authorized(manifest, forged)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "accepted_engineering_pilot"),
+        ("formal_submission_allowed", True),
+        ("adapter_file_sha256", "a" * 64),
+        ("adapter_runtime_file_sha256", "b" * 64),
+        ("report_commit_file_sha256", "c" * 64),
+        ("binding_sha256", "d" * 64),
+    ],
+)
+def test_future_positive_placeholder_field_tampering_is_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    manifest = campaign.load_manifest()
+    positive = json.loads(campaign.ACCEPTED_PILOT_BINDING_PATH.read_text())
+    positive[field] = value
+    path = tmp_path / "positive.json"
+    path.write_text(json.dumps(positive) + "\n", encoding="utf-8")
+    with pytest.raises(campaign.ContractError, match="placeholder differs"):
+        campaign.prerequisite_binding_status(manifest, path)
+
+
+def test_launch7_negative_binding_or_evidence_tampering_is_rejected(tmp_path: Path) -> None:
+    manifest = campaign.load_manifest()
+    negative = json.loads(campaign.LAUNCH7_NEGATIVE_BINDING_PATH.read_text())
+    for mutate in (
+        lambda row: row.update(status="awaiting_authenticated_terminal_negative_record"),
+        lambda row: row.update(formal_submission_allowed=True),
+        lambda row: row["evidence"].update(raw_file_sha256="0" * 64),
+        lambda row: row["bound_semantics"].update(reporter_state="COMPLETED"),
+        lambda row: row.update(negative_binding_sha256="f" * 64),
+    ):
+        changed = copy.deepcopy(negative)
+        mutate(changed)
+        path = tmp_path / "negative.json"
+        path.write_text(json.dumps(changed) + "\n", encoding="utf-8")
+        with pytest.raises(campaign.ContractError):
+            campaign.prerequisite_binding_status(manifest, negative_path=path)
+    rehashed = copy.deepcopy(negative)
+    rehashed["bound_semantics"]["reporter_state"] = "COMPLETED"
+    body = {key: value for key, value in rehashed.items() if key != "negative_binding_sha256"}
+    rehashed["negative_binding_sha256"] = campaign.stable_hash(body)
+    with pytest.raises(campaign.ContractError, match="semantic binding differs"):
+        campaign.validate_launch7_negative_binding(rehashed)
+
+    evidence_target = tmp_path / campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE
+    evidence_target.parent.mkdir(parents=True)
+    evidence = json.loads(
+        (campaign.REPOSITORY_ROOT / campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE).read_text()
+    )
+    evidence["terminal_zero_active_evidence"]["active_job_count"] = 1
+    evidence_target.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+    with pytest.raises(campaign.ContractError, match="bytes/canonical hash differ"):
+        campaign.validate_launch7_negative_binding(negative, evidence_root=tmp_path)
+
+
+def test_readiness_milestones_are_unique_acyclic_parallel_branches() -> None:
+    milestones = campaign.load_manifest()["milestones"]
+    ids = [row["id"] for row in milestones]
+    assert len(ids) == len(set(ids))
+    seen: set[str] = set()
+    for row in milestones:
+        assert set(row["depends_on"]) <= seen
+        seen.add(row["id"])
+    outcome_blind = {
+        "m2a_runtime_and_interpreter",
+        "m2b_shared_objective_config_authorization",
+        "m2c_all_ten_outcome_blind_audits_contracts",
+        "m2d_heldout_seed_and_feasibility",
+        "m2e_scientific_adapters",
+    }
+    by_id = {row["id"]: row for row in milestones}
+    assert all(
+        "m3_launch8_positive_binding" not in by_id[milestone]["depends_on"]
+        for milestone in outcome_blind
+    )
+    assert set(by_id["m4_protocol_and_execution_readiness_join"]["depends_on"]) >= (
+        outcome_blind
+        | {
+            "m1_launch7_terminal_negative_binding",
+            "m2f_launch8_versioned_adapter",
+            "m3_launch8_positive_binding",
+        }
+    )
 
 
 def test_threshold_operators_weight_safety_and_rail_parity_are_frozen() -> None:
@@ -177,7 +279,8 @@ def test_hardening_port_contract_closes_known_exp22_gaps() -> None:
         "authenticated_wandb_leaf_symlink_policy",
         "immutable_report_triplet_and_commit",
         "formal_objective_registered_in_v2_gauge_prefix_formal_staged_authorization_sets",
-        "hardened_launch7_report_quartet_binder",
+        "authenticated_launch7_terminal_negative_no_reuse_binding",
+        "versioned_future_engineering_pilot_positive_adapter_after_protocol_freeze",
         "execution_ready_manifest_exact_schema_no_unvalidated_fields",
     } <= patterns
     assert manifest["required_exp23_hardening_port"]["runtime_files_present"] is True
@@ -212,7 +315,7 @@ def test_submit_test_only_is_read_only_and_submit_fails_closed(tmp_path: Path) -
     command = [sys.executable, "-I", "-S", "-B", str(package / "submit.py"), "--test-only"]
     result = subprocess.run(command, cwd=tmp_path, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     report = json.loads(result.stdout)
-    assert report["status"] == "m1_hardened_runtime_scaffold_execution_blocked"
+    assert report["status"] == "m2a_orders_0_3_runtime_authority_scaffold_execution_blocked"
     assert report["submitted"] is False
     assert report["persistent_writes_performed"] is False
     assert report["scheduler_calls"] == []

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "status": "authenticated_terminal_negative_no_reuse",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+  "accepted": false,
+  "reusable": false,
+  "formal_submission_allowed": false,
+  "evidence": {
+    "repository_relative_path": "experiments/23-treewm-executable-prefix-repair-pilot-v1/launch7_negative_provenance.json",
+    "evidence_git_commit": "b354b12b9446ee88aebbf58ccc67683194ad0fe1",
+    "raw_file_sha256": "29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e",
+    "canonical_json_sha256": "48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62"
+  },
+  "bound_semantics": {
+    "record_status": "terminal_negative_provenance_frozen",
+    "scientific_source_commit": "bdd5d819d291104d5aa7cbe8934ba935cb76518c",
+    "submission_sha256": "fc4ce1695e6e4ed5a23c8cd0a240299e0823ed1f2a17da87461261d74e74d112",
+    "receipt_sha256": "9be7e28cb2ffdfa7ab59f903eeb50e34e8e8f58a4dd4273d7fd789dfbc6ade10",
+    "package_protocol_sha256": "300d4aacde0502477450dbfc6bc2aaaa80eade93bc572776dd59a0cdd2d7d582",
+    "scheduler_cell_states": {"FAILED": 16, "COMPLETED": 4},
+    "reporter_state": "CANCELLED",
+    "zero_active_job_count": 0,
+    "lifecycle_marker_counts": {
+      "USR1_REQUESTED": 16,
+      "CONTINUATION_READY_equivalent_REQUEUE_READY": 16,
+      "WORKER_COMPLETE_root": 4,
+      "WORKER_COMPLETE_generation_0": 4,
+      "TERM_REQUESTED": 0,
+      "REQUEUE_CALLING": 0,
+      "generation_1": 0
+    },
+    "reporter_started": false,
+    "report_artifact_count": 0,
+    "deterministic_shared_failure": true,
+    "tensorboard_event_map_sha256": "ac981a0a474a54435be46f32d83683a80a1ad17c5ed9647debfbf31eb52f3eb4",
+    "scheduler_reduced_rows_sha256": "ba0af0501dda20c6697333311c3c7c9eea2d3e586f348057e2d4aae811afaeac",
+    "scientific_conclusion": {
+      "campaign_complete": false,
+      "report_valid": false,
+      "four_completed_cells_are_reportable_as_campaign_results": false,
+      "sixteen_ready_checkpoints_are_resumable_by_a_later_launch": false,
+      "reuse_allowed": false,
+      "resume_allowed": false,
+      "retry_allowed": false,
+      "recovery_allowed": false,
+      "wandb_identity_reuse_allowed": false,
+      "namespace_reuse_allowed": false,
+      "required_fresh_campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8"
+    }
+  },
+  "negative_binding_sha256": "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd"
+}

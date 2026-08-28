@@ -29,7 +29,7 @@
           "treewm_v2_grounded_executable_prefix_formal_v1": "experiments/24-treewm-executable-prefix-formal-v1"
         },
         "required_order": "validate_package_authorization_before_dataset_or_model_construction",
-        "exp24_authority_contract": "rederive_the_exact_run_and_environment_from_the_sealed_Exp24_snapshot_manifest_per_setting_contract_and_submission_contract;_bind_protocol_source_runtime_input_future_prefix_safety_seed_and_Launch7_report_commit_hashes",
+        "exp24_authority_contract": "rederive_the_exact_run_and_environment_from_the_sealed_Exp24_snapshot_manifest_per_setting_contract_and_submission_contract;_bind_protocol_source_runtime_input_future_prefix_safety_seed_authenticated_Launch7_terminal_negative_no_reuse_and_accepted_future_Launch8_report_binding_hashes",
         "no_exp22_behavior_change": true
       }
     }

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hardened, stdlib-only Exp24 control-plane primitives.
 
-This is an M1 runtime scaffold, not launch authority.  The public mutation entry
-point first calls :func:`campaign.assert_launch_authorized`; the checked-in M1
+This is an M2A runtime-authority scaffold, not launch authority.  The public mutation entry
+point first calls :func:`campaign.assert_launch_authorized`; the checked-in M2A
 manifest cannot satisfy that call.  The lower-level functions are deliberately
 dependency-injected so their crash, reconciliation, and rollback behavior can be
 tested without contacting Slurm or creating an Exp24 output namespace.
@@ -47,6 +47,21 @@ PINNED_PYTHON = (
 )
 SCHEDULER_CLIENT_TIMEOUT_SECONDS = 30
 PRE_RECEIPT_TRANSACTION_BUDGET_SECONDS = 600
+EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
+FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+ENGINEERING_PILOT_ADAPTER_STATE = "unsealed_pending_frozen_launch8_reporter_gate_protocol"
+ENGINEERING_PILOT_ADAPTER_REQUIREMENTS = (
+    "exact immutable report quartet schemas, ownership, modes, inventory, and cross-hashes",
+    "exact independently anchored campaign, submission, package, and reporter/gate protocol identities",
+    "exact per-cell bundle identity, raw scalar axes, prefix source, terminal outcome rows, and metrics",
+    "deterministic raw bundle telemetry to decision-boundary derivation under the frozen Launch8 gate",
+    "exact structural, method, candidate, calibration, and outcome gate key sets and nested schemas",
+    "exact bundle-decision-provenance per-index identity join and all four terminal artifact hash joins",
+    "exact outcome-blind boundary-evaluation and paired-calibration provenance hashes",
+    "recomputed per-seed, per-setting, macro, paired, strict, and not-worse acceptance predicates",
+    "authenticated report/cancel serialization and terminal non-canceled submission state",
+    "independent audit of positive adapter bytes before any binding publication",
+)
 CONTROL_ENVIRONMENT = {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "LANG": "C",
@@ -91,7 +106,10 @@ PACKAGE_SNAPSHOT_FILES = (
     "final_eval.py",
     "formal_objective_delta.json",
     "gate.slurm",
-    "launch7_acceptance.binding.json",
+    "accepted_engineering_pilot.binding.json",
+    "engineering_pilot_binder.py",
+    "launch7_negative.binding.json",
+    "m2a_schema.json",
     "manifest.json",
     "report.py",
     "report.slurm",
@@ -118,6 +136,11 @@ SUBMISSION_CONTRACT_KEYS = frozenset(
         "submission_root",
         "snapshot_root",
         "manifest_sha256",
+        "m2a_schema",
+        "interpreter_provenance",
+        "launch7_negative_binding",
+        "engineering_pilot_adapter_interface",
+        "accepted_engineering_pilot_binding",
         "snapshot_inventory",
         "snapshot_inventory_sha256",
         "emergency_dispatch",
@@ -126,6 +149,44 @@ SUBMISSION_CONTRACT_KEYS = frozenset(
         "scheduler_preclaim",
         "scheduler_fallback",
         "contract_body_sha256",
+    }
+)
+SUBMISSION_RECEIPT_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_root",
+        "snapshot_root",
+        "submission_sha256",
+        "manifest_sha256",
+        "jobs",
+        "dag_names",
+        "training_array",
+        "heldout_array",
+    }
+)
+INTERPRETER_PROVENANCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "source_manifest_sha256",
+        "lexical_executable",
+        "lexical_kind",
+        "lexical_symlink_target",
+        "resolved_executable",
+        "resolved_executable_sha256",
+        "resolved_executable_size",
+        "base_executable",
+        "pyvenv_cfg",
+        "pyvenv_cfg_sha256",
+        "pyvenv_cfg_size",
+        "venv_site_packages",
+        "base_site_packages",
+        "python_version",
+        "implementation",
+        "cache_tag",
+        "provenance_sha256",
     }
 )
 
@@ -146,6 +207,10 @@ class CommitRecoveryRequired(RuntimeContractError):
     """Durable READY exists; recovery, never rollback, must resolve commit."""
 
 
+class ActivationRecoveryRequired(RuntimeContractError):
+    """Receipt/authorization is durable; recovery must finish root activation."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeContractError(message)
@@ -163,6 +228,44 @@ def canonical_json(value: object) -> str:
 
 def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def engineering_pilot_adapter_description() -> dict[str, Any]:
+    """Canonical fail-closed interface description shared by runtime and CLI."""
+
+    return {
+        "schema_version": 1,
+        "status": "adapter_interface_scaffold_fail_closed_real_binding_unbound",
+        "expected_campaign_id": EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID,
+        "forbidden_positive_campaign_id": FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID,
+        "required_status": "accepted_engineering_pilot",
+        "adapter_state": ENGINEERING_PILOT_ADAPTER_STATE,
+        "binding_state": "unbound",
+        "implementation_dependency_files": [
+            str(PACKAGE_RELATIVE / "engineering_pilot_binder.py"),
+            str(PACKAGE_RELATIVE / "runtime.py"),
+        ],
+        "semantic_adapter_implemented": False,
+        "requirements": list(ENGINEERING_PILOT_ADAPTER_REQUIREMENTS),
+        "persistent_writes_performed": False,
+        "real_report_opened": False,
+    }
+
+
+def accepted_engineering_pilot_placeholder() -> dict[str, Any]:
+    """Exact M2A future-positive placeholder; no report bytes are trusted yet."""
+
+    return {
+        "schema_version": 1,
+        "status": "awaiting_launch8_accepted_engineering_pilot",
+        "campaign_id": EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID,
+        "formal_submission_allowed": False,
+        "adapter_file_sha256": None,
+        "adapter_runtime_file_sha256": None,
+        "adapter_description_sha256": None,
+        "report_commit_file_sha256": None,
+        "binding_sha256": None,
+    }
 
 
 def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -248,6 +351,21 @@ def open_absolute_directory(path: Path, label: str) -> int:
         raise
 
 
+def lexical_entry_exists(parent: Path, name: str, label: str) -> bool:
+    """Test one directory entry without following its final component."""
+
+    require(name not in {"", ".", ".."} and "/" not in name, f"{label} name differs")
+    parent_fd = open_absolute_directory(parent, f"{label} parent")
+    try:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+    finally:
+        os.close(parent_fd)
+
+
 def authenticated_regular_bytes(path: Path, label: str) -> tuple[bytes, str, os.stat_result]:
     """Read one stable regular file through a no-follow parent descriptor."""
 
@@ -298,6 +416,147 @@ def authenticated_immutable_json(
         f"{label} ownership/mode differs",
     )
     return parse_json_bytes(payload, label), digest
+
+
+def _verified_directory(path: Path, label: str) -> None:
+    descriptor = open_absolute_directory(path, label)
+    try:
+        info = os.fstat(descriptor)
+        require(
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid()
+            and info.st_gid == os.getgid()
+            and stat.S_IMODE(info.st_mode) == 0o755
+            and info.st_nlink >= 1,
+            f"{label} is not a stable directory",
+        )
+    finally:
+        os.close(descriptor)
+
+
+def capture_interpreter_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Capture the exact venv entry, resolved binary, and environment roots.
+
+    The lexical entry matters: this environment is a venv symlink whose target is
+    also the base interpreter.  Invoking only the resolved target would silently
+    change package-root semantics even though its binary digest is identical.
+    """
+
+    lexical = Path(str(manifest["paths"]["python"]))
+    require(lexical.is_absolute() and str(lexical) == PINNED_PYTHON, "pinned interpreter path differs")
+    require(
+        os.path.normpath(os.path.abspath(sys.executable)) == str(lexical),
+        f"running interpreter is not the exact lexical venv entry: {sys.executable}",
+    )
+    require(sys.version_info[:3] == (3, 11, 15), "interpreter version is not Python 3.11.15")
+    try:
+        lexical_info = lexical.lstat()
+    except OSError as exc:
+        raise RuntimeContractError(f"pinned interpreter entry is unavailable: {exc}") from exc
+    require(
+        stat.S_ISLNK(lexical_info.st_mode)
+        and lexical_info.st_uid == os.getuid()
+        and lexical_info.st_gid == os.getgid()
+        and lexical_info.st_nlink == 1,
+        "pinned interpreter lexical entry is not the exact user-owned venv symlink",
+    )
+    lexical_target = os.readlink(lexical)
+    require(lexical_target != "" and "\x00" not in lexical_target, "pinned interpreter symlink target differs")
+    resolved = lexical.resolve(strict=True)
+    _binary, binary_sha, binary_info = authenticated_regular_bytes(
+        resolved,
+        "resolved pinned interpreter",
+    )
+    require(
+        binary_info.st_size > 0
+        and bool(binary_info.st_mode & stat.S_IXUSR)
+        and binary_info.st_uid == os.getuid()
+        and binary_info.st_gid == os.getgid()
+        and stat.S_IMODE(binary_info.st_mode) == 0o755
+        and os.access(lexical, os.X_OK),
+        "resolved pinned interpreter is not executable",
+    )
+    base_executable = Path(str(getattr(sys, "_base_executable", "")))
+    require(
+        base_executable.is_absolute()
+        and base_executable.resolve(strict=True) == resolved,
+        "base interpreter target differs from the pinned venv target",
+    )
+    venv_root = lexical.parent.parent
+    pyvenv = venv_root / "pyvenv.cfg"
+    pyvenv_payload, pyvenv_sha, pyvenv_info = authenticated_regular_bytes(
+        pyvenv,
+        "pinned pyvenv.cfg",
+    )
+    require(
+        pyvenv_info.st_uid == os.getuid()
+        and pyvenv_info.st_gid == os.getgid()
+        and stat.S_IMODE(pyvenv_info.st_mode) == 0o644,
+        "pinned pyvenv.cfg ownership/mode differs",
+    )
+    try:
+        pyvenv_text = pyvenv_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeContractError(f"pinned pyvenv.cfg is not UTF-8: {exc}") from exc
+    values: dict[str, str] = {}
+    for raw_line in pyvenv_text.splitlines():
+        if "=" not in raw_line:
+            continue
+        key, child = (item.strip() for item in raw_line.split("=", 1))
+        require(key and key not in values, f"pinned pyvenv.cfg duplicates {key!r}")
+        values[key] = child
+    require(
+        values.get("version") == "3.11.15"
+        and values.get("include-system-site-packages") == "true"
+        and isinstance(values.get("home"), str)
+        and Path(values["home"]).is_absolute(),
+        "pinned pyvenv.cfg environment identity differs",
+    )
+    version_directory = "python3.11"
+    venv_site = (venv_root / "lib" / version_directory / "site-packages").resolve(strict=True)
+    base_site = (
+        Path(values["home"]).parent / "lib" / version_directory / "site-packages"
+    ).resolve(strict=True)
+    _verified_directory(venv_site, "pinned venv site-packages")
+    _verified_directory(base_site, "pinned base site-packages")
+    seed = {
+        "schema_version": 1,
+        "status": "captured_exact_pinned_python_3_11_15",
+        "source_manifest_sha256": stable_hash(manifest),
+        "lexical_executable": str(lexical),
+        "lexical_kind": "symlink",
+        "lexical_symlink_target": lexical_target,
+        "resolved_executable": str(resolved),
+        "resolved_executable_sha256": binary_sha,
+        "resolved_executable_size": binary_info.st_size,
+        "base_executable": str(base_executable),
+        "pyvenv_cfg": str(pyvenv),
+        "pyvenv_cfg_sha256": pyvenv_sha,
+        "pyvenv_cfg_size": pyvenv_info.st_size,
+        "venv_site_packages": str(venv_site),
+        "base_site_packages": str(base_site),
+        "python_version": "3.11.15",
+        "implementation": sys.implementation.name,
+        "cache_tag": sys.implementation.cache_tag,
+    }
+    seed["provenance_sha256"] = stable_hash(seed)
+    return seed
+
+
+def validate_interpreter_provenance(
+    manifest: Mapping[str, Any],
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-capture and exact-match interpreter provenance before execution."""
+
+    require(set(value) == INTERPRETER_PROVENANCE_KEYS, "interpreter provenance schema differs")
+    body = dict(value)
+    claimed = body.pop("provenance_sha256", None)
+    require(SHA256.fullmatch(str(claimed or "")) is not None, "interpreter provenance hash is malformed")
+    require(claimed == stable_hash(body), "interpreter provenance self-hash differs")
+    current = capture_interpreter_provenance(manifest)
+    require(dict(value) == current, "pinned interpreter provenance drifted")
+    return current
 
 
 def _fsync_directory(path: Path) -> None:
@@ -630,12 +889,16 @@ def _tree_rows(root: Path, *, sealed: bool, owner: int | None = None) -> list[di
 
 
 def m1_snapshot_inventory(repo_root: Path = REPOSITORY_ROOT) -> dict[str, str]:
-    """Return the exact M1 bootstrap/source inventory (not a science-ready lock)."""
+    """Return the exact M2A bootstrap/source inventory (legacy public name)."""
 
     root = repo_root.resolve(strict=True)
     relative_paths: list[Path] = [PACKAGE_RELATIVE / name for name in PACKAGE_SNAPSHOT_FILES]
     relative_paths.extend(
         [
+            Path(
+                "experiments/23-treewm-executable-prefix-repair-pilot-v1/"
+                "launch7_negative_provenance.json"
+            ),
             Path("scripts/train.py"),
             Path("configs/__init__.py"),
             Path("scripts/__init__.py"),
@@ -643,7 +906,7 @@ def m1_snapshot_inventory(repo_root: Path = REPOSITORY_ROOT) -> dict[str, str]:
             Path("configs/experiment/treewm_v2_grounded_gauge_formal_v1.yaml"),
         ]
     )
-    require(len(relative_paths) == len(set(relative_paths)), "M1 snapshot file list contains duplicates")
+    require(len(relative_paths) == len(set(relative_paths)), "M2A snapshot file list contains duplicates")
     inventory: dict[str, str] = {}
     for relative in sorted(relative_paths, key=str):
         safe_relative(relative, "snapshot source path")
@@ -859,11 +1122,11 @@ def snapshot_test(repo_root: Path = REPOSITORY_ROOT) -> dict[str, Any]:
         )
         require(completed.returncode == 0, f"isolated snapshot probe failed: {completed.stderr.strip()}")
         result = parse_json_bytes(completed.stdout.encode("utf-8"), "snapshot probe stdout")
-        require(result.get("status") == "verified_m1_snapshot_bootstrap", "snapshot probe status differs")
+        require(result.get("status") == "verified_m2a_snapshot_bootstrap", "snapshot probe status differs")
         require(result.get("inventory_sha256") == stable_hash(inventory), "snapshot probe inventory differs")
         return {
             "schema_version": 1,
-            "status": "verified_ephemeral_m1_snapshot",
+            "status": "verified_ephemeral_m2a_snapshot",
             "file_count": len(inventory),
             "inventory_sha256": stable_hash(inventory),
             "isolated_flags": ["-I", "-S", "-B"],
@@ -1429,6 +1692,7 @@ def validate_accepted_job_stdout(
     node: Mapping[str, Any],
     submit_command: Sequence[str],
     cwd: Path,
+    root_lifecycle: str = "held",
 ) -> dict[str, Any]:
     """Validate the exact accepted Slurm shape from preserved oneliner bytes."""
 
@@ -1458,6 +1722,7 @@ def validate_accepted_job_stdout(
     dependencies: set[str] = set()
     kill_policies: set[str | None] = set()
     states: set[str] = set()
+    reasons: set[str | None] = set()
     scheduler_job_ids: set[str] = set()
     parent_id_records = 0
     for fields in records:
@@ -1472,8 +1737,23 @@ def validate_accepted_job_stdout(
         states.add(state)
         allowed_states = {"PENDING"}
         if predecessor_job_id is None and expected_elements > 1:
-            allowed_states.update({"CONFIGURING", "RUNNING"})
+            require(root_lifecycle in {"held", "released"}, "root lifecycle expectation differs")
+            if root_lifecycle == "released":
+                allowed_states.update({"CONFIGURING", "RUNNING"})
         require(state in allowed_states, f"accepted job state differs for {name}: {state}")
+        reason = _optional_oneliner_field(fields, "Reason")
+        reasons.add(reason)
+        if predecessor_job_id is None and expected_elements > 1:
+            if root_lifecycle == "held":
+                require(
+                    state == "PENDING" and reason == "JobHeldUser",
+                    "root job is not exactly user-held",
+                )
+            else:
+                require(
+                    reason not in {"JobHeldUser", "JobHeldAdmin"},
+                    "released root remains held",
+                )
         dependency = _oneliner_field(fields, "Dependency")
         kill_invalid = _optional_oneliner_field(fields, "KillOInInvalidDependent")
         dependencies.add(dependency)
@@ -1545,6 +1825,8 @@ def validate_accepted_job_stdout(
         "record_count": len(records),
         "array_task_ids": sorted(observed_task_ids),
         "states": sorted(states),
+        "reasons": sorted("<absent>" if value is None else value for value in reasons),
+        "root_lifecycle": root_lifecycle if predecessor_job_id is None else "not_root",
         "dependency": next(iter(dependencies)),
         "kill_on_invalid_dependency": normalized_kill,
     }
@@ -1563,6 +1845,7 @@ def observe_accepted_job(
     node: Mapping[str, Any],
     submit_command: Sequence[str],
     cwd: Path,
+    root_lifecycle: str = "held",
 ) -> dict[str, Any]:
     command = [str(execution["scontrol"]), "show", "job", job_id, "--oneliner"]
     completed = boundary.call(command, cwd)
@@ -1578,6 +1861,7 @@ def observe_accepted_job(
         node=node,
         submit_command=submit_command,
         cwd=cwd,
+        root_lifecycle=root_lifecycle,
     )
     return {
         "command": command,
@@ -1762,6 +2046,8 @@ def expected_test_options(
     if dependency is not None:
         expected["dependency"] = dependency
         expected["kill-on-invalid-dep"] = "yes"
+    if node["name"] == "train_2000":
+        expected["hold"] = "set"
     if gpu:
         expected.update(
             {
@@ -2048,6 +2334,8 @@ def scheduler_commands(
         if node.elements > 1:
             array = execution["training_array"] if node.elements == 40 else execution["heldout_array"]
             command.append(f"--array={array}")
+        if node.name == "train_2000":
+            command.append("--hold")
         predecessor_id: str | None = None
         predecessor_elements: int | None = None
         if node.dependency is not None:
@@ -2217,10 +2505,59 @@ def submission_contract(
     control_plane: Mapping[str, Any],
     scheduler_preclaim: Mapping[str, Any],
     scheduler_fallback: Mapping[str, Any],
+    interpreter_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     import campaign
 
     nodes = campaign.scheduler_dag(manifest)
+    interpreter = (
+        capture_interpreter_provenance(manifest)
+        if interpreter_provenance is None
+        else dict(interpreter_provenance)
+    )
+    validate_interpreter_provenance(manifest, interpreter)
+    m2a_schema, m2a_schema_file_sha = campaign.load_m2a_schema()
+    m2a_relative = str(PACKAGE_RELATIVE / "m2a_schema.json")
+    negative_relative = str(PACKAGE_RELATIVE / "launch7_negative.binding.json")
+    negative_value, negative_file_sha = authenticated_json(
+        PACKAGE_DIR / "launch7_negative.binding.json",
+        "checked-in Launch7 terminal-negative binding",
+    )
+    positive_relative = str(PACKAGE_RELATIVE / "accepted_engineering_pilot.binding.json")
+    positive_value, positive_file_sha = authenticated_json(
+        PACKAGE_DIR / "accepted_engineering_pilot.binding.json",
+        "checked-in future accepted-pilot binding",
+    )
+    campaign.validate_launch7_negative_binding(
+        negative_value,
+        evidence_root=REPOSITORY_ROOT,
+    )
+    require(
+        positive_value == accepted_engineering_pilot_placeholder(),
+        "checked-in future accepted-pilot placeholder differs",
+    )
+    adapter_relative = str(PACKAGE_RELATIVE / "engineering_pilot_binder.py")
+    _adapter_bytes, adapter_file_sha, _adapter_info = authenticated_regular_bytes(
+        PACKAGE_DIR / "engineering_pilot_binder.py",
+        "future accepted-pilot adapter interface",
+    )
+    adapter_runtime_relative = str(PACKAGE_RELATIVE / "runtime.py")
+    _runtime_bytes, adapter_runtime_file_sha, _runtime_info = authenticated_regular_bytes(
+        PACKAGE_DIR / "runtime.py",
+        "future accepted-pilot adapter runtime dependency",
+    )
+    negative_evidence_relative = str(campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE)
+    adapter_description = engineering_pilot_adapter_description()
+    require(
+        snapshot_inventory.get(m2a_relative) == m2a_schema_file_sha
+        and snapshot_inventory.get(negative_relative) == negative_file_sha
+        and snapshot_inventory.get(negative_evidence_relative)
+        == campaign.LAUNCH7_NEGATIVE_EVIDENCE_RAW_SHA256
+        and snapshot_inventory.get(positive_relative) == positive_file_sha
+        and snapshot_inventory.get(adapter_relative) == adapter_file_sha
+        and snapshot_inventory.get(adapter_runtime_relative) == adapter_runtime_file_sha,
+        "M2A schema or pilot prerequisite binding differs from snapshot inventory",
+    )
     emergency_targets = {
         str(PACKAGE_RELATIVE / name): snapshot_inventory[str(PACKAGE_RELATIVE / name)]
         for name in EMERGENCY_DISPATCH_FILES
@@ -2232,6 +2569,56 @@ def submission_contract(
         "submission_root": str(submission_root),
         "snapshot_root": str(snapshot_root),
         "manifest_sha256": campaign.manifest_sha256(manifest),
+        "m2a_schema": {
+            "relative_path": m2a_relative,
+            "file_sha256": m2a_schema_file_sha,
+            "semantic_sha256": stable_hash(m2a_schema),
+        },
+        "interpreter_provenance": interpreter,
+        "launch7_negative_binding": {
+            "relative_path": negative_relative,
+            "file_sha256": negative_file_sha,
+            "semantic_sha256": stable_hash(negative_value),
+            "status": negative_value.get("status"),
+            "accepted": negative_value.get("accepted"),
+            "reusable": negative_value.get("reusable"),
+            "formal_submission_allowed": negative_value.get("formal_submission_allowed"),
+            "negative_binding_sha256": negative_value.get("negative_binding_sha256"),
+            "evidence_file_sha256": negative_value["evidence"]["raw_file_sha256"],
+            "evidence_canonical_sha256": negative_value["evidence"][
+                "canonical_json_sha256"
+            ],
+            "evidence_git_commit": negative_value["evidence"]["evidence_git_commit"],
+        },
+        "engineering_pilot_adapter_interface": {
+            "relative_path": adapter_relative,
+            "adapter_file_sha256": adapter_file_sha,
+            "adapter_runtime_file_sha256": adapter_runtime_file_sha,
+            "adapter_description_sha256": stable_hash(adapter_description),
+            "adapter_state": adapter_description["adapter_state"],
+            "expected_campaign_id": adapter_description["expected_campaign_id"],
+            "forbidden_positive_campaign_id": adapter_description[
+                "forbidden_positive_campaign_id"
+            ],
+        },
+        "accepted_engineering_pilot_binding": {
+            "relative_path": positive_relative,
+            "file_sha256": positive_file_sha,
+            "semantic_sha256": stable_hash(positive_value),
+            "status": positive_value.get("status"),
+            "formal_submission_allowed": positive_value.get("formal_submission_allowed"),
+            "adapter_file_sha256": positive_value.get("adapter_file_sha256"),
+            "adapter_runtime_file_sha256": positive_value.get(
+                "adapter_runtime_file_sha256"
+            ),
+            "adapter_description_sha256": positive_value.get(
+                "adapter_description_sha256"
+            ),
+            "report_commit_file_sha256": positive_value.get(
+                "report_commit_file_sha256"
+            ),
+            "binding_sha256": positive_value.get("binding_sha256"),
+        },
         "snapshot_inventory": dict(snapshot_inventory),
         "snapshot_inventory_sha256": stable_hash(snapshot_inventory),
         # This deliberately small, versioned envelope is the compatibility
@@ -2261,8 +2648,9 @@ def validate_submission_contract(
     *,
     submission_root: Path,
     digest: str,
+    verify_runtime_authority: bool = True,
 ) -> None:
-    """Validate the exact immutable M1 transaction-contract envelope."""
+    """Validate the exact contract; emergency mode needs only its v1 capsule."""
 
     require(set(contract) == SUBMISSION_CONTRACT_KEYS, "submission contract schema differs")
     body = dict(contract)
@@ -2295,6 +2683,173 @@ def validate_submission_contract(
         "submission contract snapshot inventory differs",
     )
     verify_emergency_snapshot_files(snapshot_root, contract)
+    if not verify_runtime_authority:
+        return
+    snapshot_schema, snapshot_schema_file_sha = authenticated_immutable_json(
+        snapshot_root / PACKAGE_RELATIVE / "m2a_schema.json",
+        "snapshot M2A authority schema",
+    )
+    import campaign
+
+    campaign.validate_m2a_schema(snapshot_schema)
+    require(
+        set(snapshot_schema["schemas"]["submission_contract"])
+        == SUBMISSION_CONTRACT_KEYS
+        and set(snapshot_schema["schemas"]["submission_receipt"])
+        == SUBMISSION_RECEIPT_KEYS
+        and set(snapshot_schema["schemas"]["interpreter_provenance"])
+        == INTERPRETER_PROVENANCE_KEYS
+        and set(snapshot_schema["schemas"]["root_release_authorization"])
+        == ROOT_RELEASE_AUTHORIZATION_KEYS
+        and set(snapshot_schema["schemas"]["root_activation_result"])
+        == ROOT_ACTIVATION_RESULT_KEYS,
+        "M2A schema/runtime contract fields differ",
+    )
+    schema_binding = contract.get("m2a_schema")
+    require(
+        isinstance(schema_binding, dict)
+        and set(schema_binding) == {"relative_path", "file_sha256", "semantic_sha256"}
+        and schema_binding.get("relative_path") == str(PACKAGE_RELATIVE / "m2a_schema.json")
+        and schema_binding.get("file_sha256") == snapshot_schema_file_sha
+        == inventory.get(str(PACKAGE_RELATIVE / "m2a_schema.json"))
+        and schema_binding.get("semantic_sha256") == stable_hash(snapshot_schema),
+        "submission M2A authority-schema binding differs",
+    )
+    snapshot_manifest, _snapshot_manifest_file_sha = authenticated_immutable_json(
+        snapshot_root / PACKAGE_RELATIVE / "manifest.json",
+        "snapshot submission manifest",
+    )
+    campaign.validate_manifest(snapshot_manifest)
+    interpreter = contract.get("interpreter_provenance")
+    require(isinstance(interpreter, dict), "submission interpreter provenance is absent")
+    validate_interpreter_provenance(snapshot_manifest, interpreter)
+    negative_value, negative_file_sha = authenticated_immutable_json(
+        snapshot_root / PACKAGE_RELATIVE / "launch7_negative.binding.json",
+        "snapshot Launch7 terminal-negative binding",
+    )
+    negative_evidence_value, negative_evidence_file_sha = authenticated_immutable_json(
+        snapshot_root / campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE,
+        "snapshot Launch7 terminal-negative provenance",
+    )
+    campaign.validate_launch7_negative_binding(
+        negative_value,
+        evidence_root=snapshot_root,
+        evidence_value=negative_evidence_value,
+        evidence_raw_sha256=negative_evidence_file_sha,
+    )
+    negative_binding = contract.get("launch7_negative_binding")
+    require(
+        isinstance(negative_binding, dict)
+        and set(negative_binding)
+        == {
+            "relative_path", "file_sha256", "semantic_sha256", "status",
+            "accepted", "reusable", "formal_submission_allowed",
+            "negative_binding_sha256", "evidence_file_sha256",
+            "evidence_canonical_sha256", "evidence_git_commit",
+        }
+        and negative_binding.get("relative_path")
+        == str(PACKAGE_RELATIVE / "launch7_negative.binding.json")
+        and negative_binding.get("file_sha256") == negative_file_sha
+        == inventory.get(str(PACKAGE_RELATIVE / "launch7_negative.binding.json"))
+        and negative_binding.get("semantic_sha256") == stable_hash(negative_value)
+        and negative_binding.get("status") == negative_value.get("status")
+        and negative_binding.get("accepted") is negative_value.get("accepted") is False
+        and negative_binding.get("reusable") is negative_value.get("reusable") is False
+        and negative_binding.get("formal_submission_allowed")
+        is negative_value.get("formal_submission_allowed") is False
+        and negative_binding.get("negative_binding_sha256")
+        == negative_value.get("negative_binding_sha256")
+        and negative_binding.get("evidence_file_sha256")
+        == negative_value["evidence"]["raw_file_sha256"]
+        == inventory.get(str(campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE))
+        and negative_binding.get("evidence_canonical_sha256")
+        == negative_value["evidence"]["canonical_json_sha256"]
+        and negative_binding.get("evidence_git_commit")
+        == negative_value["evidence"]["evidence_git_commit"],
+        "submission Launch7 terminal-negative binding leaf differs",
+    )
+    _adapter_bytes, adapter_file_sha, adapter_info = authenticated_regular_bytes(
+        snapshot_root / PACKAGE_RELATIVE / "engineering_pilot_binder.py",
+        "snapshot future accepted-pilot adapter interface",
+    )
+    _runtime_bytes, adapter_runtime_file_sha, adapter_runtime_info = authenticated_regular_bytes(
+        snapshot_root / PACKAGE_RELATIVE / "runtime.py",
+        "snapshot future accepted-pilot adapter runtime dependency",
+    )
+    adapter_description = engineering_pilot_adapter_description()
+    adapter_binding = contract.get("engineering_pilot_adapter_interface")
+    require(
+        adapter_info.st_uid == os.getuid()
+        and adapter_info.st_gid == os.getgid()
+        and adapter_info.st_nlink == 1
+        and stat.S_IMODE(adapter_info.st_mode) == 0o444
+        and adapter_runtime_info.st_uid == os.getuid()
+        and adapter_runtime_info.st_gid == os.getgid()
+        and adapter_runtime_info.st_nlink == 1
+        and stat.S_IMODE(adapter_runtime_info.st_mode) == 0o444
+        and isinstance(adapter_binding, dict)
+        and set(adapter_binding)
+        == {
+            "relative_path", "adapter_file_sha256",
+            "adapter_runtime_file_sha256", "adapter_description_sha256",
+            "adapter_state", "expected_campaign_id",
+            "forbidden_positive_campaign_id",
+        }
+        and adapter_binding.get("relative_path")
+        == str(PACKAGE_RELATIVE / "engineering_pilot_binder.py")
+        and adapter_binding.get("adapter_file_sha256") == adapter_file_sha
+        == inventory.get(str(PACKAGE_RELATIVE / "engineering_pilot_binder.py"))
+        and adapter_binding.get("adapter_runtime_file_sha256")
+        == adapter_runtime_file_sha
+        == inventory.get(str(PACKAGE_RELATIVE / "runtime.py"))
+        and adapter_binding.get("adapter_description_sha256")
+        == stable_hash(adapter_description)
+        and adapter_binding.get("adapter_state") == ENGINEERING_PILOT_ADAPTER_STATE
+        and adapter_binding.get("expected_campaign_id")
+        == EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID
+        and adapter_binding.get("forbidden_positive_campaign_id")
+        == FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID,
+        "submission future accepted-pilot adapter interface differs",
+    )
+    positive_value, positive_file_sha = authenticated_immutable_json(
+        snapshot_root / PACKAGE_RELATIVE / "accepted_engineering_pilot.binding.json",
+        "snapshot future accepted-pilot binding",
+    )
+    require(
+        positive_value == accepted_engineering_pilot_placeholder(),
+        "snapshot future accepted-pilot placeholder differs",
+    )
+    positive_binding = contract.get("accepted_engineering_pilot_binding")
+    require(
+        isinstance(positive_binding, dict)
+        and set(positive_binding)
+        == {
+            "relative_path", "file_sha256", "semantic_sha256", "status",
+            "formal_submission_allowed", "adapter_file_sha256",
+            "adapter_runtime_file_sha256", "adapter_description_sha256",
+            "report_commit_file_sha256",
+            "binding_sha256",
+        }
+        and positive_binding.get("relative_path")
+        == str(PACKAGE_RELATIVE / "accepted_engineering_pilot.binding.json")
+        and positive_binding.get("file_sha256") == positive_file_sha
+        == inventory.get(str(PACKAGE_RELATIVE / "accepted_engineering_pilot.binding.json"))
+        and positive_binding.get("semantic_sha256") == stable_hash(positive_value)
+        and positive_binding.get("status") == positive_value.get("status")
+        and positive_binding.get("formal_submission_allowed")
+        is positive_value.get("formal_submission_allowed") is False
+        and positive_binding.get("adapter_file_sha256")
+        is positive_value.get("adapter_file_sha256") is None
+        and positive_binding.get("adapter_runtime_file_sha256")
+        is positive_value.get("adapter_runtime_file_sha256") is None
+        and positive_binding.get("adapter_description_sha256")
+        is positive_value.get("adapter_description_sha256") is None
+        and positive_binding.get("report_commit_file_sha256")
+        is positive_value.get("report_commit_file_sha256") is None
+        and positive_binding.get("binding_sha256")
+        is positive_value.get("binding_sha256") is None,
+        "submission future accepted-pilot binding leaf differs",
+    )
 
 
 def _receipt_from_jobs(
@@ -2600,6 +3155,7 @@ def _authorized_submit_locked(
     observation: Mapping[str, Any],
     scheduler_preclaim: Mapping[str, Any],
     boundary: SchedulerBoundary,
+    interpreter_provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     claim_token = secrets.token_hex(32)
     begin_transaction(submission_root, claim_token)
@@ -2626,16 +3182,27 @@ def _authorized_submit_locked(
             control_plane=observation,
             scheduler_preclaim=scheduler_preclaim,
             scheduler_fallback=fallback_binding,
+            interpreter_provenance=interpreter_provenance,
         )
         submission_sha256 = exclusive_json(submission_root / "SUBMISSION_CONTRACT.json", contract)
         append_journal(submission_root, 2, "CONTRACT_SEALED", {"submission_sha256": submission_sha256})
-        return submit_dag_transaction(
+        receipt = submit_dag_transaction(
             manifest,
             submission_root=submission_root,
             snapshot_root=snapshot_root,
             submission_sha256=submission_sha256,
             boundary=boundary,
         )
+        authorization = authorize_root_release_after_receipt(
+            submission_root,
+            boundary=boundary,
+        )
+        return {
+            "schema_version": 1,
+            "status": "submission_receipt_and_held_root_release_authorization_committed",
+            "receipt": receipt,
+            "authorization": authorization,
+        }
     except BaseException as exc:
         if isinstance(exc, CommitRecoveryRequired):
             raise
@@ -2670,6 +3237,7 @@ def authorized_submit(
     campaign.assert_launch_authorized(manifest)
     readiness = execution_readiness(manifest)
     require(readiness["ready"], "formal runtime remains blocked: " + "; ".join(readiness["blockers"]))
+    interpreter_provenance = capture_interpreter_provenance(manifest)
     submission_root = Path(str(manifest["paths"]["run_root"]) + "-submission")
     require(submission_root.parent.exists(), "submission parent is absent")
     fallback_payload, observation = capture_scheduler_control_plane_bundle(manifest["execution"])
@@ -2690,19 +3258,37 @@ def authorized_submit(
         boundary=boundary,
     )
     with transaction_recovery_lock(submission_root):
-        return _authorized_submit_locked(
+        prepared = _authorized_submit_locked(
             manifest,
             submission_root=submission_root,
             fallback_binding=fallback_binding,
             observation=observation,
             scheduler_preclaim=scheduler_preclaim,
             boundary=boundary,
+            interpreter_provenance=interpreter_provenance,
         )
+    # No released worker can now block behind the claim-to-receipt lock.  The
+    # durable authorization is sufficient worker authority if this process
+    # crashes after release but before the activation-result record commits.
+    activation = activate_root_after_receipt(
+        submission_root,
+        boundary=boundary,
+    )
+    return {
+        "schema_version": 1,
+        "status": "submission_receipt_committed_and_root_activated",
+        "receipt": prepared["receipt"],
+        "authorization": prepared["authorization"],
+        "activation": activation,
+    }
 
 
 def execution_readiness(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Read-only M1 readiness inventory.  It intentionally returns ``ready=false``."""
+    """Read-only M2A readiness inventory.  It intentionally returns ``ready=false``."""
 
+    import campaign
+
+    m2a_schema, m2a_schema_file_sha = campaign.load_m2a_schema()
     objective = manifest["objective"]["objective_version"]
     config = REPOSITORY_ROOT / "configs" / "experiment" / f"{objective}.yaml"
     delta, delta_sha = authenticated_json(PACKAGE_DIR / "formal_objective_delta.json", "formal objective delta")
@@ -2713,13 +3299,13 @@ def execution_readiness(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "training and held-out durable signal/resume adapters are not implemented or killpoint-verified"
     )
     blockers.append(
+        "same-stage requeue mutation is hard-disabled until exact scientific identity and an idempotent scheduler transaction are sealed"
+    )
+    blockers.append(
+        "interpreter binary/pyvenv/path identity is captured, but environment-content closure is unbound"
+    )
+    blockers.append(
         "clean committed execution-source revision and exact snapshot provenance are unverified"
-    )
-    blockers.append(
-        "held train_2000 root plus post-receipt release/observation/activation recovery handshake is not implemented"
-    )
-    blockers.append(
-        "pinned Python/interpreter environment binary provenance is not protocol-sealed"
     )
     if not config.is_file() or config.is_symlink():
         blockers.append("formal objective Hydra config is absent")
@@ -2730,11 +3316,24 @@ def execution_readiness(manifest: Mapping[str, Any]) -> dict[str, Any]:
     if manifest["execution"].get("feasibility_status") != "verified":
         blockers.append("training/evaluation/requeue feasibility is unverified")
     if manifest["launch_dependency"].get("binding_state") != "sealed":
-        blockers.append("Launch7 accepted report binding is unsealed")
+        blockers.append("future Launch8 accepted_engineering_pilot binding is unsealed")
+    if manifest["launch_dependency"].get("adapter_state") != "sealed_versioned_adapter":
+        blockers.append("future Launch8 versioned semantic adapter is unsealed")
     return {
         "schema_version": 1,
         "ready": not blockers,
-        "phase": "m1_hardened_runtime_scaffold_execution_blocked",
+        "phase": "m2a_orders_0_3_runtime_authority_scaffold_execution_blocked",
+        "m2a_schema_sha256": stable_hash(m2a_schema),
+        "m2a_schema_file_sha256": m2a_schema_file_sha,
+        "held_root_activation_implemented": True,
+        "interpreter_binary_pyvenv_path_provenance_implemented": True,
+        "interpreter_environment_content_provenance_implemented": False,
+        "same_stage_requeue_mutation_implemented": False,
+        "launch7_terminal_negative_binding_state": (
+            manifest["launch7_negative_dependency"]["binding_state"]
+        ),
+        "engineering_pilot_adapter_state": manifest["launch_dependency"]["adapter_state"],
+        "accepted_engineering_pilot_binding_state": manifest["launch_dependency"]["binding_state"],
         "formal_objective_delta_sha256": delta_sha,
         "blockers": blockers,
     }
@@ -2748,11 +3347,7 @@ def load_receipt(
     import campaign
 
     value, digest = authenticated_immutable_json(submission_root / "SUBMISSION_RECEIPT.json", "submission receipt")
-    require(set(value) == {
-        "schema_version", "status", "campaign_id", "submission_root",
-        "snapshot_root", "submission_sha256", "manifest_sha256", "jobs",
-        "dag_names", "training_array", "heldout_array",
-    }, "submission receipt schema differs")
+    require(set(value) == SUBMISSION_RECEIPT_KEYS, "submission receipt schema differs")
     require(
         value.get("schema_version") == 1
         and value.get("status") == "submitted"
@@ -2771,6 +3366,7 @@ def load_receipt(
         contract,
         submission_root=submission_root,
         digest=contract_digest,
+        verify_runtime_authority=verify_full_snapshot,
     )
     require(
         contract.get("schema_version") == 1
@@ -3014,6 +3610,592 @@ def load_receipt(
     return value, digest
 
 
+ROOT_RELEASE_AUTHORIZATION_KEYS = frozenset(
+    {
+        "schema_version", "status", "campaign_id", "submission_root",
+        "submission_sha256", "submission_receipt_sha256", "root_role",
+        "root_job_id", "root_job_name", "root_comment", "held_observation",
+        "held_observation_sha256", "release_command", "scheduler_control_plane",
+        "authorization_body_sha256",
+    }
+)
+ROOT_ACTIVATION_RESULT_KEYS = frozenset(
+    {
+        "schema_version", "status", "campaign_id", "submission_root",
+        "submission_sha256", "submission_receipt_sha256",
+        "root_release_authorization_sha256", "root_role", "root_job_id",
+        "release_command", "release_response_mode", "release_returncode",
+        "release_stdout", "release_stderr", "released_observation",
+        "result_body_sha256",
+    }
+)
+
+
+def _root_activation_context(
+    submission_root: Path,
+) -> dict[str, Any]:
+    """Reconstruct exact root authority solely from sealed receipt/contract bytes."""
+
+    receipt, receipt_sha = load_receipt(submission_root, verify_full_snapshot=False)
+    contract, contract_sha = authenticated_immutable_json(
+        submission_root / "SUBMISSION_CONTRACT.json",
+        "activation submission contract",
+    )
+    require(contract_sha == receipt["submission_sha256"], "activation contract/receipt differs")
+    snapshot_root = Path(str(receipt["snapshot_root"]))
+    snapshot_manifest, _manifest_file_sha = authenticated_immutable_json(
+        snapshot_root / PACKAGE_RELATIVE / "manifest.json",
+        "activation snapshot manifest",
+    )
+    import campaign
+
+    campaign.validate_manifest(snapshot_manifest)
+    validate_submission_contract(
+        contract,
+        submission_root=submission_root,
+        digest=contract_sha,
+        verify_runtime_authority=True,
+    )
+    jobs = list(receipt["jobs"])
+    roots = [row for row in jobs if row["role"] == "train_2000"]
+    require(len(roots) == 1 and jobs[0] == roots[0], "activation root receipt row differs")
+    root = roots[0]
+    ids = {str(row["role"]): str(row["job_id"]) for row in jobs}
+    commands = scheduler_commands(
+        snapshot_manifest,
+        snapshot_root,
+        submission_root,
+        contract_sha,
+        ids,
+    )
+    root_command = commands[0]
+    require(
+        root_command["node"]["name"] == "train_2000"
+        and root_command["predecessor_job_id"] is None
+        and "--hold" in root_command["command"],
+        "activation canonical held-root command differs",
+    )
+    return {
+        "receipt": receipt,
+        "receipt_sha256": receipt_sha,
+        "contract": contract,
+        "contract_sha256": contract_sha,
+        "manifest": snapshot_manifest,
+        "snapshot_root": snapshot_root,
+        "root": root,
+        "root_command": root_command,
+        "release_command": [
+            str(snapshot_manifest["execution"]["scontrol"]),
+            "release",
+            str(root["job_id"]),
+        ],
+    }
+
+
+def _root_observation_from_completed(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    context: Mapping[str, Any],
+    boundary: SchedulerBoundary,
+    lifecycle: str,
+) -> dict[str, Any]:
+    root = context["root"]
+    record = context["root_command"]
+    manifest = context["manifest"]
+    snapshot_root = context["snapshot_root"]
+    require(completed.returncode == 0, f"cannot observe activation root {root['job_id']}: {completed.stderr.strip()}")
+    normalized = validate_accepted_job_stdout(
+        completed.stdout,
+        job_id=str(root["job_id"]),
+        name=str(root["job_name"]),
+        comment=str(record["comment"]),
+        predecessor_job_id=None,
+        predecessor_elements=None,
+        manifest=manifest,
+        node=record["node"],
+        submit_command=record["command"],
+        cwd=snapshot_root,
+        root_lifecycle=lifecycle,
+    )
+    return {
+        "command": [
+            str(manifest["execution"]["scontrol"]),
+            "show",
+            "job",
+            str(root["job_id"]),
+            "--oneliner",
+        ],
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "dependency": normalized["dependency"],
+        "kill_on_invalid_dependency": normalized["kill_on_invalid_dependency"],
+        "normalized_shape": normalized,
+        "control_plane": boundary.expected,
+    }
+
+
+def _observe_root_lifecycle(
+    boundary: SchedulerBoundary,
+    context: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    command = [
+        str(context["manifest"]["execution"]["scontrol"]),
+        "show",
+        "job",
+        str(context["root"]["job_id"]),
+        "--oneliner",
+    ]
+    completed = boundary.call(command, context["snapshot_root"])
+    errors: dict[str, str] = {}
+    matches: list[tuple[dict[str, Any], str]] = []
+    for lifecycle in ("held", "released"):
+        try:
+            observation = _root_observation_from_completed(
+                completed,
+                context=context,
+                boundary=boundary,
+                lifecycle=lifecycle,
+            )
+        except RuntimeContractError as exc:
+            errors[lifecycle] = str(exc)
+        else:
+            matches.append((observation, lifecycle))
+    require(
+        len(matches) == 1,
+        f"activation root is neither uniquely held nor released: {errors}",
+    )
+    return matches[0]
+
+
+def _authorization_seed(
+    context: Mapping[str, Any],
+    held_observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    seed = {
+        "schema_version": 1,
+        "status": "receipt_committed_root_release_authorized",
+        "campaign_id": CAMPAIGN_ID,
+        "submission_root": str(context["receipt"]["submission_root"]),
+        "submission_sha256": context["contract_sha256"],
+        "submission_receipt_sha256": context["receipt_sha256"],
+        "root_role": "train_2000",
+        "root_job_id": str(context["root"]["job_id"]),
+        "root_job_name": str(context["root"]["job_name"]),
+        "root_comment": str(context["root_command"]["comment"]),
+        "held_observation": dict(held_observation),
+        "held_observation_sha256": stable_hash(held_observation),
+        "release_command": list(context["release_command"]),
+        "scheduler_control_plane": context["contract"]["scheduler_control_plane"],
+    }
+    seed["authorization_body_sha256"] = stable_hash(seed)
+    return seed
+
+
+def validate_root_release_authorization(
+    submission_root: Path,
+    value: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = _root_activation_context(submission_root) if context is None else dict(context)
+    require(set(value) == ROOT_RELEASE_AUTHORIZATION_KEYS, "root release-authorization schema differs")
+    body = dict(value)
+    body_hash = body.pop("authorization_body_sha256", None)
+    require(body_hash == stable_hash(body), "root release-authorization self-hash differs")
+    held = value.get("held_observation")
+    require(
+        isinstance(held, dict)
+        and set(held)
+        == {
+            "command", "stdout", "stderr", "dependency",
+            "kill_on_invalid_dependency", "normalized_shape", "control_plane",
+        }
+        and isinstance(held.get("stdout"), str)
+        and isinstance(held.get("stderr"), str),
+        "root held observation schema differs",
+    )
+    root = context["root"]
+    record = context["root_command"]
+    normalized = validate_accepted_job_stdout(
+        str(held.get("stdout", "")),
+        job_id=str(root["job_id"]),
+        name=str(root["job_name"]),
+        comment=str(record["comment"]),
+        predecessor_job_id=None,
+        predecessor_elements=None,
+        manifest=context["manifest"],
+        node=record["node"],
+        submit_command=record["command"],
+        cwd=context["snapshot_root"],
+        root_lifecycle="held",
+    )
+    expected_held = {
+        "command": [
+            str(context["manifest"]["execution"]["scontrol"]), "show", "job",
+            str(root["job_id"]), "--oneliner",
+        ],
+        "stdout": held.get("stdout"),
+        "stderr": held.get("stderr"),
+        "dependency": normalized["dependency"],
+        "kill_on_invalid_dependency": normalized["kill_on_invalid_dependency"],
+        "normalized_shape": normalized,
+        "control_plane": context["contract"]["scheduler_control_plane"],
+    }
+    expected = _authorization_seed(context, expected_held)
+    require(dict(value) == expected, "root release authorization differs from receipt/held evidence")
+    return expected
+
+
+def load_root_release_authorization(
+    submission_root: Path,
+    *,
+    context: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    value, digest = authenticated_immutable_json(
+        submission_root / "ROOT_RELEASE_AUTHORIZATION.json",
+        "root release authorization",
+    )
+    validate_root_release_authorization(submission_root, value, context=context)
+    return value, digest
+
+
+def validate_root_activation_result(
+    submission_root: Path,
+    value: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+    authorization_sha256: str | None = None,
+) -> dict[str, Any]:
+    context = _root_activation_context(submission_root) if context is None else dict(context)
+    authorization, loaded_authorization_sha = load_root_release_authorization(
+        submission_root,
+        context=context,
+    )
+    if authorization_sha256 is not None:
+        require(authorization_sha256 == loaded_authorization_sha, "activation authorization digest differs")
+    require(set(value) == ROOT_ACTIVATION_RESULT_KEYS, "root activation-result schema differs")
+    body = dict(value)
+    body_hash = body.pop("result_body_sha256", None)
+    require(body_hash == stable_hash(body), "root activation-result self-hash differs")
+    observation = value.get("released_observation")
+    require(
+        isinstance(observation, dict)
+        and isinstance(observation.get("stdout"), str)
+        and isinstance(observation.get("stderr"), str),
+        "released root observation is absent/malformed",
+    )
+    normalized = validate_accepted_job_stdout(
+        str(observation.get("stdout", "")),
+        job_id=str(context["root"]["job_id"]),
+        name=str(context["root"]["job_name"]),
+        comment=str(context["root_command"]["comment"]),
+        predecessor_job_id=None,
+        predecessor_elements=None,
+        manifest=context["manifest"],
+        node=context["root_command"]["node"],
+        submit_command=context["root_command"]["command"],
+        cwd=context["snapshot_root"],
+        root_lifecycle="released",
+    )
+    require(
+        set(observation)
+        == {
+            "command", "stdout", "stderr", "dependency",
+            "kill_on_invalid_dependency", "normalized_shape", "control_plane",
+        }
+        and observation.get("command")
+        == [
+            str(context["manifest"]["execution"]["scontrol"]), "show", "job",
+            str(context["root"]["job_id"]), "--oneliner",
+        ]
+        and observation.get("normalized_shape") == normalized
+        and observation.get("dependency") == normalized["dependency"]
+        and observation.get("kill_on_invalid_dependency")
+        == normalized["kill_on_invalid_dependency"]
+        and observation.get("control_plane")
+        == context["contract"]["scheduler_control_plane"],
+        "released root observation evidence differs",
+    )
+    mode = value.get("release_response_mode")
+    if mode == "direct_zero_exit":
+        require(
+            value.get("release_returncode") == 0
+            and isinstance(value.get("release_stdout"), str)
+            and isinstance(value.get("release_stderr"), str),
+            "direct root release response differs",
+        )
+    elif mode == "reconciled_nonzero_release_response":
+        require(
+            isinstance(value.get("release_returncode"), int)
+            and not isinstance(value.get("release_returncode"), bool)
+            and value["release_returncode"] != 0
+            and isinstance(value.get("release_stdout"), str)
+            and isinstance(value.get("release_stderr"), str),
+            "reconciled nonzero root release response differs",
+        )
+    else:
+        require(
+            mode == "reconciled_already_released_after_durable_authorization"
+            and value.get("release_returncode") is None
+            and value.get("release_stdout") is None
+            and value.get("release_stderr") is None,
+            "reconciled prior root release response differs",
+        )
+    require(
+        value.get("schema_version") == 1
+        and value.get("status") == "train_2000_released_and_observed"
+        and value.get("campaign_id") == CAMPAIGN_ID
+        and value.get("submission_root") == str(submission_root)
+        and value.get("submission_sha256") == context["contract_sha256"]
+        and value.get("submission_receipt_sha256") == context["receipt_sha256"]
+        and value.get("root_release_authorization_sha256") == loaded_authorization_sha
+        and value.get("root_role") == "train_2000"
+        and value.get("root_job_id") == str(context["root"]["job_id"])
+        and value.get("release_command") == context["release_command"],
+        "root activation-result identity differs",
+    )
+    del authorization
+    return dict(value)
+
+
+def _authorize_root_release_locked(
+    submission_root: Path,
+    *,
+    boundary: SchedulerBoundary,
+    fault_hook: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Durably authorize only while the root is held; never release it here.
+
+    This runs under the outer claim-to-receipt transaction lock.  Keeping the
+    root held makes every local fsync/controller-observation delay harmless to
+    queued workers.  The outer lock is released before the separate activation
+    function can issue ``scontrol release``.
+    """
+
+    hook = (lambda _ordinal: None) if fault_hook is None else fault_hook
+    repair_publication_residues(
+        submission_root,
+        allowed_final=re.compile(r"ROOT_(?:RELEASE_AUTHORIZATION|ACTIVATION_RESULT)\.json"),
+    )
+    for name in ("CANCEL_REQUESTED.json", "CANCEL_RESULT.json", "TRANSACTION_RECOVERY_RESULT.json"):
+        require(
+            not lexical_entry_exists(submission_root, name, f"root authorization marker {name}"),
+            f"root authorization conflicts with {name}",
+        )
+    context = _root_activation_context(submission_root)
+    require(
+        boundary.expected == context["contract"]["scheduler_control_plane"],
+        "root authorization scheduler control-plane binding differs",
+    )
+    authorization_path = submission_root / "ROOT_RELEASE_AUTHORIZATION.json"
+    result_path = submission_root / "ROOT_ACTIVATION_RESULT.json"
+    if lexical_entry_exists(submission_root, result_path.name, "root activation result"):
+        result, result_sha = authenticated_immutable_json(result_path, "root activation result")
+        validate_root_activation_result(submission_root, result, context=context)
+        authorization, authorization_sha = load_root_release_authorization(
+            submission_root,
+            context=context,
+        )
+        return {
+            **authorization,
+            "root_release_authorization_sha256": authorization_sha,
+            "activation_already_complete": True,
+            "root_activation_result_sha256": result_sha,
+            "retry": True,
+        }
+    if lexical_entry_exists(
+        submission_root,
+        authorization_path.name,
+        "root release authorization",
+    ):
+        authorization, authorization_sha = load_root_release_authorization(
+            submission_root,
+            context=context,
+        )
+        return {
+            **authorization,
+            "root_release_authorization_sha256": authorization_sha,
+            "activation_already_complete": False,
+            "retry": True,
+        }
+    observation, lifecycle = _observe_root_lifecycle(boundary, context)
+    require(lifecycle == "held", "root was released before durable release authorization")
+    authorization = _authorization_seed(context, observation)
+    authorization_sha = exclusive_json(authorization_path, authorization)
+    hook("authorization_published")
+    return {
+        **authorization,
+        "root_release_authorization_sha256": authorization_sha,
+        "activation_already_complete": False,
+        "retry": False,
+    }
+
+
+def authorize_root_release_after_receipt(
+    submission_root: Path,
+    *,
+    boundary: SchedulerBoundary,
+    fault_hook: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Serialize durable held-root authorization against exact-ID cancel."""
+
+    with report_cancel_lock(submission_root):
+        return _authorize_root_release_locked(
+            submission_root,
+            boundary=boundary,
+            fault_hook=fault_hook,
+        )
+
+
+def _activate_root_locked(
+    submission_root: Path,
+    *,
+    boundary: SchedulerBoundary,
+    fault_hook: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Release under cancel serialization, then publish under activation lock."""
+
+    hook = (lambda _ordinal: None) if fault_hook is None else fault_hook
+    repair_publication_residues(
+        submission_root,
+        allowed_final=re.compile(r"ROOT_(?:RELEASE_AUTHORIZATION|ACTIVATION_RESULT)\.json"),
+    )
+    for name in ("CANCEL_REQUESTED.json", "CANCEL_RESULT.json", "TRANSACTION_RECOVERY_RESULT.json"):
+        require(
+            not lexical_entry_exists(submission_root, name, f"root activation marker {name}"),
+            f"root activation conflicts with {name}",
+        )
+    context = _root_activation_context(submission_root)
+    require(
+        boundary.expected == context["contract"]["scheduler_control_plane"],
+        "activation scheduler control-plane binding differs",
+    )
+    authorization_path = submission_root / "ROOT_RELEASE_AUTHORIZATION.json"
+    result_path = submission_root / "ROOT_ACTIVATION_RESULT.json"
+    if lexical_entry_exists(submission_root, result_path.name, "root activation result"):
+        result, result_sha = authenticated_immutable_json(result_path, "root activation result")
+        validate_root_activation_result(submission_root, result, context=context)
+        with report_cancel_lock(submission_root):
+            for name in ("CANCEL_REQUESTED.json", "CANCEL_RESULT.json", "TRANSACTION_RECOVERY_RESULT.json"):
+                require(
+                    not lexical_entry_exists(submission_root, name, f"root activation return marker {name}"),
+                    f"root activation return conflicts with {name}",
+                )
+        return {**result, "root_activation_result_sha256": result_sha, "retry": True}
+
+    # Cancellation is excluded only through the release side effect and its
+    # bounded scheduler observation.  Result publication is historical audit
+    # evidence and may coexist with a later cancellation, so its unbounded fsync
+    # must not hold the emergency-cancel lock.
+    with report_cancel_lock(submission_root):
+        for name in ("CANCEL_REQUESTED.json", "CANCEL_RESULT.json", "TRANSACTION_RECOVERY_RESULT.json"):
+            require(
+                not lexical_entry_exists(submission_root, name, f"root release marker {name}"),
+                f"root release conflicts with {name}",
+            )
+        observation, lifecycle = _observe_root_lifecycle(boundary, context)
+        if lexical_entry_exists(
+            submission_root,
+            authorization_path.name,
+            "root release authorization",
+        ):
+            authorization, authorization_sha = load_root_release_authorization(
+                submission_root,
+                context=context,
+            )
+        else:
+            require(lifecycle == "held", "root was released before durable release authorization")
+            authorization = _authorization_seed(context, observation)
+            authorization_sha = exclusive_json(authorization_path, authorization)
+            hook("authorization_published")
+        release_response_mode: str
+        release_returncode: int | None
+        release_stdout: str | None
+        release_stderr: str | None
+        if lifecycle == "held":
+            hook("before_release_call")
+            try:
+                released = boundary.call(context["release_command"], context["snapshot_root"])
+            except BaseException as exc:
+                raise ActivationRecoveryRequired(
+                    f"root release response is ambiguous after durable authorization: {exc}"
+                ) from exc
+            hook("after_release_call")
+            release_returncode = released.returncode
+            release_stdout = released.stdout
+            release_stderr = released.stderr
+            release_response_mode = (
+                "direct_zero_exit"
+                if released.returncode == 0
+                else "reconciled_nonzero_release_response"
+            )
+            try:
+                observation, lifecycle = _observe_root_lifecycle(boundary, context)
+            except BaseException as exc:
+                raise ActivationRecoveryRequired(
+                    f"root release requires post-call recovery observation: {exc}"
+                ) from exc
+            require(lifecycle == "released", "root remained held after exact release call")
+        else:
+            release_response_mode = "reconciled_already_released_after_durable_authorization"
+            release_returncode = None
+            release_stdout = None
+            release_stderr = None
+    hook("released_observed")
+    result_seed = {
+        "schema_version": 1,
+        "status": "train_2000_released_and_observed",
+        "campaign_id": CAMPAIGN_ID,
+        "submission_root": str(submission_root),
+        "submission_sha256": context["contract_sha256"],
+        "submission_receipt_sha256": context["receipt_sha256"],
+        "root_release_authorization_sha256": authorization_sha,
+        "root_role": "train_2000",
+        "root_job_id": str(context["root"]["job_id"]),
+        "release_command": list(context["release_command"]),
+        "release_response_mode": release_response_mode,
+        "release_returncode": release_returncode,
+        "release_stdout": release_stdout,
+        "release_stderr": release_stderr,
+        "released_observation": observation,
+    }
+    result_seed["result_body_sha256"] = stable_hash(result_seed)
+    validate_root_activation_result(
+        submission_root,
+        result_seed,
+        context=context,
+        authorization_sha256=authorization_sha,
+    )
+    result_sha = exclusive_json(result_path, result_seed)
+    hook("activation_result_published")
+    # Linearize the caller-visible success return against cancellation without
+    # holding the emergency lock during the potentially unbounded result fsync.
+    with report_cancel_lock(submission_root):
+        for name in ("CANCEL_REQUESTED.json", "CANCEL_RESULT.json", "TRANSACTION_RECOVERY_RESULT.json"):
+            require(
+                not lexical_entry_exists(submission_root, name, f"root activation return marker {name}"),
+                f"root activation return conflicts with {name}",
+            )
+    del authorization
+    return {**result_seed, "root_activation_result_sha256": result_sha, "retry": False}
+
+
+def activate_root_after_receipt(
+    submission_root: Path,
+    *,
+    boundary: SchedulerBoundary,
+    fault_hook: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Serialize activators without holding emergency cancel during result fsync."""
+
+    with root_activation_lock(submission_root):
+        return _activate_root_locked(
+            submission_root,
+            boundary=boundary,
+            fault_hook=fault_hook,
+        )
+
+
 @contextmanager
 def queued_transaction_barrier(
     submission_root: Path,
@@ -3024,7 +4206,13 @@ def queued_transaction_barrier(
     max_attempts: int | None = None,
     require_committed_receipt: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Wait read-only for the submitter's exclusive lifetime lock, then share it."""
+    """Bypass the outer lock after durable authorization, else wait/share it.
+
+    A correctly released root necessarily has the immutable receipt and release
+    authorization already present.  That state is self-authenticating and no
+    longer needs the outer claim-to-receipt lock, so a later recovery process
+    cannot make running workers time out behind that lock.
+    """
 
     require(timeout_seconds == 900 and poll_seconds == 0.25, "queued receipt barrier contract differs")
     attempts = (
@@ -3033,6 +4221,16 @@ def queued_transaction_barrier(
         else max_attempts
     )
     require(isinstance(attempts, int) and 1 <= attempts <= 3601, "queued receipt barrier attempt bound differs")
+    if require_committed_receipt and _queued_commit_state(submission_root) == "committed":
+        yield {
+            "schema_version": 1,
+            "status": "durable_release_authorization_bypassed_outer_transaction_lock",
+            "attempt": 0,
+            "maximum_attempts": attempts,
+            "timeout_seconds": timeout_seconds,
+            "poll_seconds": poll_seconds,
+        }
+        return
     parent_fd = open_absolute_directory(submission_root.parent, "queued transaction lock parent")
     lock_name = f".{submission_root.name}.TRANSACTION.lock"
     descriptor = os.open(
@@ -3083,7 +4281,7 @@ def queued_transaction_barrier(
 
 
 def _queued_commit_state(submission_root: Path) -> str:
-    """Classify committed vs recovery-pending while holding the shared lock."""
+    """Classify immutable receipt+authorization vs recovery-pending state."""
 
     root_fd = open_absolute_directory(submission_root, "queued commit-state root")
     try:
@@ -3140,6 +4338,39 @@ def _queued_commit_state(submission_root: Path) -> str:
         and receipt_info.st_nlink == 1
         and stat.S_IMODE(receipt_info.st_mode) == 0o444,
         "queued committed receipt identity/mode differs",
+    )
+    authorization_info = root_entries.get("ROOT_RELEASE_AUTHORIZATION.json")
+    authorization_temp = root_entries.get(".ROOT_RELEASE_AUTHORIZATION.json.PUBLISHING")
+    if authorization_info is None:
+        require(
+            authorization_temp is None
+            or (
+                stat.S_ISREG(authorization_temp.st_mode)
+                and authorization_temp.st_uid == os.getuid()
+                and authorization_temp.st_gid == os.getgid()
+                and authorization_temp.st_nlink == 1
+            ),
+            "queued unpublished release-authorization residue differs",
+        )
+        return "recovery_pending"
+    if authorization_info.st_nlink == 2:
+        require(
+            authorization_temp is not None
+            and authorization_temp.st_dev == authorization_info.st_dev
+            and authorization_temp.st_ino == authorization_info.st_ino
+            and authorization_temp.st_nlink == 2
+            and stat.S_IMODE(authorization_info.st_mode) == 0o444,
+            "queued linked release-authorization residue differs",
+        )
+        return "recovery_pending"
+    require(
+        authorization_temp is None
+        and stat.S_ISREG(authorization_info.st_mode)
+        and authorization_info.st_uid == os.getuid()
+        and authorization_info.st_gid == os.getgid()
+        and authorization_info.st_nlink == 1
+        and stat.S_IMODE(authorization_info.st_mode) == 0o444,
+        "queued release-authorization identity/mode differs",
     )
     return "committed"
 
@@ -3215,6 +4446,11 @@ def bootstrap_queued_entry(
     require(contract_sha == submission_sha256, "queued submission contract bytes differ")
     require(contract.get("submission_root") == str(submission_root), "queued contract root differs")
     require(contract.get("snapshot_root") == str(snapshot_root), "queued contract snapshot differs")
+    validate_submission_contract(
+        contract,
+        submission_root=submission_root,
+        digest=contract_sha,
+    )
     inventory = contract.get("snapshot_inventory")
     require(isinstance(inventory, dict) and inventory, "queued snapshot inventory differs")
     require(contract.get("snapshot_inventory_sha256") == stable_hash(inventory), "queued snapshot inventory hash differs")
@@ -3254,6 +4490,22 @@ def bootstrap_queued_entry(
             and receipt_probe_info.st_gid == os.getgid()
             and stat.S_IMODE(receipt_probe_info.st_mode) == 0o444,
             "queued receipt submission/identity differs",
+        )
+        _authorization_bytes, authorization_probe_sha, authorization_probe_info = authenticated_regular_bytes(
+            submission_root / "ROOT_RELEASE_AUTHORIZATION.json",
+            "queued root release-authorization identity probe",
+        )
+        activation_context = _root_activation_context(submission_root)
+        authorization, authorization_sha = load_root_release_authorization(
+            submission_root,
+            context=activation_context,
+        )
+        require(
+            authorization_probe_sha == authorization_sha
+            and authorization_probe_info.st_uid == os.getuid()
+            and authorization_probe_info.st_gid == os.getgid()
+            and stat.S_IMODE(authorization_probe_info.st_mode) == 0o444,
+            "queued root release-authorization identity differs",
         )
         contract_again, contract_sha_again = authenticated_immutable_json(
             submission_root / "SUBMISSION_CONTRACT.json",
@@ -3296,6 +4548,22 @@ def bootstrap_queued_entry(
             and _identity(receipt_probe_info_again) == _identity(receipt_probe_info),
             "queued receipt entry was replaced across bootstrap",
         )
+        _authorization_bytes_again, authorization_probe_sha_again, authorization_probe_info_again = authenticated_regular_bytes(
+            submission_root / "ROOT_RELEASE_AUTHORIZATION.json",
+            "queued root release-authorization identity revalidation",
+        )
+        authorization_again, authorization_sha_again = load_root_release_authorization(
+            submission_root,
+            context=activation_context,
+        )
+        require(
+            authorization_again == authorization
+            and authorization_sha_again == authorization_sha
+            and authorization_probe_sha_again == authorization_sha_again
+            and _identity(authorization_probe_info_again)
+            == _identity(authorization_probe_info),
+            "queued root release authorization changed across bootstrap",
+        )
         _assert_queued_transaction_not_aborted(submission_root)
     return {
         "schema_version": 1,
@@ -3305,6 +4573,8 @@ def bootstrap_queued_entry(
         "snapshot_inventory_sha256": contract["snapshot_inventory_sha256"],
         "receipt": receipt,
         "receipt_sha256": receipt_sha,
+        "root_release_authorization": authorization,
+        "root_release_authorization_sha256": authorization_sha,
         "executing_source_sha256": executing_sha,
         "transaction_barrier": barrier,
     }
@@ -3602,6 +4872,7 @@ def _validate_terminal_recovery_result(
         contract,
         submission_root=submission_root,
         digest=contract_sha,
+        verify_runtime_authority=False,
     )
     require(
         value.get("submission_sha256") == contract_sha
@@ -3747,12 +5018,38 @@ def _recover_transaction_locked(
             require(len(ready) == 1, "receipt exists without durable READY_TO_COMMIT")
             require(receipt == ready[0]["payload"], "receipt differs from durable READY_TO_COMMIT")
             require(not contradictory, f"receipt conflicts with rollback/abort history: {contradictory}")
+            with report_cancel_lock(submission_root):
+                if (submission_root / "CANCEL_REQUESTED.json").exists() or (
+                    submission_root / "CANCEL_RESULT.json"
+                ).exists():
+                    cancellation = _explicit_cancel_locked(
+                        submission_root,
+                        plan=cancellation_plan(submission_root),
+                        boundary=boundary,
+                        execution=manifest["execution"],
+                    )
+                    return {
+                        "schema_version": 1,
+                        "status": "receipt_committed_cancellation_resumed",
+                        "receipt": receipt,
+                        "receipt_sha256": receipt_sha,
+                        "cancellation": cancellation,
+                        "scheduler_calls": len(boundary.calls),
+                    }
+                authorization = _authorize_root_release_locked(
+                    submission_root,
+                    boundary=boundary,
+                )
             return {
                 "schema_version": 1,
-                "status": "receipt_already_committed",
+                "status": "receipt_already_committed_root_release_authorized",
                 "receipt": receipt,
                 "receipt_sha256": receipt_sha,
-                "scheduler_calls": 0,
+                "authorization": authorization,
+                "scheduler_calls": len(boundary.calls),
+                "_post_transaction_activation_status": (
+                    "receipt_already_committed_root_activation_recovered"
+                ),
             }
         if ready:
             require(not contradictory, f"READY_TO_COMMIT conflicts with rollback/abort history: {contradictory}")
@@ -3775,13 +5072,22 @@ def _recover_transaction_locked(
                 "RECEIPT_COMMITTED_FROM_READY",
                 {"ready_journal_sha256": ready[0]["sha256"], "receipt_sha256": receipt_sha},
             )
+            with report_cancel_lock(submission_root):
+                authorization = _authorize_root_release_locked(
+                    submission_root,
+                    boundary=boundary,
+                )
             return {
                 "schema_version": 1,
-                "status": "receipt_committed_from_durable_ready",
+                "status": "receipt_committed_from_durable_ready_root_release_authorized",
                 "receipt": receipt,
                 "receipt_sha256": receipt_sha,
                 "evidence": str(evidence),
-                "scheduler_calls": 0,
+                "authorization": authorization,
+                "scheduler_calls": len(boundary.calls),
+                "_post_transaction_activation_status": (
+                    "receipt_committed_from_durable_ready_and_root_activated"
+                ),
             }
 
         contract_path = submission_root / "SUBMISSION_CONTRACT.json"
@@ -3811,6 +5117,7 @@ def _recover_transaction_locked(
             contract,
             submission_root=submission_root,
             digest=submission_sha,
+            verify_runtime_authority=False,
         )
         require(
             contract.get("campaign_id") == CAMPAIGN_ID
@@ -3907,12 +5214,56 @@ def recover_transaction(
     """Recover a crash at any claim-to-receipt point under the external lock."""
 
     with transaction_recovery_lock(submission_root) as lock_handle:
-        return _recover_transaction_locked(
+        result = _recover_transaction_locked(
             manifest,
             submission_root=submission_root,
             boundary=boundary,
             lock_handle=lock_handle,
         )
+    post_status = result.pop("_post_transaction_activation_status", None)
+    if post_status is None:
+        return result
+    require(isinstance(post_status, str) and post_status, "post-transaction activation status differs")
+    activation = activate_root_after_receipt(
+        submission_root,
+        boundary=boundary,
+    )
+    return {
+        **result,
+        "status": post_status,
+        "activation": activation,
+        "scheduler_calls": len(boundary.calls),
+    }
+
+
+@contextmanager
+def root_activation_lock(submission_root: Path) -> Iterator[None]:
+    """Serialize activation/recovery without blocking emergency cancellation."""
+
+    parent_fd = open_absolute_directory(submission_root, "root activation lock parent")
+    descriptor = os.open(
+        "ROOT_ACTIVATION.lock",
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+        dir_fd=parent_fd,
+    )
+    try:
+        info = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and info.st_gid == os.getgid()
+            and info.st_nlink == 1
+            and stat.S_IMODE(info.st_mode) == 0o600,
+            "root activation lock identity/mode differs",
+        )
+        os.fsync(parent_fd)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+        os.close(parent_fd)
 
 
 @contextmanager
@@ -4069,7 +5420,7 @@ def publish_report_quartet(
 
     del submission_root, bundle, decision, provenance
     raise RuntimeContractError(
-        "M1 report publication is disabled: exact all-stage/all-40 lineage, "
+        "M2A report publication is disabled: exact all-stage/all-40 lineage, "
         "200-cell paired-rail, seed-level df=3 inference, provenance, and formal-job "
         "evidence schemas are not sealed"
     )
@@ -4177,7 +5528,7 @@ def seal_requeue_ready(
     generation_root: Path,
     value: Mapping[str, Any],
 ) -> str:
-    """Bind one within-stage requeue to its exact receipt role/cell/checkpoint."""
+    """Publish a structural requeue-intent scaffold with no mutation authority."""
 
     validate_requeue_ready(submission_root, generation_root, value)
     return exclusive_json(generation_root / "REQUEUE_READY.json", value)
@@ -4192,40 +5543,20 @@ def call_same_run_requeue(
     execution: Mapping[str, Any],
     cwd: Path,
 ) -> dict[str, Any]:
-    ready_path = generation_root / "REQUEUE_READY.json"
-    authenticated, ready_sha = authenticated_immutable_json(ready_path, "requeue readiness")
-    require(authenticated == dict(ready), "requeue readiness bytes differ")
-    # The exact same pure validator runs both before publication and immediately
-    # before the scheduler mutation; an attacker cannot bypass checks by
-    # pre-positioning an immutable-looking readiness record.
-    receipt, _receipt_sha = validate_requeue_ready(
-        submission_root,
-        generation_root,
-        authenticated,
+    """Reject every requeue mutation until its scientific identity transaction seals.
+
+    ``REQUEUE_READY`` is only a structural, non-authoritative scaffold in M2A.  A
+    later protocol revision must bind exact run/W&B/checkpoint lineage and add an
+    idempotent scheduler observation/result transaction serialized with cancel.
+    Keeping this rejection before every read, record publication, and scheduler
+    call makes a syntactically plausible or pre-positioned record powerless.
+    """
+
+    del submission_root, generation_root, ready, boundary, execution, cwd
+    raise RuntimeContractError(
+        "same-stage requeue mutation is disabled in M2A: scientific identity, "
+        "cancel serialization, and lost-response reconciliation are unsealed"
     )
-    require(not (submission_root / "CANCEL_REQUESTED.json").exists(), "cancellation precludes requeue")
-    target = f"{ready['array_job_id']}_{ready['array_task_id']}"
-    calling = {
-        "schema_version": 1,
-        "status": "calling_same_run_requeue",
-        "campaign_id": CAMPAIGN_ID,
-        "submission_sha256": receipt["submission_sha256"],
-        "role": ready["role"],
-        "cell_index": ready["cell_index"],
-        "stage_target": ready["stage_target"],
-        "checkpoint_sha256": ready["checkpoint_sha256"],
-        "checkpoint_identity_sha256": ready["checkpoint_identity_sha256"],
-        "run_identity_sha256": ready["run_identity_sha256"],
-        "wandb_id": ready["wandb_id"],
-        "promotion_authority": "none_within_stage_requeue_only",
-        "requeue_target": target,
-        "requeue_ready_sha256": ready_sha,
-        "control_plane": boundary.expected,
-    }
-    calling_sha = exclusive_json(generation_root / "REQUEUE_CALLING.json", calling)
-    completed = boundary.call([str(execution["scontrol"]), "requeue", target], cwd)
-    require(completed.returncode == 0, f"same-run requeue failed: {completed.stderr.strip()}")
-    return {**calling, "requeue_calling_sha256": calling_sha, "stdout": completed.stdout, "stderr": completed.stderr}
 
 
 def runtime_description(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -4234,7 +5565,7 @@ def runtime_description(manifest: Mapping[str, Any]) -> dict[str, Any]:
     nodes = campaign.scheduler_dag(manifest)
     return {
         "schema_version": 1,
-        "phase": "m1_hardened_runtime_scaffold_execution_blocked",
+        "phase": "m2a_orders_0_3_runtime_authority_scaffold_execution_blocked",
         "campaign_id": CAMPAIGN_ID,
         "nodes": [asdict(node) for node in nodes],
         "node_count": len(nodes),
@@ -4245,11 +5576,40 @@ def runtime_description(manifest: Mapping[str, Any]) -> dict[str, Any]:
             "reconcile_all_transaction_names_on_any_failure": True,
             "cancel_exact_ids_reverse_dag": True,
             "receipt_commits_submission_inventory_but_is_not_execution_activation": True,
-            "execution_activation_implemented": False,
+            "root_is_submitted_user_held": True,
+            "durable_authorization_precedes_exact_release": True,
+            "outer_transaction_lock_released_before_root_release": True,
+            "queued_workers_bypass_outer_lock_after_authorization": True,
+            "execution_activation_implemented": True,
+            "activation_crash_recovery_implemented": True,
+            "release_side_effect_serialized_with_cancellation": True,
+            "activation_result_fsync_does_not_hold_cancel_lock": True,
             "accepted_dependencies_observed": True,
             "array_dependency_wildcards_required": True,
             "kill_invalid_dependency_required": True,
             "recovery_uses_contract_names_at_any_precommit_ordinal": True,
+        },
+        "interpreter_provenance": {
+            "capture_in_submission_contract": True,
+            "queued_bootstrap_exact_reauthentication": True,
+            "python_version": "3.11.15",
+            "binary_pyvenv_and_path_identity_implemented": True,
+            "environment_content_closure_implemented": False,
+        },
+        "engineering_pilot_prerequisites": {
+            "launch7_terminal_negative_binding_state": (
+                manifest["launch7_negative_dependency"]["binding_state"]
+            ),
+            "launch7_positive_authority_forbidden": True,
+            "future_launch8_adapter_state": manifest["launch_dependency"]["adapter_state"],
+            "future_launch8_positive_binding_state": manifest["launch_dependency"]["binding_state"],
+            "positive_adapter_implemented": False,
+        },
+        "same_stage_requeue": {
+            "structural_intent_record_only": True,
+            "scheduler_mutation_implemented": False,
+            "scientific_identity_sealed": False,
+            "lost_response_reconciliation_implemented": False,
         },
         "readiness": execution_readiness(manifest),
     }

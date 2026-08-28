@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "status": "awaiting_launch8_accepted_engineering_pilot",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+  "formal_submission_allowed": false,
+  "adapter_file_sha256": null,
+  "adapter_runtime_file_sha256": null,
+  "adapter_description_sha256": null,
+  "report_commit_file_sha256": null,
+  "binding_sha256": null
+}

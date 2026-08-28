@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import builtins
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
 from dataclasses import asdict
 import stat
 import subprocess
+import threading
 
 import pytest
 
 import campaign
 import cancel as cancel_cli
+import engineering_pilot_binder
 import runtime
 
 
@@ -33,12 +36,24 @@ def test_default_scheduler_runner_has_exact_per_call_timeout(monkeypatch, tmp_pa
     assert captured["timeout"] == 30
 
 
-def test_m1_explicitly_blocks_until_held_root_activation_handshake_exists() -> None:
+def test_m2a_implements_held_root_activation_but_keeps_execution_blocked() -> None:
     manifest = campaign.load_manifest()
     assert manifest["execution"]["requires_held_root_post_receipt_activation_handshake"] is True
     readiness = runtime.execution_readiness(manifest)
     assert readiness["ready"] is False
-    assert any("held train_2000 root" in blocker for blocker in readiness["blockers"])
+    assert readiness["held_root_activation_implemented"] is True
+    assert readiness["interpreter_binary_pyvenv_path_provenance_implemented"] is True
+    assert readiness["interpreter_environment_content_provenance_implemented"] is False
+    assert readiness["same_stage_requeue_mutation_implemented"] is False
+    assert readiness["launch7_terminal_negative_binding_state"] == (
+        "sealed_authenticated_terminal_negative_no_reuse"
+    )
+    assert readiness["accepted_engineering_pilot_binding_state"] == "unbound"
+    transaction = runtime.runtime_description(manifest)["transaction"]
+    assert transaction["outer_transaction_lock_released_before_root_release"] is True
+    assert transaction["queued_workers_bypass_outer_lock_after_authorization"] is True
+    assert transaction["release_side_effect_serialized_with_cancellation"] is True
+    assert transaction["activation_result_fsync_does_not_hold_cancel_lock"] is True
 
 
 def test_exclusive_json_is_no_replace_idempotent_and_leaves_no_private_name(tmp_path: Path) -> None:
@@ -286,6 +301,8 @@ def test_site_normalized_scalar_cpu_accepted_record_omits_array_and_tres(tmp_pat
         "record_count": 1,
         "array_task_ids": [],
         "states": ["PENDING"],
+        "reasons": ["<absent>"],
+        "root_lifecycle": "not_root",
         "dependency": "afterok:7000_*(unfulfilled)",
         "kill_on_invalid_dependency": "Yes",
     }
@@ -317,6 +334,7 @@ def test_site_normalized_compact_gpu_array_accepts_no_val_output(tmp_path: Path)
     )
     fields.extend(
         [
+            "Reason=JobHeldUser",
             "ArrayJobId=7000",
             "ArrayTaskId=0-39%40",
             "ArrayTaskThrottle=40",
@@ -387,6 +405,7 @@ def test_site_normalized_split_gpu_array_binds_parent_and_exact_task_cover(tmp_p
         node=record["node"],
         submit_command=record["command"],
         cwd=snapshot_root,
+        root_lifecycle="released",
     )
     assert normalized["record_count"] == 40
     assert normalized["array_task_ids"] == list(range(40))
@@ -540,6 +559,7 @@ class FakeScheduler:
             "command": command,
             "state": "PENDING",
             "canceled": False,
+            "held": "--hold" in command,
         }
         if role == self.fail_role and not self.failed:
             self.failed = True
@@ -561,6 +581,14 @@ class FakeScheduler:
         return _completed("\n".join(rows) + ("\n" if rows else ""))
 
     def _scontrol(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[1] == "release":
+            job_id = command[2]
+            job = self.jobs[job_id]
+            if job["canceled"]:
+                return _completed("", returncode=1, stderr="job is canceled")
+            job["held"] = False
+            return _completed("")
+        assert command[1:3] == ["show", "job"]
         job_id = command[3]
         job = self.jobs[job_id]
         role = job["role"]
@@ -609,6 +637,8 @@ class FakeScheduler:
             command=next(value for value in submit if value.endswith(".slurm")),
             requeue="1" if gpu else "0",
         )
+        if role == "train_2000":
+            fields.append("Reason=JobHeldUser" if job["held"] else "Reason=Resources")
         # SchedulerBoundary supplies cwd separately; replace the synthetic WorkDir
         # in runner() after this helper builds the otherwise exact fixture.
         if dependency_raw is not None:
@@ -1082,7 +1112,45 @@ def _sealed_submission_fixture(tmp_path: Path):
         submission_sha256=submission_sha,
         boundary=boundary,
     )
+    runtime.activate_root_after_receipt(
+        submission_root,
+        boundary=boundary,
+    )
     return manifest, submission_root, snapshot_root, submission_sha, receipt, fake, boundary
+
+
+def test_submission_contract_joins_exact_negative_positive_adapter_and_interpreter_leaves(
+    tmp_path: Path,
+) -> None:
+    manifest, submission_root, _snapshot_root, _sha, _fake, _boundary = (
+        _prepared_submission_fixture(tmp_path)
+    )
+    contract, _digest = runtime.authenticated_immutable_json(
+        submission_root / "SUBMISSION_CONTRACT.json",
+        "test submission contract",
+    )
+    assert contract["interpreter_provenance"]["source_manifest_sha256"] == (
+        campaign.manifest_sha256(manifest)
+    )
+    negative = contract["launch7_negative_binding"]
+    assert negative["negative_binding_sha256"] == (
+        "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd"
+    )
+    assert negative["evidence_file_sha256"] == (
+        contract["snapshot_inventory"][str(campaign.LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE)]
+    )
+    adapter = contract["engineering_pilot_adapter_interface"]
+    assert adapter["adapter_file_sha256"] == contract["snapshot_inventory"][
+        str(runtime.PACKAGE_RELATIVE / "engineering_pilot_binder.py")
+    ]
+    assert adapter["adapter_runtime_file_sha256"] == contract["snapshot_inventory"][
+        str(runtime.PACKAGE_RELATIVE / "runtime.py")
+    ]
+    positive = contract["accepted_engineering_pilot_binding"]
+    assert positive["adapter_file_sha256"] is None
+    assert positive["adapter_runtime_file_sha256"] is None
+    assert positive["report_commit_file_sha256"] is None
+    assert positive["binding_sha256"] is None
 
 
 def test_full_receipt_reauthenticates_snapshot_dag_tests_and_observations(tmp_path: Path) -> None:
@@ -1397,18 +1465,17 @@ def test_emergency_dispatch_and_cancel_plan_survive_unrelated_snapshot_loss(tmp_
 
 
 @pytest.mark.parametrize(
-    ("updates", "message"),
+    "updates",
     [
-        ({"array_task_id": 40, "cell_index": 40}, "training requeue cell"),
-        ({"promotion_authority": "gate_2000"}, "cross-stage promotion"),
-        ({"restart_count": True}, "restart count"),
-        ({"restart_count": -1}, "restart count"),
+        {},
+        {"array_task_id": 40, "cell_index": 40},
+        {"promotion_authority": "gate_2000"},
+        {"wandb_id": "forged-run", "run_identity_sha256": "9" * 64},
     ],
 )
-def test_prepositioned_invalid_requeue_ready_never_reaches_scheduler(
+def test_every_requeue_ready_is_non_authoritative_and_never_reaches_scheduler(
     tmp_path: Path,
     updates: dict[str, object],
-    message: str,
 ) -> None:
     _manifest, submission_root, snapshot_root, _sha, receipt, _fake, _boundary = _sealed_submission_fixture(tmp_path)
     _authenticated, receipt_sha = runtime.load_receipt(submission_root)
@@ -1447,7 +1514,7 @@ def test_prepositioned_invalid_requeue_ready_never_reaches_scheduler(
         observer=lambda: {},
         expected={},
     )
-    with pytest.raises(runtime.RuntimeContractError, match=message):
+    with pytest.raises(runtime.RuntimeContractError, match="disabled in M2A"):
         runtime.call_same_run_requeue(
             submission_root,
             generation_root,
@@ -1457,6 +1524,7 @@ def test_prepositioned_invalid_requeue_ready_never_reaches_scheduler(
             cwd=snapshot_root,
         )
     assert calls == []
+    assert not (generation_root / "REQUEUE_CALLING.json").exists()
 
 
 def test_train_wrapper_resets_child_signal_dispositions_before_exec() -> None:
@@ -1517,13 +1585,17 @@ def test_explicit_cancel_reuses_latch_after_failed_attempt(monkeypatch, tmp_path
 
 def test_committed_receipt_barrier_success_and_cancel_rejection(tmp_path: Path) -> None:
     _manifest, submission_root, _snapshot_root, _sha, _receipt, _fake, _boundary = _sealed_submission_fixture(tmp_path)
-    with runtime.queued_transaction_barrier(
-        submission_root,
-        max_attempts=1,
-        sleeper=lambda _seconds: None,
-        require_committed_receipt=True,
-    ) as evidence:
-        assert evidence["status"] == "exclusive_submission_lifetime_completed"
+    # Even a later recovery holding the outer lock cannot block an already
+    # authorized/released worker; the immutable authorization is sufficient.
+    with runtime.transaction_recovery_lock(submission_root):
+        with runtime.queued_transaction_barrier(
+            submission_root,
+            max_attempts=1,
+            sleeper=lambda _seconds: None,
+            require_committed_receipt=True,
+        ) as evidence:
+            assert evidence["status"] == "durable_release_authorization_bypassed_outer_transaction_lock"
+            assert evidence["attempt"] == 0
     runtime.exclusive_json(
         submission_root / "CANCEL_REQUESTED.json",
         {"schema_version": 1, "status": "test_cancel_latched"},
@@ -1607,5 +1679,631 @@ def test_isolated_snapshot_worker_crosses_committed_barrier_then_hits_authority_
     )
     assert completed.returncode == 2
     assert "EXP24_WORKER_BLOCKED" in completed.stderr
-    assert "blocked until Launch7" in completed.stderr
+    assert "Launch8 semantic adapter" in completed.stderr
     assert "receipt" not in completed.stderr.lower()
+
+
+def test_m2a_authority_graph_is_exact_acyclic_and_execution_blocked() -> None:
+    schema, file_sha = campaign.load_m2a_schema()
+    assert len(schema["topological_order"]) == 14
+    assert file_sha == hashlib.sha256(campaign.M2A_SCHEMA_PATH.read_bytes()).hexdigest()
+    assert schema["invariants"]["formal_submission_allowed"] is False
+    assert schema["invariants"]["scientific_protocol_sealed"] is False
+    assert schema["invariants"]["execution_readiness_ready"] is False
+    assert schema["invariants"]["same_stage_requeue_mutation_is_disabled"] is True
+    artifacts = {row["id"]: row for row in schema["artifacts"]}
+    assert artifacts["interpreter_provenance"]["depends_on"] == ["source_manifest_file"]
+    assert artifacts["launch7_terminal_negative_binding"]["depends_on"] == [
+        "launch7_terminal_negative_evidence"
+    ]
+    assert artifacts["accepted_engineering_pilot_binding"]["depends_on"] == [
+        "engineering_pilot_adapter_interface",
+        "future_engineering_pilot_report_commit",
+    ]
+    assert set(artifacts["source_snapshot_inventory"]["depends_on"]) == {
+        "m2a_schema_file",
+        "source_manifest_file",
+        "launch7_terminal_negative_evidence",
+        "launch7_terminal_negative_binding",
+        "engineering_pilot_adapter_interface",
+        "accepted_engineering_pilot_binding",
+    }
+    malformed = json.loads(json.dumps(schema))
+    malformed["artifacts"][0]["depends_on"] = ["submission_contract"]
+    with pytest.raises(campaign.ContractError, match="artifact contract|cyclic"):
+        campaign.validate_m2a_schema(malformed)
+    forged_hash_field = json.loads(json.dumps(schema))
+    forged_hash_field["artifacts"][2]["hash_fields"] = ["arbitrary_sha256"]
+    with pytest.raises(campaign.ContractError, match="artifact contract"):
+        campaign.validate_m2a_schema(forged_hash_field)
+    forged_authority = json.loads(json.dumps(schema))
+    forged_authority["artifacts"][12]["authority"] = "release_was_probably_observed"
+    with pytest.raises(campaign.ContractError, match="artifact contract"):
+        campaign.validate_m2a_schema(forged_authority)
+
+
+def test_interpreter_provenance_is_self_hashed_and_exactly_recaptured() -> None:
+    manifest = campaign.load_manifest()
+    provenance = runtime.capture_interpreter_provenance(manifest)
+    assert provenance["python_version"] == "3.11.15"
+    assert provenance["source_manifest_sha256"] == campaign.manifest_sha256(manifest)
+    assert provenance["lexical_kind"] == "symlink"
+    assert provenance["resolved_executable_sha256"] == hashlib.sha256(
+        Path(provenance["resolved_executable"]).read_bytes()
+    ).hexdigest()
+    assert runtime.validate_interpreter_provenance(manifest, provenance) == provenance
+    forged = dict(provenance)
+    forged["resolved_executable_sha256"] = "0" * 64
+    forged["provenance_sha256"] = runtime.stable_hash(
+        {key: value for key, value in forged.items() if key != "provenance_sha256"}
+    )
+    with pytest.raises(runtime.RuntimeContractError, match="drifted"):
+        runtime.validate_interpreter_provenance(manifest, forged)
+    wrong_manifest = dict(provenance)
+    wrong_manifest["source_manifest_sha256"] = "1" * 64
+    wrong_manifest["provenance_sha256"] = runtime.stable_hash(
+        {key: value for key, value in wrong_manifest.items() if key != "provenance_sha256"}
+    )
+    with pytest.raises(runtime.RuntimeContractError, match="drifted"):
+        runtime.validate_interpreter_provenance(manifest, wrong_manifest)
+
+
+def test_train_2000_is_exactly_held_in_command_and_test_contract(tmp_path: Path) -> None:
+    manifest = campaign.load_manifest()
+    record = runtime.scheduler_commands(
+        manifest,
+        tmp_path / "snapshot",
+        tmp_path / "submission",
+        "a" * 64,
+        through_index=0,
+    )[0]
+    assert record["node"]["name"] == "train_2000"
+    assert record["command"].count("--hold") == 1
+    options, _partitions = runtime.expected_test_options(manifest, record, dependency=None)
+    assert options["hold"] == "set"
+
+
+def test_held_root_authorization_is_durable_without_release_side_effect(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    receipt = runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    root_id = str(receipt["jobs"][0]["job_id"])
+    authorization = runtime.authorize_root_release_after_receipt(
+        submission_root,
+        boundary=boundary,
+    )
+    assert authorization["status"] == "receipt_committed_root_release_authorized"
+    assert fake.jobs[root_id]["held"] is True
+    assert [call for call in fake.calls if call[1:2] == ["release"]] == []
+    assert (submission_root / "ROOT_RELEASE_AUTHORIZATION.json").is_file()
+
+
+def test_submit_wrapper_releases_outer_lock_before_root_release(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manifest = json.loads(json.dumps(campaign.load_manifest()))
+    manifest["paths"]["run_root"] = str(tmp_path / "run")
+    lock_state = {"held": False}
+    boundary = object()
+    receipt = {"status": "submitted"}
+    authorization = {"status": "receipt_committed_root_release_authorized"}
+
+    @contextmanager
+    def fake_lock(_submission_root: Path):
+        assert lock_state["held"] is False
+        lock_state["held"] = True
+        try:
+            yield object()
+        finally:
+            lock_state["held"] = False
+
+    def fake_locked_submit(*_args, **_kwargs):
+        assert lock_state["held"] is True
+        return {
+            "schema_version": 1,
+            "status": "submission_receipt_and_held_root_release_authorization_committed",
+            "receipt": receipt,
+            "authorization": authorization,
+        }
+
+    def fake_activate(_submission_root: Path, *, boundary: object):
+        assert lock_state["held"] is False
+        return {"status": "train_2000_released_and_observed"}
+
+    monkeypatch.setattr(campaign, "assert_launch_authorized", lambda _manifest: None)
+    monkeypatch.setattr(runtime, "execution_readiness", lambda _manifest: {"ready": True, "blockers": []})
+    monkeypatch.setattr(runtime, "capture_interpreter_provenance", lambda _manifest: {"test": "provenance"})
+    monkeypatch.setattr(runtime, "capture_scheduler_control_plane_bundle", lambda _execution: (b"config", {"control": "plane"}))
+    monkeypatch.setattr(runtime, "scheduler_fallback_binding", lambda _payload, _observation: {"fallback": True})
+    monkeypatch.setattr(runtime, "scheduler_preclaim_test", lambda *_args, **_kwargs: {"preclaim": True})
+    monkeypatch.setattr(runtime, "transaction_recovery_lock", fake_lock)
+    monkeypatch.setattr(runtime, "_authorized_submit_locked", fake_locked_submit)
+    monkeypatch.setattr(runtime, "activate_root_after_receipt", fake_activate)
+    result = runtime.authorized_submit(manifest, boundary_factory=lambda _observation: boundary)
+    assert result["status"] == "submission_receipt_committed_and_root_activated"
+    assert result["receipt"] is receipt
+    assert result["authorization"] is authorization
+    assert lock_state["held"] is False
+
+
+def test_recovery_wrapper_releases_outer_lock_before_root_release(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    manifest = campaign.load_manifest()
+    submission_root = tmp_path / "submission"
+    lock_state = {"held": False}
+    boundary = type("FakeRecoveryBoundary", (), {"calls": []})()
+
+    @contextmanager
+    def fake_lock(root: Path):
+        assert root == submission_root and lock_state["held"] is False
+        lock_state["held"] = True
+        try:
+            yield object()
+        finally:
+            lock_state["held"] = False
+
+    def fake_locked_recovery(*_args, **_kwargs):
+        assert lock_state["held"] is True
+        return {
+            "schema_version": 1,
+            "status": "receipt_already_committed_root_release_authorized",
+            "authorization": {"status": "receipt_committed_root_release_authorized"},
+            "_post_transaction_activation_status": (
+                "receipt_already_committed_root_activation_recovered"
+            ),
+        }
+
+    def fake_activate(root: Path, *, boundary: object):
+        assert root == submission_root and lock_state["held"] is False
+        return {"status": "train_2000_released_and_observed"}
+
+    monkeypatch.setattr(runtime, "transaction_recovery_lock", fake_lock)
+    monkeypatch.setattr(runtime, "_recover_transaction_locked", fake_locked_recovery)
+    monkeypatch.setattr(runtime, "activate_root_after_receipt", fake_activate)
+    result = runtime.recover_transaction(
+        manifest,
+        submission_root=submission_root,
+        boundary=boundary,
+    )
+    assert result["status"] == "receipt_already_committed_root_activation_recovered"
+    assert "_post_transaction_activation_status" not in result
+    assert result["activation"]["status"] == "train_2000_released_and_observed"
+    assert lock_state["held"] is False
+
+
+def test_committed_receipt_recovery_authorizes_then_activates_idempotently(
+    tmp_path: Path,
+) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    receipt = runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    root_id = str(receipt["jobs"][0]["job_id"])
+    first = runtime.recover_transaction(
+        manifest,
+        submission_root=submission_root,
+        boundary=boundary,
+    )
+    assert first["status"] == "receipt_already_committed_root_activation_recovered"
+    assert first["authorization"]["status"] == "receipt_committed_root_release_authorized"
+    assert first["activation"]["status"] == "train_2000_released_and_observed"
+    assert fake.jobs[root_id]["held"] is False
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+    second = runtime.recover_transaction(
+        manifest,
+        submission_root=submission_root,
+        boundary=boundary,
+    )
+    assert second["activation"]["retry"] is True
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+
+
+def test_root_activation_orders_receipt_authorization_release_observation_result(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    receipt = runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    root_id = str(receipt["jobs"][0]["job_id"])
+    ordinals: list[str] = []
+
+    def inspect(ordinal: str) -> None:
+        ordinals.append(ordinal)
+        assert (submission_root / "SUBMISSION_RECEIPT.json").is_file()
+        if ordinal in {
+            "authorization_published", "before_release_call", "after_release_call",
+            "released_observed", "activation_result_published",
+        }:
+            assert (submission_root / "ROOT_RELEASE_AUTHORIZATION.json").is_file()
+        release_calls = [call for call in fake.calls if call[1:2] == ["release"]]
+        if ordinal in {"authorization_published", "before_release_call"}:
+            assert release_calls == []
+
+    result = runtime.activate_root_after_receipt(
+        submission_root,
+        boundary=boundary,
+        fault_hook=inspect,
+    )
+    assert ordinals == [
+        "authorization_published",
+        "before_release_call",
+        "after_release_call",
+        "released_observed",
+        "activation_result_published",
+    ]
+    assert result["status"] == "train_2000_released_and_observed"
+    assert result["release_command"] == [manifest["execution"]["scontrol"], "release", root_id]
+    assert fake.jobs[root_id]["held"] is False
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+    assert runtime.activate_root_after_receipt(submission_root, boundary=boundary)["retry"] is True
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+
+
+@pytest.mark.parametrize(
+    "crash_ordinal",
+    [
+        "authorization_published",
+        "before_release_call",
+        "after_release_call",
+        "released_observed",
+        "activation_result_published",
+    ],
+)
+def test_root_activation_recovers_every_durable_release_ordinal(
+    tmp_path: Path,
+    crash_ordinal: str,
+) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    receipt = runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    root_id = str(receipt["jobs"][0]["job_id"])
+
+    class InjectedCrash(RuntimeError):
+        pass
+
+    def crash(ordinal: str) -> None:
+        if ordinal == crash_ordinal:
+            raise InjectedCrash(ordinal)
+
+    with pytest.raises(InjectedCrash):
+        runtime.activate_root_after_receipt(
+            submission_root,
+            boundary=boundary,
+            fault_hook=crash,
+        )
+    recovered = runtime.recover_transaction(
+        manifest,
+        submission_root=submission_root,
+        boundary=boundary,
+    )
+    assert recovered["status"] == "receipt_already_committed_root_activation_recovered"
+    assert recovered["activation"]["status"] == "train_2000_released_and_observed"
+    assert fake.jobs[root_id]["held"] is False
+    assert (submission_root / "ROOT_RELEASE_AUTHORIZATION.json").is_file()
+    assert (submission_root / "ROOT_ACTIVATION_RESULT.json").is_file()
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+
+
+def test_cancellation_latch_blocks_root_activation_without_release(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    receipt = runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    canceled = runtime.explicit_cancel(
+        submission_root,
+        boundary=boundary,
+        execution=manifest["execution"],
+    )
+    assert canceled["status"] == "cancellation_converged_terminal_or_absent"
+    with pytest.raises(runtime.RuntimeContractError, match="conflicts with CANCEL"):
+        runtime.activate_root_after_receipt(submission_root, boundary=boundary)
+    assert [call for call in fake.calls if call[1:2] == ["release"]] == []
+    assert fake.jobs[str(receipt["jobs"][0]["job_id"])]["canceled"] is True
+
+
+def test_forged_release_authorization_fails_before_scheduler_release(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    context = runtime._root_activation_context(submission_root)
+    held, lifecycle = runtime._observe_root_lifecycle(boundary, context)
+    assert lifecycle == "held"
+    forged = runtime._authorization_seed(context, held)
+    forged["root_job_id"] = "999999"
+    forged["authorization_body_sha256"] = runtime.stable_hash(
+        {key: value for key, value in forged.items() if key != "authorization_body_sha256"}
+    )
+    runtime.exclusive_json(submission_root / "ROOT_RELEASE_AUTHORIZATION.json", forged)
+    calls_before = list(fake.calls)
+    with pytest.raises(runtime.RuntimeContractError, match="authorization differs"):
+        runtime.activate_root_after_receipt(submission_root, boundary=boundary)
+    assert [call for call in fake.calls[len(calls_before):] if call[1:2] == ["release"]] == []
+
+
+def test_activation_repairs_link_before_unlink_authorization_publication(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    context = runtime._root_activation_context(submission_root)
+    held, lifecycle = runtime._observe_root_lifecycle(boundary, context)
+    assert lifecycle == "held"
+    authorization = runtime._authorization_seed(context, held)
+    payload = (runtime.canonical_json(authorization) + "\n").encode()
+    temporary = submission_root / ".ROOT_RELEASE_AUTHORIZATION.json.PUBLISHING"
+    final = submission_root / "ROOT_RELEASE_AUTHORIZATION.json"
+    temporary.write_bytes(payload)
+    temporary.chmod(0o444)
+    os.link(temporary, final)
+    assert final.stat().st_nlink == 2
+    result = runtime.activate_root_after_receipt(submission_root, boundary=boundary)
+    assert result["status"] == "train_2000_released_and_observed"
+    assert final.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_activation_recovers_release_effect_with_lost_client_response(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, _boundary = _prepared_submission_fixture(tmp_path)
+    stable = {"schema_version": 1, "kind": "fake-stable-control-plane"}
+    lost = False
+
+    def ambiguous_runner(raw_command, cwd, environment, inherited_fds):
+        nonlocal lost
+        command = list(raw_command)
+        completed = fake(command, cwd, environment, inherited_fds)
+        if command[1:2] == ["release"] and not lost:
+            lost = True
+            raise subprocess.TimeoutExpired(command, 30)
+        return completed
+
+    boundary = runtime.SchedulerBoundary(
+        runner=ambiguous_runner,
+        observer=lambda: stable,
+        expected=stable,
+    )
+    runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    with pytest.raises(runtime.ActivationRecoveryRequired, match="ambiguous"):
+        runtime.activate_root_after_receipt(submission_root, boundary=boundary)
+    assert (submission_root / "ROOT_RELEASE_AUTHORIZATION.json").is_file()
+    assert not (submission_root / "ROOT_ACTIVATION_RESULT.json").exists()
+    recovered = runtime.recover_transaction(
+        manifest,
+        submission_root=submission_root,
+        boundary=boundary,
+    )
+    assert recovered["activation"]["release_response_mode"] == (
+        "reconciled_already_released_after_durable_authorization"
+    )
+    assert (submission_root / "ROOT_ACTIVATION_RESULT.json").is_file()
+    assert len([call for call in fake.calls if call[1:2] == ["release"]]) == 1
+
+
+def test_release_and_cancellation_are_linearly_ordered_by_one_lock(tmp_path: Path) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    activation_at_release = threading.Event()
+    permit_release = threading.Event()
+    activation_done = threading.Event()
+    cancellation_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def activation_hook(ordinal: str) -> None:
+        if ordinal == "before_release_call":
+            activation_at_release.set()
+            assert permit_release.wait(5)
+
+    def activate() -> None:
+        try:
+            runtime.activate_root_after_receipt(
+                submission_root,
+                boundary=boundary,
+                fault_hook=activation_hook,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            activation_done.set()
+
+    def cancel() -> None:
+        try:
+            runtime.explicit_cancel(
+                submission_root,
+                boundary=boundary,
+                execution=manifest["execution"],
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            cancellation_done.set()
+
+    activation_thread = threading.Thread(target=activate)
+    activation_thread.start()
+    assert activation_at_release.wait(5)
+    cancel_thread = threading.Thread(target=cancel)
+    cancel_thread.start()
+    assert not cancellation_done.wait(0.1)
+    assert not any(Path(call[0]).name == "scancel" for call in fake.calls)
+    permit_release.set()
+    activation_thread.join(5)
+    cancel_thread.join(5)
+    assert activation_done.is_set() and cancellation_done.is_set()
+    assert len(failures) <= 1
+    if failures:
+        assert isinstance(failures[0], runtime.RuntimeContractError)
+        assert "activation return conflicts" in str(failures[0])
+    release_index = next(index for index, call in enumerate(fake.calls) if call[1:2] == ["release"])
+    cancel_index = next(index for index, call in enumerate(fake.calls) if Path(call[0]).name == "scancel")
+    assert release_index < cancel_index
+    assert (submission_root / "ROOT_ACTIVATION_RESULT.json").is_file()
+    assert (submission_root / "CANCEL_RESULT.json").is_file()
+
+
+def test_post_release_result_delay_does_not_block_emergency_cancellation(
+    tmp_path: Path,
+) -> None:
+    manifest, submission_root, snapshot_root, submission_sha, fake, boundary = _prepared_submission_fixture(tmp_path)
+    runtime.submit_dag_transaction(
+        manifest,
+        submission_root=submission_root,
+        snapshot_root=snapshot_root,
+        submission_sha256=submission_sha,
+        boundary=boundary,
+    )
+    released_observed = threading.Event()
+    permit_result = threading.Event()
+    activation_done = threading.Event()
+    cancellation_done = threading.Event()
+    failures: list[BaseException] = []
+
+    def activation_hook(ordinal: str) -> None:
+        if ordinal == "released_observed":
+            released_observed.set()
+            assert permit_result.wait(5)
+
+    def activate() -> None:
+        try:
+            runtime.activate_root_after_receipt(
+                submission_root,
+                boundary=boundary,
+                fault_hook=activation_hook,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            activation_done.set()
+
+    def cancel() -> None:
+        try:
+            runtime.explicit_cancel(
+                submission_root,
+                boundary=boundary,
+                execution=manifest["execution"],
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            cancellation_done.set()
+
+    activation_thread = threading.Thread(target=activate)
+    activation_thread.start()
+    assert released_observed.wait(5)
+    cancellation_thread = threading.Thread(target=cancel)
+    cancellation_thread.start()
+    assert cancellation_done.wait(5)
+    assert not activation_done.is_set()
+    assert (submission_root / "CANCEL_RESULT.json").is_file()
+    permit_result.set()
+    activation_thread.join(5)
+    cancellation_thread.join(5)
+    assert len(failures) == 1
+    assert isinstance(failures[0], runtime.RuntimeContractError)
+    assert "activation return conflicts" in str(failures[0])
+    assert (submission_root / "ROOT_ACTIVATION_RESULT.json").is_file()
+
+
+def test_future_engineering_pilot_adapter_is_fail_closed_before_path_access(tmp_path: Path) -> None:
+    missing = tmp_path / "must-not-be-opened"
+    with pytest.raises(
+        engineering_pilot_binder.EngineeringPilotBindingError,
+        match="adapter is not sealed",
+    ):
+        engineering_pilot_binder.verify_engineering_pilot_report_quartet(
+            missing,
+            expected_report_root=missing,
+            expected_submission_root=missing,
+            expected_submission_sha256="not-even-parsed",
+            expected_package_binding={"must": "not-be-read"},
+        )
+    assert not missing.exists()
+
+
+def test_engineering_pilot_adapter_description_forbids_launch7_positive_authority() -> None:
+    description = engineering_pilot_binder.adapter_description()
+    assert description["expected_campaign_id"] == (
+        "treewm-executable-prefix-repair-pilot-v1-launch8"
+    )
+    assert description["forbidden_positive_campaign_id"] == (
+        "treewm-executable-prefix-repair-pilot-v1-launch7"
+    )
+    assert description["adapter_state"].startswith("unsealed_")
+    assert description["binding_state"] == "unbound"
+    assert description["implementation_dependency_files"] == [
+        str(runtime.PACKAGE_RELATIVE / "engineering_pilot_binder.py"),
+        str(runtime.PACKAGE_RELATIVE / "runtime.py"),
+    ]
+    assert description["semantic_adapter_implemented"] is False
+    assert description["persistent_writes_performed"] is False
+    assert description["real_report_opened"] is False
+    assert len(description["requirements"]) == 10
+
+
+def test_positive_placeholder_and_authenticated_launch7_negative_are_distinct() -> None:
+    positive = json.loads(
+        (runtime.PACKAGE_DIR / "accepted_engineering_pilot.binding.json").read_text()
+    )
+    negative = json.loads(
+        (runtime.PACKAGE_DIR / "launch7_negative.binding.json").read_text()
+    )
+    assert positive == {
+        "schema_version": 1,
+        "status": "awaiting_launch8_accepted_engineering_pilot",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+        "formal_submission_allowed": False,
+        "adapter_file_sha256": None,
+        "adapter_runtime_file_sha256": None,
+        "adapter_description_sha256": None,
+        "report_commit_file_sha256": None,
+        "binding_sha256": None,
+    }
+    assert campaign.validate_launch7_negative_binding(negative) == (
+        "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd"
+    )
+    assert negative["status"] == "authenticated_terminal_negative_no_reuse"
+    assert negative["accepted"] is negative["reusable"] is False
+    assert not (runtime.PACKAGE_DIR / "launch7_acceptance.binding.json").exists()
+    assert not (runtime.PACKAGE_DIR / "launch7_binder.py").exists()

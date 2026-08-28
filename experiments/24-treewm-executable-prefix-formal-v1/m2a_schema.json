@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "campaign_id": "treewm-executable-prefix-formal-v1-launch1",
+  "status": "m2a_orders_0_3_authority_graph_sealed_execution_blocked",
+  "canonical_hash": {
+    "encoding": "utf-8",
+    "json": "sort_keys_compact_ascii_allow_nan_false",
+    "algorithm": "sha256",
+    "self_hash_policy": "a_self_hash_field_is_excluded_from_the_canonical_body_it_authenticates",
+    "file_hash_policy": "sha256_of_exact_file_bytes_is_distinct_from_canonical_semantic_hash"
+  },
+  "topological_order": [
+    "m2a_schema_file",
+    "source_manifest_file",
+    "interpreter_provenance",
+    "launch7_terminal_negative_evidence",
+    "launch7_terminal_negative_binding",
+    "engineering_pilot_adapter_interface",
+    "future_engineering_pilot_report_commit",
+    "accepted_engineering_pilot_binding",
+    "source_snapshot_inventory",
+    "submission_contract",
+    "submission_receipt",
+    "root_release_authorization",
+    "root_activation_result",
+    "queued_root_execution_authority"
+  ],
+  "artifacts": [
+    {
+      "id": "m2a_schema_file",
+      "depends_on": [],
+      "hash_fields": ["m2a_schema_file_sha256", "m2a_schema_sha256"],
+      "authority": "package_owned_immutable_snapshot_leaf"
+    },
+    {
+      "id": "source_manifest_file",
+      "depends_on": [],
+      "hash_fields": ["manifest_sha256"],
+      "authority": "package_owned_immutable_snapshot_leaf"
+    },
+    {
+      "id": "interpreter_provenance",
+      "depends_on": ["source_manifest_file"],
+      "hash_fields": ["provenance_sha256"],
+      "authority": "binary_pyvenv_and_path_capture_reauthenticated_before_every_queued_entry_environment_contents_unbound"
+    },
+    {
+      "id": "launch7_terminal_negative_evidence",
+      "depends_on": [],
+      "hash_fields": ["raw_file_sha256", "canonical_json_sha256", "evidence_git_commit"],
+      "authority": "independently_committed_terminal_negative_provenance_leaf"
+    },
+    {
+      "id": "launch7_terminal_negative_binding",
+      "depends_on": ["launch7_terminal_negative_evidence"],
+      "hash_fields": ["negative_binding_sha256"],
+      "authority": "authenticated_terminal_negative_no_reuse_binding"
+    },
+    {
+      "id": "engineering_pilot_adapter_interface",
+      "depends_on": [],
+      "hash_fields": ["adapter_file_sha256", "adapter_runtime_file_sha256", "adapter_description_sha256"],
+      "authority": "package_owned_fail_closed_interface_launch8_semantic_adapter_unsealed"
+    },
+    {
+      "id": "future_engineering_pilot_report_commit",
+      "depends_on": [],
+      "hash_fields": ["report_commit_file_sha256"],
+      "authority": "future_external_leaf_exact_schema_unavailable_until_launch8_protocol_freezes"
+    },
+    {
+      "id": "accepted_engineering_pilot_binding",
+      "depends_on": ["engineering_pilot_adapter_interface", "future_engineering_pilot_report_commit"],
+      "hash_fields": ["binding_sha256"],
+      "authority": "package_owned_launch8_positive_binding_real_state_unbound_in_m2a"
+    },
+    {
+      "id": "source_snapshot_inventory",
+      "depends_on": ["m2a_schema_file", "source_manifest_file", "launch7_terminal_negative_evidence", "launch7_terminal_negative_binding", "engineering_pilot_adapter_interface", "accepted_engineering_pilot_binding"],
+      "hash_fields": ["snapshot_inventory_sha256"],
+      "authority": "exact_sealed_source_snapshot_inventory"
+    },
+    {
+      "id": "submission_contract",
+      "depends_on": ["m2a_schema_file", "source_manifest_file", "interpreter_provenance", "launch7_terminal_negative_binding", "accepted_engineering_pilot_binding", "source_snapshot_inventory"],
+      "hash_fields": ["contract_body_sha256", "submission_sha256"],
+      "authority": "prepared_scheduler_transaction_not_execution_activation"
+    },
+    {
+      "id": "submission_receipt",
+      "depends_on": ["submission_contract"],
+      "hash_fields": ["receipt_sha256"],
+      "authority": "exact_eleven_job_inventory_with_train_2000_held"
+    },
+    {
+      "id": "root_release_authorization",
+      "depends_on": ["submission_contract", "submission_receipt"],
+      "hash_fields": ["authorization_body_sha256", "root_release_authorization_sha256"],
+      "authority": "durable_pre_release_worker_authority"
+    },
+    {
+      "id": "root_activation_result",
+      "depends_on": ["root_release_authorization"],
+      "hash_fields": ["result_body_sha256", "root_activation_result_sha256"],
+      "authority": "exact_release_command_and_post_release_observation"
+    },
+    {
+      "id": "queued_root_execution_authority",
+      "depends_on": ["submission_contract", "submission_receipt", "root_release_authorization"],
+      "hash_fields": [],
+      "authority": "read_only_bootstrap_decision_result_is_recovery_evidence_not_a_worker_prerequisite"
+    }
+  ],
+  "schemas": {
+    "submission_contract": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "submission_root",
+      "snapshot_root",
+      "manifest_sha256",
+      "m2a_schema",
+      "interpreter_provenance",
+      "launch7_negative_binding",
+      "engineering_pilot_adapter_interface",
+      "accepted_engineering_pilot_binding",
+      "snapshot_inventory",
+      "snapshot_inventory_sha256",
+      "emergency_dispatch",
+      "dag",
+      "scheduler_control_plane",
+      "scheduler_preclaim",
+      "scheduler_fallback",
+      "contract_body_sha256"
+    ],
+    "submission_receipt": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "submission_root",
+      "snapshot_root",
+      "submission_sha256",
+      "manifest_sha256",
+      "jobs",
+      "dag_names",
+      "training_array",
+      "heldout_array"
+    ],
+    "interpreter_provenance": [
+      "schema_version",
+      "status",
+      "source_manifest_sha256",
+      "lexical_executable",
+      "lexical_kind",
+      "lexical_symlink_target",
+      "resolved_executable",
+      "resolved_executable_sha256",
+      "resolved_executable_size",
+      "base_executable",
+      "pyvenv_cfg",
+      "pyvenv_cfg_sha256",
+      "pyvenv_cfg_size",
+      "venv_site_packages",
+      "base_site_packages",
+      "python_version",
+      "implementation",
+      "cache_tag",
+      "provenance_sha256"
+    ],
+    "launch7_negative_binding": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "accepted",
+      "reusable",
+      "formal_submission_allowed",
+      "evidence",
+      "bound_semantics",
+      "negative_binding_sha256"
+    ],
+    "launch7_negative_evidence_anchor": [
+      "repository_relative_path",
+      "evidence_git_commit",
+      "raw_file_sha256",
+      "canonical_json_sha256"
+    ],
+    "accepted_engineering_pilot_binding": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "formal_submission_allowed",
+      "adapter_file_sha256",
+      "adapter_runtime_file_sha256",
+      "adapter_description_sha256",
+      "report_commit_file_sha256",
+      "binding_sha256"
+    ],
+    "engineering_pilot_adapter_description": [
+      "schema_version",
+      "status",
+      "expected_campaign_id",
+      "forbidden_positive_campaign_id",
+      "required_status",
+      "adapter_state",
+      "binding_state",
+      "implementation_dependency_files",
+      "semantic_adapter_implemented",
+      "requirements",
+      "persistent_writes_performed",
+      "real_report_opened"
+    ],
+    "engineering_pilot_adapter_interface": [
+      "relative_path",
+      "adapter_file_sha256",
+      "adapter_runtime_file_sha256",
+      "adapter_description_sha256",
+      "adapter_state",
+      "expected_campaign_id",
+      "forbidden_positive_campaign_id"
+    ],
+    "root_release_authorization": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "submission_root",
+      "submission_sha256",
+      "submission_receipt_sha256",
+      "root_role",
+      "root_job_id",
+      "root_job_name",
+      "root_comment",
+      "held_observation",
+      "held_observation_sha256",
+      "release_command",
+      "scheduler_control_plane",
+      "authorization_body_sha256"
+    ],
+    "root_activation_result": [
+      "schema_version",
+      "status",
+      "campaign_id",
+      "submission_root",
+      "submission_sha256",
+      "submission_receipt_sha256",
+      "root_release_authorization_sha256",
+      "root_role",
+      "root_job_id",
+      "release_command",
+      "release_response_mode",
+      "release_returncode",
+      "release_stdout",
+      "release_stderr",
+      "released_observation",
+      "result_body_sha256"
+    ]
+  },
+  "invariants": {
+    "graph_must_be_acyclic": true,
+    "every_dependency_must_precede_consumer": true,
+    "root_train_2000_is_held_until_receipt_and_authorization_are_durable": true,
+    "outer_transaction_lock_is_released_before_root_release": true,
+    "queued_workers_bypass_outer_lock_after_durable_authorization": true,
+    "release_is_exact_parent_id_only": true,
+    "release_side_effect_and_cancellation_share_one_exclusive_lock": true,
+    "activation_result_publication_does_not_hold_emergency_cancel_lock": true,
+    "workers_require_pre_release_authorization_not_post_release_result": true,
+    "launch7_terminal_negative_binding_is_mandatory_and_authenticated": true,
+    "launch7_can_never_be_positive_authority": true,
+    "future_launch8_positive_adapter_is_unsealed": true,
+    "accepted_engineering_pilot_binding_is_unbound": true,
+    "interpreter_environment_content_closure_is_unbound": true,
+    "same_stage_requeue_mutation_is_disabled": true,
+    "formal_submission_allowed": false,
+    "scientific_protocol_sealed": false,
+    "execution_readiness_ready": false
+  }
+}

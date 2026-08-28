@@ -2,8 +2,8 @@
 """Outcome-blind design contract for the fresh Exp24 executable-prefix formal.
 
 This module is deliberately stdlib-only and read-only.  It freezes the scientific
-matrix and the required execution architecture while the upstream Exp23 Launch7
-pilot is still running.  It does not create output directories, snapshots, locks,
+matrix and the required execution architecture after Exp23 Launch7 terminated
+negative.  It does not create output directories, snapshots, locks,
 or scheduler jobs, and it cannot authorize a launch in its current package phase.
 """
 
@@ -25,12 +25,28 @@ sys.dont_write_bytecode = True
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
+PACKAGE_RELATIVE = Path("experiments/24-treewm-executable-prefix-formal-v1")
 MANIFEST_PATH = PACKAGE_DIR / "manifest.json"
-UPSTREAM_BINDING_PATH = PACKAGE_DIR / "launch7_acceptance.binding.json"
+ACCEPTED_PILOT_BINDING_PATH = PACKAGE_DIR / "accepted_engineering_pilot.binding.json"
+LAUNCH7_NEGATIVE_BINDING_PATH = PACKAGE_DIR / "launch7_negative.binding.json"
+M2A_SCHEMA_PATH = PACKAGE_DIR / "m2a_schema.json"
 
 CAMPAIGN_ID = "treewm-executable-prefix-formal-v1-launch1"
-UPSTREAM_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
-PACKAGE_PHASE = "m1_hardened_runtime_scaffold_execution_blocked"
+ACCEPTED_PILOT_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
+LAUNCH7_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+UPSTREAM_CAMPAIGN_ID = LAUNCH7_CAMPAIGN_ID
+LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE = Path(
+    "experiments/23-treewm-executable-prefix-repair-pilot-v1/"
+    "launch7_negative_provenance.json"
+)
+LAUNCH7_NEGATIVE_EVIDENCE_GIT_COMMIT = "b354b12b9446ee88aebbf58ccc67683194ad0fe1"
+LAUNCH7_NEGATIVE_EVIDENCE_RAW_SHA256 = (
+    "29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e"
+)
+LAUNCH7_NEGATIVE_EVIDENCE_CANONICAL_SHA256 = (
+    "48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62"
+)
+PACKAGE_PHASE = "m2a_orders_0_3_runtime_authority_scaffold_execution_blocked"
 SELECTED_ARM = "GSEP"
 SEEDS = (240, 241, 242, 243)
 TASK_IDS = (1, 2, 3, 4, 5)
@@ -64,6 +80,120 @@ PILOT_COVERED_SETTINGS = frozenset(
 ADDITIONAL_FORMAL_SETTINGS = frozenset(setting for setting, _ in SETTING_SPECS) - PILOT_COVERED_SETTINGS
 TRAINING_RUNS = len(SETTING_SPECS) * len(SEEDS)
 FINAL_EVAL_CELLS = TRAINING_RUNS * len(TASK_IDS)
+M2A_TOPOLOGICAL_ORDER = (
+    "m2a_schema_file",
+    "source_manifest_file",
+    "interpreter_provenance",
+    "launch7_terminal_negative_evidence",
+    "launch7_terminal_negative_binding",
+    "engineering_pilot_adapter_interface",
+    "future_engineering_pilot_report_commit",
+    "accepted_engineering_pilot_binding",
+    "source_snapshot_inventory",
+    "submission_contract",
+    "submission_receipt",
+    "root_release_authorization",
+    "root_activation_result",
+    "queued_root_execution_authority",
+)
+M2A_DEPENDENCIES = {
+    "m2a_schema_file": (),
+    "source_manifest_file": (),
+    "interpreter_provenance": ("source_manifest_file",),
+    "launch7_terminal_negative_evidence": (),
+    "launch7_terminal_negative_binding": ("launch7_terminal_negative_evidence",),
+    "engineering_pilot_adapter_interface": (),
+    "future_engineering_pilot_report_commit": (),
+    "accepted_engineering_pilot_binding": (
+        "engineering_pilot_adapter_interface",
+        "future_engineering_pilot_report_commit",
+    ),
+    "source_snapshot_inventory": (
+        "m2a_schema_file",
+        "source_manifest_file",
+        "launch7_terminal_negative_evidence",
+        "launch7_terminal_negative_binding",
+        "engineering_pilot_adapter_interface",
+        "accepted_engineering_pilot_binding",
+    ),
+    "submission_contract": (
+        "m2a_schema_file",
+        "source_manifest_file",
+        "interpreter_provenance",
+        "launch7_terminal_negative_binding",
+        "accepted_engineering_pilot_binding",
+        "source_snapshot_inventory",
+    ),
+    "submission_receipt": ("submission_contract",),
+    "root_release_authorization": ("submission_contract", "submission_receipt"),
+    "root_activation_result": ("root_release_authorization",),
+    "queued_root_execution_authority": (
+        "submission_contract",
+        "submission_receipt",
+        "root_release_authorization",
+    ),
+}
+M2A_ARTIFACT_METADATA = {
+    "m2a_schema_file": {
+        "hash_fields": ["m2a_schema_file_sha256", "m2a_schema_sha256"],
+        "authority": "package_owned_immutable_snapshot_leaf",
+    },
+    "source_manifest_file": {
+        "hash_fields": ["manifest_sha256"],
+        "authority": "package_owned_immutable_snapshot_leaf",
+    },
+    "interpreter_provenance": {
+        "hash_fields": ["provenance_sha256"],
+        "authority": "binary_pyvenv_and_path_capture_reauthenticated_before_every_queued_entry_environment_contents_unbound",
+    },
+    "launch7_terminal_negative_binding": {
+        "hash_fields": ["negative_binding_sha256"],
+        "authority": "authenticated_terminal_negative_no_reuse_binding",
+    },
+    "launch7_terminal_negative_evidence": {
+        "hash_fields": ["raw_file_sha256", "canonical_json_sha256", "evidence_git_commit"],
+        "authority": "independently_committed_terminal_negative_provenance_leaf",
+    },
+    "engineering_pilot_adapter_interface": {
+        "hash_fields": [
+            "adapter_file_sha256", "adapter_runtime_file_sha256",
+            "adapter_description_sha256",
+        ],
+        "authority": "package_owned_fail_closed_interface_launch8_semantic_adapter_unsealed",
+    },
+    "future_engineering_pilot_report_commit": {
+        "hash_fields": ["report_commit_file_sha256"],
+        "authority": "future_external_leaf_exact_schema_unavailable_until_launch8_protocol_freezes",
+    },
+    "accepted_engineering_pilot_binding": {
+        "hash_fields": ["binding_sha256"],
+        "authority": "package_owned_launch8_positive_binding_real_state_unbound_in_m2a",
+    },
+    "source_snapshot_inventory": {
+        "hash_fields": ["snapshot_inventory_sha256"],
+        "authority": "exact_sealed_source_snapshot_inventory",
+    },
+    "submission_contract": {
+        "hash_fields": ["contract_body_sha256", "submission_sha256"],
+        "authority": "prepared_scheduler_transaction_not_execution_activation",
+    },
+    "submission_receipt": {
+        "hash_fields": ["receipt_sha256"],
+        "authority": "exact_eleven_job_inventory_with_train_2000_held",
+    },
+    "root_release_authorization": {
+        "hash_fields": ["authorization_body_sha256", "root_release_authorization_sha256"],
+        "authority": "durable_pre_release_worker_authority",
+    },
+    "root_activation_result": {
+        "hash_fields": ["result_body_sha256", "root_activation_result_sha256"],
+        "authority": "exact_release_command_and_post_release_observation",
+    },
+    "queued_root_execution_authority": {
+        "hash_fields": [],
+        "authority": "read_only_bootstrap_decision_result_is_recovery_evidence_not_a_worker_prerequisite",
+    },
+}
 
 
 class ContractError(RuntimeError):
@@ -226,6 +356,174 @@ def authenticated_regular_json(path: str | Path) -> tuple[dict[str, Any], str]:
     return value, digest.hexdigest()
 
 
+def _launch7_negative_semantic_projection(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project only the preregistered terminal-negative facts."""
+
+    require(
+        evidence.get("schema_version") == 1
+        and evidence.get("campaign_id") == LAUNCH7_CAMPAIGN_ID
+        and evidence.get("status") == "terminal_negative_provenance_frozen",
+        "Launch7 terminal-negative evidence identity/status differs",
+    )
+    immutable = evidence.get("immutable_identity") or {}
+    require(
+        immutable.get("source_commit") == "bdd5d819d291104d5aa7cbe8934ba935cb76518c"
+        and immutable.get("submission_sha256")
+        == "fc4ce1695e6e4ed5a23c8cd0a240299e0823ed1f2a17da87461261d74e74d112"
+        and immutable.get("receipt_sha256")
+        == "9be7e28cb2ffdfa7ab59f903eeb50e34e8e8f58a4dd4273d7fd789dfbc6ade10"
+        and immutable.get("package_protocol_sha256")
+        == "300d4aacde0502477450dbfc6bc2aaaa80eade93bc572776dd59a0cdd2d7d582",
+        "Launch7 terminal-negative immutable identity differs",
+    )
+    rows = evidence.get("scheduler_terminal_rows")
+    require(
+        isinstance(rows, list)
+        and len(rows) == 21
+        and sum("|FAILED|" in row for row in rows if isinstance(row, str)) == 16
+        and sum("|COMPLETED|" in row for row in rows if isinstance(row, str)) == 4
+        and sum("|CANCELLED|" in row for row in rows if isinstance(row, str)) == 1,
+        "Launch7 terminal scheduler state census differs",
+    )
+    terminal = evidence.get("scheduler_terminal_observation") or {}
+    zero_active = evidence.get("terminal_zero_active_evidence") or {}
+    reporter = evidence.get("reporter") or {}
+    markers = evidence.get("lifecycle_marker_census") or {}
+    shared_failure = evidence.get("shared_failure") or {}
+    tensorboard = evidence.get("tensorboard") or {}
+    conclusion = evidence.get("scientific_conclusion") or {}
+    required_conclusion = {
+        "campaign_complete": False,
+        "report_valid": False,
+        "four_completed_cells_are_reportable_as_campaign_results": False,
+        "sixteen_ready_checkpoints_are_resumable_by_a_later_launch": False,
+        "reuse_allowed": False,
+        "resume_allowed": False,
+        "retry_allowed": False,
+        "recovery_allowed": False,
+        "wandb_identity_reuse_allowed": False,
+        "namespace_reuse_allowed": False,
+    }
+    require(
+        terminal.get("canonical_reduced_rows_sha256")
+        == "ba0af0501dda20c6697333311c3c7c9eea2d3e586f348057e2d4aae811afaeac"
+        and zero_active.get("active_job_count") == 0
+        and zero_active.get("row_count") == 0
+        and reporter.get("state") == "CANCELLED"
+        and reporter.get("started") is False
+        and reporter.get("report_artifact_count") == 0
+        and shared_failure.get("deterministic_systemic") is True
+        and tensorboard.get("event_path_to_raw_sha256_map_sha256")
+        == "ac981a0a474a54435be46f32d83683a80a1ad17c5ed9647debfbf31eb52f3eb4"
+        and all(conclusion.get(key) is expected for key, expected in required_conclusion.items())
+        and conclusion.get("required_resolution")
+        == (
+            "A fresh Launch8 root, transaction lock, contract, two-wave job DAG, "
+            "and all twenty fresh run and W&B identities. Launch7 bytes remain "
+            "immutable negative evidence only."
+        ),
+        "Launch7 terminal-negative semantic conclusion differs",
+    )
+    required_markers = {
+        "USR1_REQUESTED": 16,
+        "CONTINUATION_READY_equivalent_REQUEUE_READY": 16,
+        "WORKER_COMPLETE_root": 4,
+        "WORKER_COMPLETE_generation_0": 4,
+        "TERM_REQUESTED": 0,
+        "REQUEUE_CALLING": 0,
+        "generation_1": 0,
+    }
+    require(
+        all(markers.get(key) == value for key, value in required_markers.items()),
+        "Launch7 lifecycle-marker census differs",
+    )
+    return {
+        "record_status": "terminal_negative_provenance_frozen",
+        "scientific_source_commit": immutable["source_commit"],
+        "submission_sha256": immutable["submission_sha256"],
+        "receipt_sha256": immutable["receipt_sha256"],
+        "package_protocol_sha256": immutable["package_protocol_sha256"],
+        "scheduler_cell_states": {"FAILED": 16, "COMPLETED": 4},
+        "reporter_state": "CANCELLED",
+        "zero_active_job_count": 0,
+        "lifecycle_marker_counts": required_markers,
+        "reporter_started": False,
+        "report_artifact_count": 0,
+        "deterministic_shared_failure": True,
+        "tensorboard_event_map_sha256": tensorboard[
+            "event_path_to_raw_sha256_map_sha256"
+        ],
+        "scheduler_reduced_rows_sha256": terminal[
+            "canonical_reduced_rows_sha256"
+        ],
+        "scientific_conclusion": {
+            **required_conclusion,
+            "required_fresh_campaign_id": ACCEPTED_PILOT_CAMPAIGN_ID,
+        },
+    }
+
+
+def validate_launch7_negative_binding(
+    binding: Mapping[str, Any],
+    *,
+    evidence_root: Path = REPOSITORY_ROOT,
+    evidence_value: Mapping[str, Any] | None = None,
+    evidence_raw_sha256: str | None = None,
+) -> str:
+    """Authenticate the committed negative record and its exact no-reuse binding."""
+
+    require(
+        set(binding)
+        == {
+            "schema_version", "status", "campaign_id", "accepted", "reusable",
+            "formal_submission_allowed", "evidence", "bound_semantics",
+            "negative_binding_sha256",
+        },
+        "Launch7 terminal-negative binding schema differs",
+    )
+    body = dict(binding)
+    binding_sha = body.pop("negative_binding_sha256", None)
+    require(
+        binding_sha == stable_hash(body)
+        and binding.get("schema_version") == 1
+        and binding.get("status") == "authenticated_terminal_negative_no_reuse"
+        and binding.get("campaign_id") == LAUNCH7_CAMPAIGN_ID
+        and binding.get("accepted") is False
+        and binding.get("reusable") is False
+        and binding.get("formal_submission_allowed") is False,
+        "Launch7 terminal-negative binding identity/hash differs",
+    )
+    expected_evidence = {
+        "repository_relative_path": str(LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE),
+        "evidence_git_commit": LAUNCH7_NEGATIVE_EVIDENCE_GIT_COMMIT,
+        "raw_file_sha256": LAUNCH7_NEGATIVE_EVIDENCE_RAW_SHA256,
+        "canonical_json_sha256": LAUNCH7_NEGATIVE_EVIDENCE_CANONICAL_SHA256,
+    }
+    require(binding.get("evidence") == expected_evidence, "Launch7 negative evidence anchor differs")
+    if evidence_value is None:
+        require(evidence_raw_sha256 is None, "Launch7 evidence digest lacks supplied evidence")
+        evidence, raw_sha = authenticated_regular_json(
+            evidence_root / LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE
+        )
+    else:
+        require(
+            evidence_raw_sha256 is not None,
+            "Launch7 supplied evidence lacks an authenticated raw digest",
+        )
+        evidence = dict(evidence_value)
+        raw_sha = evidence_raw_sha256
+    require(
+        raw_sha == LAUNCH7_NEGATIVE_EVIDENCE_RAW_SHA256
+        and stable_hash(evidence) == LAUNCH7_NEGATIVE_EVIDENCE_CANONICAL_SHA256,
+        "Launch7 committed negative evidence bytes/canonical hash differ",
+    )
+    require(
+        binding.get("bound_semantics") == _launch7_negative_semantic_projection(evidence),
+        "Launch7 terminal-negative semantic binding differs",
+    )
+    return str(binding_sha)
+
+
 def load_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
     manifest, _digest = authenticated_regular_json(path)
     validate_manifest(manifest)
@@ -238,6 +536,163 @@ def _exact_set(value: object, expected: set[str], label: str) -> None:
     require(set(value) == expected, f"{label} differs")
 
 
+def validate_m2a_schema(value: Mapping[str, Any]) -> None:
+    """Validate the exact acyclic M2A artifact/schema dependency graph."""
+
+    require(
+        set(value)
+        == {
+            "schema_version",
+            "campaign_id",
+            "status",
+            "canonical_hash",
+            "topological_order",
+            "artifacts",
+            "schemas",
+            "invariants",
+        },
+        "M2A schema top-level fields differ",
+    )
+    require(
+        value.get("schema_version") == 1
+        and value.get("campaign_id") == CAMPAIGN_ID
+        and value.get("status")
+        == "m2a_orders_0_3_authority_graph_sealed_execution_blocked",
+        "M2A schema identity/status differs",
+    )
+    require(
+        value.get("canonical_hash")
+        == {
+            "encoding": "utf-8",
+            "json": "sort_keys_compact_ascii_allow_nan_false",
+            "algorithm": "sha256",
+            "self_hash_policy": "a_self_hash_field_is_excluded_from_the_canonical_body_it_authenticates",
+            "file_hash_policy": "sha256_of_exact_file_bytes_is_distinct_from_canonical_semantic_hash",
+        },
+        "M2A canonical hash contract differs",
+    )
+    order = value.get("topological_order")
+    require(order == list(M2A_TOPOLOGICAL_ORDER), "M2A topological order differs")
+    artifacts = value.get("artifacts")
+    require(isinstance(artifacts, list) and len(artifacts) == len(order), "M2A artifact inventory differs")
+    seen: set[str] = set()
+    for expected_id, row in zip(M2A_TOPOLOGICAL_ORDER, artifacts, strict=True):
+        metadata = M2A_ARTIFACT_METADATA[expected_id]
+        require(
+            isinstance(row, dict)
+            and set(row) == {"id", "depends_on", "hash_fields", "authority"}
+            and row.get("id") == expected_id
+            and row.get("depends_on") == list(M2A_DEPENDENCIES[expected_id])
+            and row.get("hash_fields") == metadata["hash_fields"]
+            and row.get("authority") == metadata["authority"],
+            f"M2A artifact contract differs: {expected_id}",
+        )
+        require(set(row["depends_on"]).issubset(seen), f"M2A graph is cyclic/forward-referencing: {expected_id}")
+        seen.add(expected_id)
+    require(seen == set(M2A_TOPOLOGICAL_ORDER), "M2A graph coverage differs")
+    schemas = value.get("schemas")
+    expected_schemas = {
+        "submission_contract": [
+            "schema_version", "status", "campaign_id", "submission_root",
+            "snapshot_root", "manifest_sha256", "m2a_schema",
+            "interpreter_provenance", "launch7_negative_binding",
+            "engineering_pilot_adapter_interface",
+            "accepted_engineering_pilot_binding", "snapshot_inventory",
+            "snapshot_inventory_sha256", "emergency_dispatch", "dag",
+            "scheduler_control_plane", "scheduler_preclaim", "scheduler_fallback",
+            "contract_body_sha256",
+        ],
+        "submission_receipt": [
+            "schema_version", "status", "campaign_id", "submission_root",
+            "snapshot_root", "submission_sha256", "manifest_sha256", "jobs",
+            "dag_names", "training_array", "heldout_array",
+        ],
+        "interpreter_provenance": [
+            "schema_version", "status", "source_manifest_sha256",
+            "lexical_executable", "lexical_kind",
+            "lexical_symlink_target", "resolved_executable",
+            "resolved_executable_sha256", "resolved_executable_size",
+            "base_executable", "pyvenv_cfg", "pyvenv_cfg_sha256",
+            "pyvenv_cfg_size", "venv_site_packages", "base_site_packages",
+            "python_version", "implementation", "cache_tag", "provenance_sha256",
+        ],
+        "launch7_negative_binding": [
+            "schema_version", "status", "campaign_id", "accepted", "reusable",
+            "formal_submission_allowed", "evidence", "bound_semantics",
+            "negative_binding_sha256",
+        ],
+        "launch7_negative_evidence_anchor": [
+            "repository_relative_path", "evidence_git_commit",
+            "raw_file_sha256", "canonical_json_sha256",
+        ],
+        "accepted_engineering_pilot_binding": [
+            "schema_version", "status", "campaign_id",
+            "formal_submission_allowed", "adapter_file_sha256",
+            "adapter_runtime_file_sha256", "adapter_description_sha256",
+            "report_commit_file_sha256",
+            "binding_sha256",
+        ],
+        "engineering_pilot_adapter_description": [
+            "schema_version", "status", "expected_campaign_id",
+            "forbidden_positive_campaign_id", "required_status", "adapter_state",
+            "binding_state", "implementation_dependency_files",
+            "semantic_adapter_implemented", "requirements", "persistent_writes_performed",
+            "real_report_opened",
+        ],
+        "engineering_pilot_adapter_interface": [
+            "relative_path", "adapter_file_sha256",
+            "adapter_runtime_file_sha256", "adapter_description_sha256",
+            "adapter_state", "expected_campaign_id",
+            "forbidden_positive_campaign_id",
+        ],
+        "root_release_authorization": [
+            "schema_version", "status", "campaign_id", "submission_root",
+            "submission_sha256", "submission_receipt_sha256", "root_role",
+            "root_job_id", "root_job_name", "root_comment",
+            "held_observation", "held_observation_sha256", "release_command",
+            "scheduler_control_plane", "authorization_body_sha256",
+        ],
+        "root_activation_result": [
+            "schema_version", "status", "campaign_id", "submission_root",
+            "submission_sha256", "submission_receipt_sha256",
+            "root_release_authorization_sha256", "root_role", "root_job_id",
+            "release_command", "release_response_mode", "release_returncode", "release_stdout",
+            "release_stderr", "released_observation", "result_body_sha256",
+        ],
+    }
+    require(schemas == expected_schemas, "M2A exact artifact schemas differ")
+    require(
+        value.get("invariants")
+        == {
+            "graph_must_be_acyclic": True,
+            "every_dependency_must_precede_consumer": True,
+            "root_train_2000_is_held_until_receipt_and_authorization_are_durable": True,
+            "outer_transaction_lock_is_released_before_root_release": True,
+            "queued_workers_bypass_outer_lock_after_durable_authorization": True,
+            "release_is_exact_parent_id_only": True,
+            "release_side_effect_and_cancellation_share_one_exclusive_lock": True,
+            "activation_result_publication_does_not_hold_emergency_cancel_lock": True,
+            "workers_require_pre_release_authorization_not_post_release_result": True,
+            "launch7_terminal_negative_binding_is_mandatory_and_authenticated": True,
+            "launch7_can_never_be_positive_authority": True,
+            "future_launch8_positive_adapter_is_unsealed": True,
+            "accepted_engineering_pilot_binding_is_unbound": True,
+            "interpreter_environment_content_closure_is_unbound": True,
+            "same_stage_requeue_mutation_is_disabled": True,
+            "formal_submission_allowed": False,
+            "scientific_protocol_sealed": False,
+            "execution_readiness_ready": False,
+        },
+        "M2A authority invariants differ",
+    )
+
+
+def load_m2a_schema(path: str | Path = M2A_SCHEMA_PATH) -> tuple[dict[str, Any], str]:
+    value, digest = authenticated_regular_json(path)
+    validate_m2a_schema(value)
+    return value, digest
+
+
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
     """Validate every scientific and architectural decision frozen in phase one."""
 
@@ -245,7 +700,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(manifest.get("campaign_id") == CAMPAIGN_ID, "campaign ID differs")
     require(
         manifest.get("submission_authority_policy")
-        == "Submission authority requires authenticated Exp23 Launch7 acceptance, all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, and verified training/evaluation/requeue feasibility.",
+        == "Submission authority requires both an authenticated terminal-negative/no-reuse Launch7 record and an independently authenticated accepted future Exp23 engineering pilot (expected Launch8), plus all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, bound interpreter environment contents, and verified training/evaluation/requeue feasibility.",
         "submission authority policy differs",
     )
     require(
@@ -255,6 +710,21 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     )
     require("claim_policy" not in manifest, "legacy circular claim policy remains")
     require(manifest.get("package_phase") == PACKAGE_PHASE, "package phase differs")
+    require(
+        manifest.get("m2a_authority")
+        == {
+            "schema_path": str(PACKAGE_RELATIVE / "m2a_schema.json"),
+            "schema_state": "sealed_exact_acyclic_graph",
+            "interpreter_provenance_state": "implemented_binary_pyvenv_and_path_capture_environment_content_closure_unbound",
+            "held_root_activation_state": "implemented_receipt_authorize_release_observe_recover",
+            "launch7_terminal_negative_binding_state": "sealed_authenticated_terminal_negative_no_reuse",
+            "engineering_pilot_adapter_state": "fail_closed_interface_launch8_semantic_adapter_unsealed",
+            "accepted_engineering_pilot_binding_state": "unbound",
+            "formal_submission_allowed": False,
+            "execution_readiness_ready": False,
+        },
+        "M2A authority state differs",
+    )
     require(
         manifest.get("classification") == "fresh_formal_selected_gsep_only",
         "campaign classification differs",
@@ -709,11 +1179,48 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "failure_decision": "block_formal_and_require_new_engineering_design",
     }, "fixed-weight safety contract differs")
 
+    negative = manifest.get("launch7_negative_dependency") or {}
+    require(
+        negative
+        == {
+            "campaign_id": LAUNCH7_CAMPAIGN_ID,
+            "required_status": "authenticated_terminal_negative_no_reuse",
+            "binding_file": LAUNCH7_NEGATIVE_BINDING_PATH.name,
+            "binding_state": "sealed_authenticated_terminal_negative_no_reuse",
+            "evidence_relative_path": str(LAUNCH7_NEGATIVE_EVIDENCE_RELATIVE),
+            "evidence_git_commit": LAUNCH7_NEGATIVE_EVIDENCE_GIT_COMMIT,
+            "evidence_file_sha256": LAUNCH7_NEGATIVE_EVIDENCE_RAW_SHA256,
+            "evidence_canonical_sha256": LAUNCH7_NEGATIVE_EVIDENCE_CANONICAL_SHA256,
+            "negative_binding_sha256": "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd",
+            "accepted": False,
+            "reusable": False,
+            "mandatory_submission_contract_dependency": True,
+            "formal_submission_allowed": False,
+            "evidence_policy": "This package binds only the independently committed immutable terminal-negative Launch7 provenance record at b354b12b9446ee88aebbf58ccc67683194ad0fe1. Launch7 can never satisfy positive engineering-pilot authority and no Launch7 checkpoint, optimizer, telemetry, W&B, evaluation, mutable report, or other run state may be reused.",
+        },
+        "Launch7 terminal-negative dependency differs",
+    )
+    negative_binding, _negative_file_sha = authenticated_regular_json(
+        LAUNCH7_NEGATIVE_BINDING_PATH
+    )
+    require(
+        validate_launch7_negative_binding(negative_binding)
+        == negative["negative_binding_sha256"],
+        "manifest does not bind the authenticated Launch7 terminal-negative record",
+    )
     dependency = manifest.get("launch_dependency") or {}
-    require(dependency.get("campaign_id") == UPSTREAM_CAMPAIGN_ID, "upstream Launch7 identity differs")
+    require(dependency.get("campaign_id") == ACCEPTED_PILOT_CAMPAIGN_ID, "future accepted-pilot identity differs")
     require(dependency.get("required_status") == "accepted_engineering_pilot", "upstream acceptance status differs")
-    require(dependency.get("binding_file") == UPSTREAM_BINDING_PATH.name, "upstream binding filename differs")
+    require(dependency.get("binding_file") == ACCEPTED_PILOT_BINDING_PATH.name, "future accepted-pilot binding filename differs")
     require(dependency.get("binding_state") == "unbound", "in-flight package claims an upstream binding")
+    require(dependency.get("adapter_file") == "engineering_pilot_binder.py", "future accepted-pilot adapter filename differs")
+    require(
+        dependency.get("adapter_state")
+        == "unsealed_pending_frozen_launch8_reporter_gate_protocol",
+        "future accepted-pilot adapter state differs",
+    )
+    require(dependency.get("launch7_positive_authority_forbidden") is True, "Launch7 became positive authority")
+    require(dependency.get("mandatory_submission_contract_dependency") is True, "future pilot binding is optional")
     require(dependency.get("formal_submission_allowed") is False, "design phase permits formal submission")
     _exact_set(
         dependency.get("pilot_covered_settings"),
@@ -776,8 +1283,8 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     )
     require(
         dependency.get("binding_policy")
-        == "Only the authenticated immutable Launch7 report quartet may be read from the Launch7 output tree as prerequisite evidence; bind REPORT_COMMIT plus accepted decision, bundle, provenance, protocol, source, and trainer identities; never read any Launch7 checkpoint, optimizer, run telemetry, W&B, evaluation progress, mutable report, or other output state.",
-        "Launch7 evidence/read boundary differs",
+        == "No future positive report may be opened until its reporter/gate protocol freezes and the exact versioned adapter is independently audited. The eventual adapter must bind the immutable accepted report commit, decision, raw bundle, provenance, protocol, source, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate.",
+        "future accepted-pilot evidence/read boundary differs",
     )
 
     hardening = manifest.get("required_exp23_hardening_port") or {}
@@ -792,7 +1299,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "exact_id_submit_reconciliation_rollback_and_cancel",
         "whole_array_afterok_dependency_reconciliation",
         "kill_invalid_dependency_validation",
-        "same_run_signal_requeue_with_durable_replay_intent",
+        "same_stage_requeue_semantic_identity_and_reconciled_transaction_pending",
         "strict_append_only_scalar_identity_and_conflict_rejection",
         "identical_duplicate_inventory_or_upstream_suppression",
         "dense_50_update_gain_and_support_axis",
@@ -800,16 +1307,17 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "immutable_report_triplet_and_commit",
         "test_only_and_snapshot_test_zero_persistent_writes",
         "formal_objective_registered_in_v2_gauge_prefix_formal_staged_authorization_sets",
-        "hardened_launch7_report_quartet_binder",
+        "authenticated_launch7_terminal_negative_no_reuse_binding",
+        "versioned_future_engineering_pilot_positive_adapter_after_protocol_freeze",
         "execution_ready_manifest_exact_schema_no_unvalidated_fields",
     }
     _exact_set(hardening.get("required_patterns"), required_patterns, "required hardening pattern set")
-    require(hardening.get("runtime_files_present") is True, "M1 hardened runtime files are absent")
-    require(hardening.get("runtime_execution_ready") is False, "M1 runtime is prematurely execution-ready")
+    require(hardening.get("runtime_files_present") is True, "M2A hardened runtime files are absent")
+    require(hardening.get("runtime_execution_ready") is False, "M2A runtime is prematurely execution-ready")
     require(
         hardening.get("runtime_scope")
-        == "m1_hardened_control_plane_scaffold_with_execution_adapters_fail_closed",
-        "M1 runtime scope differs",
+        == "m2a_orders_0_3_authority_scaffold_with_scientific_adapters_fail_closed",
+        "M2A runtime scope differs",
     )
     require(hardening.get("protocol_lock_present") is False, "design package falsely claims a protocol lock")
 
@@ -834,6 +1342,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "queued receipt barrier has insufficient scheduler timeout margin",
     )
     require(execution.get("requeue_required") is True, "formal jobs are not requeueable")
+    require(
+        execution.get("same_stage_requeue_mutation_state")
+        == "hard_disabled_until_scientific_identity_and_idempotent_scheduler_transaction_are_sealed",
+        "same-stage requeue mutation is not hard-disabled",
+    )
     require(execution.get("feasibility_status") == "unverified_blocker", "resource feasibility is prematurely accepted")
     require(execution.get("requires_measured_updates_per_hour_for_all_ten_settings") is True, "formal feasibility lacks throughput evidence")
     require(execution.get("requires_requeue_budget_and_cluster_limit_check") is True, "formal feasibility lacks requeue-limit evidence")
@@ -848,6 +1361,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(
         execution.get("requires_pinned_interpreter_environment_provenance") is True,
         "pinned interpreter/environment provenance is not required",
+    )
+    require(
+        execution.get("interpreter_environment_content_state")
+        == "unbound_readiness_blocker_binary_pyvenv_and_paths_only",
+        "interpreter environment-content blocker differs",
     )
     require(execution.get("control_python_flags") == ["-I", "-S", "-B"], "control Python isolation differs")
     require(execution.get("trainer_python_flags") == ["-P", "-S", "-B"], "trainer Python isolation differs")
@@ -885,18 +1403,65 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(upstream_token not in str(paths.get("eval_root", "")), "formal eval root reuses upstream namespace")
 
     milestones = manifest.get("milestones") or []
-    require([row.get("id") for row in milestones] == [
-        "m0_geometry_and_global_recipe",
-        "m1_launch7_binding",
-        "m2_all_ten_audits",
-        "m3_runtime_port",
-        "m4_protocol_and_preflight",
-        "m5_submit",
-        "m6_training_and_gates",
-        "m7_heldout_and_report",
-    ], "milestone sequence differs")
-    require(milestones[0].get("status") == "complete", "design milestone is not complete")
-    require(all(row.get("status") == "blocked" for row in milestones[1:]), "a downstream milestone is prematurely open")
+    expected_milestone_dependencies = {
+        "m0_geometry_and_global_recipe": [],
+        "m1_launch7_terminal_negative_binding": ["m0_geometry_and_global_recipe"],
+        "m2a_runtime_and_interpreter": ["m0_geometry_and_global_recipe"],
+        "m2b_shared_objective_config_authorization": ["m0_geometry_and_global_recipe"],
+        "m2c_all_ten_outcome_blind_audits_contracts": ["m0_geometry_and_global_recipe"],
+        "m2d_heldout_seed_and_feasibility": ["m0_geometry_and_global_recipe"],
+        "m2e_scientific_adapters": ["m0_geometry_and_global_recipe"],
+        "m2f_launch8_versioned_adapter": ["m0_geometry_and_global_recipe"],
+        "m3_launch8_positive_binding": ["m2f_launch8_versioned_adapter"],
+        "m4_protocol_and_execution_readiness_join": [
+            "m1_launch7_terminal_negative_binding",
+            "m2a_runtime_and_interpreter",
+            "m2b_shared_objective_config_authorization",
+            "m2c_all_ten_outcome_blind_audits_contracts",
+            "m2d_heldout_seed_and_feasibility",
+            "m2e_scientific_adapters",
+            "m2f_launch8_versioned_adapter",
+            "m3_launch8_positive_binding",
+        ],
+        "m5_submit": ["m4_protocol_and_execution_readiness_join"],
+        "m6_training_and_gates": ["m5_submit"],
+        "m7_heldout_and_report": ["m6_training_and_gates"],
+    }
+    milestone_ids = [row.get("id") for row in milestones]
+    require(
+        milestone_ids == list(expected_milestone_dependencies)
+        and len(milestone_ids) == len(set(milestone_ids)),
+        "milestone DAG IDs/order differ",
+    )
+    seen_milestones: set[str] = set()
+    for row in milestones:
+        milestone_id = row["id"]
+        require(
+            row.get("depends_on") == expected_milestone_dependencies[milestone_id]
+            and set(row["depends_on"]).issubset(seen_milestones),
+            f"milestone dependency DAG differs: {milestone_id}",
+        )
+        seen_milestones.add(milestone_id)
+    require(
+        milestones[0].get("status") == milestones[1].get("status") == "complete",
+        "design/Launch7-negative milestones are not complete",
+    )
+    require(
+        all(row.get("status") == "blocked" for row in milestones[2:]),
+        "a downstream milestone is prematurely open",
+    )
+    for outcome_blind_id in (
+        "m2a_runtime_and_interpreter",
+        "m2b_shared_objective_config_authorization",
+        "m2c_all_ten_outcome_blind_audits_contracts",
+        "m2d_heldout_seed_and_feasibility",
+        "m2e_scientific_adapters",
+    ):
+        require(
+            "m3_launch8_positive_binding"
+            not in expected_milestone_dependencies[outcome_blind_id],
+            f"outcome-blind branch depends on Launch8 acceptance: {outcome_blind_id}",
+        )
 
 
 def manifest_sha256(manifest: Mapping[str, Any]) -> str:
@@ -1001,57 +1566,75 @@ def paired_t_summary(values: Sequence[float]) -> dict[str, float | int]:
     }
 
 
-def upstream_binding_status(
-    manifest: Mapping[str, Any], path: str | Path = UPSTREAM_BINDING_PATH
+def prerequisite_binding_status(
+    manifest: Mapping[str, Any],
+    positive_path: str | Path = ACCEPTED_PILOT_BINDING_PATH,
+    negative_path: str | Path = LAUNCH7_NEGATIVE_BINDING_PATH,
 ) -> dict[str, Any]:
-    """Inspect the placeholder or future binder output without following symlinks."""
+    """Authenticate the real negative leaf and exact unbound positive placeholder."""
 
     validate_manifest(manifest)
-    value, file_digest = authenticated_regular_json(path)
-    if value.get("status") != "sealed_accepted_engineering_pilot":
-        return {
-            "accepted": False,
-            "status": value.get("status", "invalid"),
-            "reason": "formal execution blocked until Launch7 is accepted and byte-bound",
-            "binding_file_sha256": file_digest,
-        }
-    # An accepted-looking object is intentionally *not* interpreted in phase zero.
-    # The execution revision must replace this branch with the hardened binder that
-    # authenticates every path component, exact report quartet, ownership/modes,
-    # commit-to-bundle/decision/provenance cross-hashes, campaign/status semantics,
-    # and absence of cancellation.  A self-hash plus arbitrary absolute path is not
-    # launch authority.
+    positive, positive_digest = authenticated_regular_json(positive_path)
+    negative, negative_digest = authenticated_regular_json(negative_path)
+    expected_positive = {
+        "schema_version": 1,
+        "status": "awaiting_launch8_accepted_engineering_pilot",
+        "campaign_id": ACCEPTED_PILOT_CAMPAIGN_ID,
+        "formal_submission_allowed": False,
+        "adapter_file_sha256": None,
+        "adapter_runtime_file_sha256": None,
+        "adapter_description_sha256": None,
+        "report_commit_file_sha256": None,
+        "binding_sha256": None,
+    }
+    require(positive == expected_positive, "future accepted-pilot binding placeholder differs")
+    negative_binding_sha = validate_launch7_negative_binding(negative)
     return {
         "accepted": False,
-        "status": "accepted_looking_binding_unusable_in_design_phase",
-        "reason": "formal execution blocked: hardened Launch7 report binder is not implemented",
-        "binding_file_sha256": file_digest,
+        "status": "launch7_negative_authenticated_launch8_positive_unbound",
+        "reason": (
+            "formal execution blocked: Launch7 terminal-negative/no-reuse evidence is "
+            "authenticated, but the Launch8 semantic adapter is unsealed and no accepted "
+            "future pilot binding exists"
+        ),
+        "launch7_negative_binding_file_sha256": negative_digest,
+        "launch7_negative_binding_sha256": negative_binding_sha,
+        "accepted_engineering_pilot_binding_file_sha256": positive_digest,
     }
 
 
 def assert_launch_authorized(
-    manifest: Mapping[str, Any], path: str | Path = UPSTREAM_BINDING_PATH
+    manifest: Mapping[str, Any],
+    positive_path: str | Path = ACCEPTED_PILOT_BINDING_PATH,
+    negative_path: str | Path = LAUNCH7_NEGATIVE_BINDING_PATH,
 ) -> None:
     """No Exp24 launch is possible until a later execution-ready package revision."""
 
-    status = upstream_binding_status(manifest, path)
+    status = prerequisite_binding_status(manifest, positive_path, negative_path)
     require(status["accepted"], status["reason"])
     require(
-        manifest["package_phase"] == "execution_ready" and manifest["launch_dependency"]["binding_state"] == "sealed",
+        manifest["package_phase"] == "execution_ready"
+        and manifest["launch_dependency"]["binding_state"] == "sealed"
+        and manifest["launch7_negative_dependency"]["binding_state"]
+        == "sealed_authenticated_terminal_negative_no_reuse",
         "formal execution remains blocked: Exp24 runtime port, all-ten audits, and protocol seal are incomplete",
     )
     require(manifest["launch_dependency"]["formal_submission_allowed"] is True, "manifest forbids formal submission")
 
 
 def preflight_report(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    dependency = upstream_binding_status(manifest)
+    _schema, schema_file_sha = load_m2a_schema()
+    dependency = prerequisite_binding_status(manifest)
     runs = expand_runs(manifest)
     evaluations = expand_final_evaluations(manifest)
     dag = scheduler_dag(manifest)
     blockers = [
-        "Launch7 accepted_engineering_pilot binding is absent",
+        "Launch8 reporter/gate protocol and versioned positive semantic adapter are unsealed",
+        "future accepted_engineering_pilot binding is absent",
+        "interpreter environment-content closure is unbound",
+        "same-stage requeue mutation is hard-disabled pending scientific identity and an idempotent scheduler transaction",
         "outcome-blind input/future/prefix/resolved/causal/fixed-weight-safety audits are not sealed for all ten settings",
-        "M1 control-plane runtime is present but scientific worker/gate/eval/report adapters remain fail-closed",
+        "M2A control-plane authority is present but scientific worker/gate/eval/report adapters remain fail-closed",
         "new 1M formal objective/config and trainer authorization sets are not yet registered",
         "formal evaluation seed table and protocol lock are not yet sealed",
         "held-out seeds lack authenticated prior-consumption/disjointness evidence",
@@ -1074,6 +1657,7 @@ def preflight_report(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "dag": [asdict(node) for node in dag],
         "blockers": blockers,
         "manifest_sha256": manifest_sha256(manifest),
+        "m2a_schema_file_sha256": schema_file_sha,
     }
 
 

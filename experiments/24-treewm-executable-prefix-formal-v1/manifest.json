@@ -1,11 +1,22 @@
 {
   "schema_version": 1,
   "campaign_id": "treewm-executable-prefix-formal-v1-launch1",
-  "package_phase": "m1_hardened_runtime_scaffold_execution_blocked",
+  "package_phase": "m2a_orders_0_3_runtime_authority_scaffold_execution_blocked",
   "classification": "fresh_formal_selected_gsep_only",
   "scientific_protocol_sealed": false,
   "per_setting_contract_state": "unbound_pending_all_ten_audits",
-  "submission_authority_policy": "Submission authority requires authenticated Exp23 Launch7 acceptance, all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, and verified training/evaluation/requeue feasibility.",
+  "m2a_authority": {
+    "schema_path": "experiments/24-treewm-executable-prefix-formal-v1/m2a_schema.json",
+    "schema_state": "sealed_exact_acyclic_graph",
+    "interpreter_provenance_state": "implemented_binary_pyvenv_and_path_capture_environment_content_closure_unbound",
+    "held_root_activation_state": "implemented_receipt_authorize_release_observe_recover",
+    "launch7_terminal_negative_binding_state": "sealed_authenticated_terminal_negative_no_reuse",
+    "engineering_pilot_adapter_state": "fail_closed_interface_launch8_semantic_adapter_unsealed",
+    "accepted_engineering_pilot_binding_state": "unbound",
+    "formal_submission_allowed": false,
+    "execution_readiness_ready": false
+  },
+  "submission_authority_policy": "Submission authority requires both an authenticated terminal-negative/no-reuse Launch7 record and an independently authenticated accepted future Exp23 engineering pilot (expected Launch8), plus all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, bound interpreter environment contents, and verified training/evaluation/requeue feasibility.",
   "scientific_claim_policy": "No formal scientific conclusion or promotion claim exists until all four staged all-40 gates pass, all exact 200 held-out cells complete both paired rails, the seed-level aggregate completes, and the immutable formal report commits.",
   "design": {
     "selected_arm": "GSEP",
@@ -397,11 +408,31 @@
     "retuning_allowed": false,
     "failure_decision": "block_formal_and_require_new_engineering_design"
   },
-  "launch_dependency": {
+  "launch7_negative_dependency": {
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+    "required_status": "authenticated_terminal_negative_no_reuse",
+    "binding_file": "launch7_negative.binding.json",
+    "binding_state": "sealed_authenticated_terminal_negative_no_reuse",
+    "evidence_relative_path": "experiments/23-treewm-executable-prefix-repair-pilot-v1/launch7_negative_provenance.json",
+    "evidence_git_commit": "b354b12b9446ee88aebbf58ccc67683194ad0fe1",
+    "evidence_file_sha256": "29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e",
+    "evidence_canonical_sha256": "48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62",
+    "negative_binding_sha256": "629610c2bb677f53ee3acb75a8bcd1e3089bee78a4c43600a944e4290f5148bd",
+    "accepted": false,
+    "reusable": false,
+    "mandatory_submission_contract_dependency": true,
+    "formal_submission_allowed": false,
+    "evidence_policy": "This package binds only the independently committed immutable terminal-negative Launch7 provenance record at b354b12b9446ee88aebbf58ccc67683194ad0fe1. Launch7 can never satisfy positive engineering-pilot authority and no Launch7 checkpoint, optimizer, telemetry, W&B, evaluation, mutable report, or other run state may be reused."
+  },
+  "launch_dependency": {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
     "required_status": "accepted_engineering_pilot",
-    "binding_file": "launch7_acceptance.binding.json",
+    "binding_file": "accepted_engineering_pilot.binding.json",
     "binding_state": "unbound",
+    "adapter_file": "engineering_pilot_binder.py",
+    "adapter_state": "unsealed_pending_frozen_launch8_reporter_gate_protocol",
+    "launch7_positive_authority_forbidden": true,
+    "mandatory_submission_contract_dependency": true,
     "formal_submission_allowed": false,
     "pilot_covered_settings": [
       "antmaze-large",
@@ -458,14 +489,14 @@
       "formal_contract_sha256"
     ],
     "per_setting_contract_canonical_body_policy": "formal_contract_sha256_hashes_the_exact_no_extra_field_body_and_cross_binds_each_per_setting_row_to_all_six_authenticated_all_ten_audit_roots",
-    "binding_policy": "Only the authenticated immutable Launch7 report quartet may be read from the Launch7 output tree as prerequisite evidence; bind REPORT_COMMIT plus accepted decision, bundle, provenance, protocol, source, and trainer identities; never read any Launch7 checkpoint, optimizer, run telemetry, W&B, evaluation progress, mutable report, or other output state."
+    "binding_policy": "No future positive report may be opened until its reporter/gate protocol freezes and the exact versioned adapter is independently audited. The eventual adapter must bind the immutable accepted report commit, decision, raw bundle, provenance, protocol, source, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate."
   },
   "required_exp23_hardening_port": {
     "source_package": "experiments/23-treewm-executable-prefix-repair-pilot-v1",
     "port_only_after_upstream_freeze": true,
     "runtime_files_present": true,
     "runtime_execution_ready": false,
-    "runtime_scope": "m1_hardened_control_plane_scaffold_with_execution_adapters_fail_closed",
+    "runtime_scope": "m2a_orders_0_3_authority_scaffold_with_scientific_adapters_fail_closed",
     "protocol_lock_present": false,
     "required_patterns": [
       "immutable_nonsymlink_source_snapshot",
@@ -476,7 +507,7 @@
       "exact_id_submit_reconciliation_rollback_and_cancel",
       "whole_array_afterok_dependency_reconciliation",
       "kill_invalid_dependency_validation",
-      "same_run_signal_requeue_with_durable_replay_intent",
+      "same_stage_requeue_semantic_identity_and_reconciled_transaction_pending",
       "strict_append_only_scalar_identity_and_conflict_rejection",
       "identical_duplicate_inventory_or_upstream_suppression",
       "dense_50_update_gain_and_support_axis",
@@ -484,11 +515,12 @@
       "immutable_report_triplet_and_commit",
       "test_only_and_snapshot_test_zero_persistent_writes",
       "formal_objective_registered_in_v2_gauge_prefix_formal_staged_authorization_sets",
-      "hardened_launch7_report_quartet_binder",
+      "authenticated_launch7_terminal_negative_no_reuse_binding",
+      "versioned_future_engineering_pilot_positive_adapter_after_protocol_freeze",
       "execution_ready_manifest_exact_schema_no_unvalidated_fields"
     ],
     "transaction_policy": "A partial scheduler acceptance is never success: reconcile exact IDs, journal every accepted ID, cancel/reconcile every accepted ancestor on failure, and publish no receipt until the complete canonical DAG is verified.",
-    "telemetry_policy": "Use Launch7's strict append-only scalar identity parser. Conflicting duplicate tag/update values are fatal; identical duplicates are inventoried or suppressed upstream; dense gain and support tags use the 50-update axis; authenticated W&B descendant leaf links are inspected without following them.",
+    "telemetry_policy": "The future accepted-pilot and formal adapters must use a strict append-only scalar identity parser. Conflicting duplicate tag/update values are fatal; identical duplicates are inventoried or suppressed upstream; dense gain and support tags use the 50-update axis; authenticated W&B descendant leaf links are inspected without following them.",
     "report_policy": "Assemble from authenticated immutable evidence, seal bundle/decision/provenance plus REPORT_COMMIT create-exclusively, and never reinterpret a mutable or canceled submission."
   },
   "paths": {
@@ -512,6 +544,7 @@
     "pre_receipt_transaction_budget_seconds": 600,
     "receipt_barrier_safety_margin_seconds": 300,
     "requeue_required": true,
+    "same_stage_requeue_mutation_state": "hard_disabled_until_scientific_identity_and_idempotent_scheduler_transaction_are_sealed",
     "feasibility_status": "unverified_blocker",
     "requires_measured_updates_per_hour_for_all_ten_settings": true,
     "requires_requeue_budget_and_cluster_limit_check": true,
@@ -521,6 +554,7 @@
     "requires_clean_committed_source_snapshot": true,
     "requires_held_root_post_receipt_activation_handshake": true,
     "requires_pinned_interpreter_environment_provenance": true,
+    "interpreter_environment_content_state": "unbound_readiness_blocker_binary_pyvenv_and_paths_only",
     "control_python_flags": ["-I", "-S", "-B"],
     "trainer_python_flags": ["-P", "-S", "-B"],
     "process_topology": "Slurm batch shell -> worker.py -> train_entry.py -> in-process scripts.train; no srun",
@@ -545,41 +579,88 @@
     {
       "id": "m0_geometry_and_global_recipe",
       "status": "complete",
+      "depends_on": [],
       "deliverable": "Exact core geometry and global recipe: 10x1x4 matrix, staged all-40 DAG, fixed per-stage decision rules/operators, 200-cell paired held-out design/comparator, weights, new namespaces, and fail-closed dependency contract. Per-setting contracts, runtime feasibility, and evidence binding remain explicitly unsealed."
     },
     {
-      "id": "m1_launch7_binding",
-      "status": "blocked",
-      "blocked_by": "Launch7 has not yet published an authenticated accepted_engineering_pilot REPORT_COMMIT."
+      "id": "m1_launch7_terminal_negative_binding",
+      "status": "complete",
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "deliverable": "Committed Launch7 terminal-negative provenance and exact no-reuse semantics are authenticated by raw, canonical, source-commit, and self-hashed binding identities."
     },
     {
-      "id": "m2_all_ten_audits",
+      "id": "m2a_runtime_and_interpreter",
       "status": "blocked",
-      "blocked_by": "Launch7 is incomplete, and five formal settings were not covered by its prefix/resolved/causal/fixed-weight-safety audit matrix."
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "Held-root activation is implemented, but interpreter environment-content closure and an idempotent same-stage requeue transaction remain unsealed."
     },
     {
-      "id": "m3_runtime_port",
+      "id": "m2b_shared_objective_config_authorization",
       "status": "blocked",
-      "blocked_by": "The final frozen Launch7 implementation is not yet available to port; the new 1M objective/config and trainer authorization registrations also remain absent."
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "The distinct 1M objective/config and shared trainer authorization registrations have not been applied. This branch is outcome-blind and does not depend on Launch8 acceptance."
     },
     {
-      "id": "m4_protocol_and_preflight",
+      "id": "m2c_all_ten_outcome_blind_audits_contracts",
       "status": "blocked",
-      "blocked_by": "Runtime files, all-ten audit locks, held-out prior-consumption disjointness inventory/table, throughput/requeue feasibility, protocol lock, snapshot test, and independent audit are incomplete."
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "All-ten input/future/prefix/resolved/causal/fixed-weight-safety audit roots and per-setting contracts are unsealed. This branch must remain outcome-blind and does not depend on Launch8 acceptance."
+    },
+    {
+      "id": "m2d_heldout_seed_and_feasibility",
+      "status": "blocked",
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "Held-out seed census/table and all-ten training/evaluation/requeue feasibility evidence are unsealed. This branch is outcome-blind and does not depend on Launch8 acceptance."
+    },
+    {
+      "id": "m2e_scientific_adapters",
+      "status": "blocked",
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "Training, gate, held-out, aggregate, strict telemetry, and report adapters remain fail-closed. Their implementation branch does not depend on Launch8 outcomes."
+    },
+    {
+      "id": "m2f_launch8_versioned_adapter",
+      "status": "blocked",
+      "depends_on": ["m0_geometry_and_global_recipe"],
+      "blocked_by": "Launch8 reporter/gate source has not frozen, so an exact versioned semantic adapter cannot yet be sealed; acceptance outcomes are not required to build it after source freeze."
+    },
+    {
+      "id": "m3_launch8_positive_binding",
+      "status": "blocked",
+      "depends_on": ["m2f_launch8_versioned_adapter"],
+      "blocked_by": "No immutable Launch8 quartet with accepted_engineering_pilot status exists, and the checked-in positive binding remains an exact unbound placeholder."
+    },
+    {
+      "id": "m4_protocol_and_execution_readiness_join",
+      "status": "blocked",
+      "depends_on": [
+        "m1_launch7_terminal_negative_binding",
+        "m2a_runtime_and_interpreter",
+        "m2b_shared_objective_config_authorization",
+        "m2c_all_ten_outcome_blind_audits_contracts",
+        "m2d_heldout_seed_and_feasibility",
+        "m2e_scientific_adapters",
+        "m2f_launch8_versioned_adapter",
+        "m3_launch8_positive_binding"
+      ],
+      "blocked_by": "The final scientific protocol and execution-ready seal must join every independent pre-acceptance branch, the authenticated Launch7 negative leaf, and the real accepted Launch8 positive leaf."
     },
     {
       "id": "m5_submit",
       "status": "blocked",
+      "depends_on": ["m4_protocol_and_execution_readiness_join"],
       "blocked_by": "Execution authority is intentionally absent; no commit/push/clean-tree/scheduler preflight has been performed."
     },
     {
       "id": "m6_training_and_gates",
       "status": "blocked",
+      "depends_on": ["m5_submit"],
       "blocked_by": "No Exp24 scheduler job or output namespace exists."
     },
     {
       "id": "m7_heldout_and_report",
       "status": "blocked",
+      "depends_on": ["m6_training_and_gates"],
       "blocked_by": "All forty exact 1M completions and the all-40 1M gate are prerequisites."
     }
   ]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only M1 preflight, ephemeral snapshot test, or authority-gated submit."""
+"""Read-only M2A preflight, ephemeral snapshot test, or authority-gated submit."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def _internal_snapshot_probe(snapshot_root: Path, inventory_file: Path) -> int:
     manifest = campaign.load_manifest(snapshot_root / runtime.PACKAGE_RELATIVE / "manifest.json")
     result = {
         "schema_version": 1,
-        "status": "verified_m1_snapshot_bootstrap",
+        "status": "verified_m2a_snapshot_bootstrap",
         "manifest_sha256": campaign.manifest_sha256(manifest),
         "inventory_sha256": runtime.stable_hash(inventory),
         "file_count": len(inventory),
@@ -94,8 +94,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = campaign.load_manifest()
     if args.submit:
         # This is deliberately the first action after read-only parsing/manifest
-        # authentication.  M1 cannot create a claim, snapshot, output, or scheduler
-        # process because the checked-in Launch7/all-ten/feasibility authority fails.
+        # authentication.  M2A cannot create a claim, snapshot, output, or scheduler
+        # process because future Launch8/all-ten/environment/feasibility authority fails.
         campaign.assert_launch_authorized(manifest)
         result = runtime.authorized_submit(manifest)
         print(json.dumps(result, sort_keys=True, indent=2, allow_nan=False))
