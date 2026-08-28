@@ -1320,7 +1320,44 @@
       "controller_bootstrap": "pinned Python -I -S -B with exact live sealed package/protocol validation; compute worker appends only the pinned venv/base package roots before location-validating the Torch import",
       "runtime_proof_scope": "The canary proves isolated lexical pinned-Python execution, Torch import from one of the two validated nonsymlink package-root directories, exactly one visible selected CUDA device, a real CUDA tensor operation, and checkpoint transfer across the two waves. It does not hash or version-bind the resolved interpreter binary, pyvenv.cfg, Torch distribution/native libraries, CUDA driver/runtime, or establish byte-equivalence to the scientific trainer environment.",
       "within_wave_requeue": false,
-      "run_during_read_only_preflight": false
+      "run_during_read_only_preflight": false,
+      "failed_attempts": [
+        {
+          "attempt": "canary1",
+          "path": "canary1_negative_provenance.json",
+          "raw_sha256": "00f122373b4d7e37fba91c9f6bcc13f6a3c8374114ea30b8524aa80ae2acae20",
+          "canonical_sha256": "44fad8a37283ca276ba49ecade0dec7add0d10cf7c1f0e511d2e59fcdaba644c",
+          "status": "terminal_negative_canary_provenance_frozen",
+          "source_commit": "af348afdef0fa84f5e8ad4917d469d9729509f09",
+          "source_protocol_sha256": "b4403218d841667b6e68c715fa91cb53090670ca360d284e34d92b0a8763130f",
+          "state_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-af348af-b4403218",
+          "canary_token": "e09ce7d5a0cef1b0",
+          "job_ids_by_role": {
+            "wave0": [
+              "33285485"
+            ],
+            "wave1": [
+              "33285486"
+            ],
+            "report": []
+          },
+          "state_file_map_canonical_sha256": "61662d488cf571f26362e3392e49f63239153ef443b515d7c79bcbf094d05648",
+          "scheduler_terminal_rows": 2,
+          "gpu_runtime_seconds": 0,
+          "allocated_node_count": 0,
+          "wave0_released": false,
+          "authorization_published": false,
+          "receipt_published": false,
+          "report_job_submitted": false,
+          "report_published": false,
+          "active_scheduler_jobs_after_recovery": 0,
+          "reuse_allowed": false,
+          "resume_allowed": false,
+          "retry_allowed": false,
+          "recovery_allowed": false,
+          "result_consumption_allowed": false
+        }
+      ]
     },
     "source_snapshot": "immutable, read-only, nonsymlinked, byte-verified source/config/package snapshot bound to commit, runtime, protocol, manifest, audit, and resolved launch identities",
     "fresh_namespace": true,

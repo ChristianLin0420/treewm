@@ -79,6 +79,7 @@ PROTOCOL_FILES = (
     "canary_worker.py",
     "canary_gpu.slurm",
     "canary_report.slurm",
+    "canary1_negative_provenance.json",
     "launch7_negative_provenance.json",
     "README.md",
     "tests/test_campaign.py",
@@ -93,6 +94,50 @@ SNAPSHOT_IMPORT_FILES = {
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
+FAILED_CANARY_ATTEMPTS = [{
+    "attempt": "canary1",
+    "path": "canary1_negative_provenance.json",
+    "raw_sha256": (
+        "00f122373b4d7e37fba91c9f6bcc13f6a3c8374114ea30b8524aa80ae2acae20"
+    ),
+    "canonical_sha256": (
+        "44fad8a37283ca276ba49ecade0dec7add0d10cf7c1f0e511d2e59fcdaba644c"
+    ),
+    "status": "terminal_negative_canary_provenance_frozen",
+    "source_commit": "af348afdef0fa84f5e8ad4917d469d9729509f09",
+    "source_protocol_sha256": (
+        "b4403218d841667b6e68c715fa91cb53090670ca360d284e34d92b0a8763130f"
+    ),
+    "state_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/exp23-launch8-two-wave-canaries/"
+        "exp23-launch8-two-wave-canary-af348af-b4403218"
+    ),
+    "canary_token": "e09ce7d5a0cef1b0",
+    "job_ids_by_role": {
+        "wave0": ["33285485"],
+        "wave1": ["33285486"],
+        "report": [],
+    },
+    "state_file_map_canonical_sha256": (
+        "61662d488cf571f26362e3392e49f63239153ef443b515d7c79bcbf094d05648"
+    ),
+    "scheduler_terminal_rows": 2,
+    "gpu_runtime_seconds": 0,
+    "allocated_node_count": 0,
+    "wave0_released": False,
+    "authorization_published": False,
+    "receipt_published": False,
+    "report_job_submitted": False,
+    "report_published": False,
+    "active_scheduler_jobs_after_recovery": 0,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
+    "result_consumption_allowed": False,
+}]
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -1325,6 +1370,12 @@ def canonical_json(value: object) -> str:
     )
 
 
+def exact_json_equal(left: object, right: object) -> bool:
+    """Compare JSON values without Python's bool/int equality coercion."""
+
+    return canonical_json(left) == canonical_json(right)
+
+
 def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
@@ -2129,6 +2180,619 @@ def _validate_launch7_negative_provenance(
     )
 
 
+def _validate_canary1_negative_provenance(
+    manifest: Mapping[str, Any], repo: Path
+) -> None:
+    attempts = manifest["launch_contract"]["real_gpu_two_wave_canary"].get(
+        "failed_attempts"
+    )
+    require(
+        exact_json_equal(attempts, FAILED_CANARY_ATTEMPTS),
+        "failed real-GPU canary binding differs",
+    )
+    binding = FAILED_CANARY_ATTEMPTS[0]
+    path = repo / PACKAGE_RELATIVE / binding["path"]
+    info = path.lstat()
+    require(
+        stat.S_ISREG(info.st_mode) and not path.is_symlink(),
+        "canary1 negative provenance is not a regular nonsymlink file",
+    )
+    require(
+        file_sha256(path) == binding["raw_sha256"],
+        "canary1 negative provenance raw hash differs",
+    )
+    value = read_json(path)
+    require(
+        stable_hash(value) == binding["canonical_sha256"],
+        "canary1 negative provenance canonical hash differs",
+    )
+    require(
+        set(value)
+        == {
+            "schema_version",
+            "status",
+            "campaign_id",
+            "canary_attempt",
+            "scientific",
+            "observed_at_utc",
+            "scope",
+            "canonical_reconstruction",
+            "immutable_identity",
+            "terminal_state_file_census",
+            "durable_controller_outcome",
+            "absent_durable_artifacts",
+            "retained_wave1_scheduler_observation",
+            "scheduler_terminal_observation",
+            "scheduler_terminal_rows_schema",
+            "scheduler_terminal_rows",
+            "root_cause",
+            "negative_conclusion",
+        }
+        and type(value["schema_version"]) is int
+        and value["schema_version"] == 1
+        and value["status"] == binding["status"]
+        and value["campaign_id"] == manifest["campaign_id"]
+        and value["canary_attempt"] == binding["attempt"]
+        and value["scientific"] is False
+        and value["observed_at_utc"] == "2026-08-28T20:13:16Z"
+        and value["scope"]
+        == (
+            "Terminal negative evidence for one non-scientific real-GPU topology "
+            "canary. It does not supersede the still-unsubmitted Launch8 scientific "
+            "campaign and grants no authority to reuse the failed canary namespace."
+        ),
+        "canary1 negative provenance envelope differs",
+    )
+    require(
+        exact_json_equal(
+            value["canonical_reconstruction"],
+            {
+                "canonical_json": (
+                    "UTF-8 JSON with ensure_ascii=true, allow_nan=false, object keys "
+                    "sorted lexicographically, separators comma and colon, and no "
+                    "trailing newline."
+                ),
+                "state_file_map_payload": (
+                    "Hash canonical JSON of {schema_version:1,files:"
+                    "{state_root_relative_path:{mode,sha256,size}}}; mode is a "
+                    "four-digit octal string, size is the exact raw byte count, and "
+                    "sha256 is the raw-file SHA-256."
+                ),
+                "scheduler_rows_payload": (
+                    "Hash canonical JSON of {schema_version:1,fields:"
+                    "scheduler_terminal_rows_schema.split('|'),rows:"
+                    "scheduler_terminal_rows}."
+                ),
+                "scope": (
+                    "The state-file map is a point-in-time read-only census of the "
+                    "preserved failed canary root; the repository artifact, not the "
+                    "writable owner lock, is the frozen evidence anchor. The embedded "
+                    "sacct rows are independently reconstructable from their preserved "
+                    "raw-row representation. The retained scontrol digest and parsed "
+                    "fields are contemporaneous operator-recorded, non-reconstructable "
+                    "corroborative metadata only. Package validation reads only this "
+                    "embedded artifact and never reads or imports the failed state root."
+                ),
+            },
+        ),
+        "canary1 canonical reconstruction differs",
+    )
+    identity = value["immutable_identity"]
+    require(
+        exact_json_equal(
+            identity,
+            {
+                "source_commit_protocol_equivalent": binding["source_commit"],
+                "package_protocol_sha256": binding["source_protocol_sha256"],
+                "protocol_lock_raw_sha256": (
+                    "968e338ece347698ce10d8df9d52b1afe6ba86dcdbab383e2fa6e6de23e0e967"
+                ),
+                "manifest_raw_sha256": (
+                    "1976216ad9630509d2a91f023d3ffa88b9e52558a119b805c0bbc07997ac3704"
+                ),
+                "manifest_canonical_sha256": (
+                    "782baa33c8129e90be8599074b80f93fdaed8e2a4ffe73aed8fc9f8ab0bc41cc"
+                ),
+                "state_root": binding["state_root"],
+                "canary_token": binding["canary_token"],
+                "state_root_relative": (
+                    "outputs/exp23-launch8-two-wave-canaries/"
+                    "exp23-launch8-two-wave-canary-af348af-b4403218"
+                ),
+                "scheduler_comment": (
+                    "treewm-exp23-canary:e09ce7d5a0cef1b0"
+                ),
+                "controller_identity_sha256": (
+                    "4a79c2dfa750ca682cfdbab686db3b0e30e870af53851dcacab9e6aa68afb938"
+                ),
+                "scheduler_control_plane_sha256": (
+                    "b631db129a9330a869436a1487fe67d99a8692ba73eb3b1a0156de4adc349731"
+                ),
+                "source_sha256": {
+                    "canary_gpu.slurm": (
+                        "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14"
+                    ),
+                    "canary_report.slurm": (
+                        "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b"
+                    ),
+                    "canary_worker.py": (
+                        "f0c20908a481382a0734a003a5facf8709c02e4b4763076d40d2cd7b0a50d87f"
+                    ),
+                    "two_wave_canary.py": (
+                        "2fba2cd0c477317e49545b0ed3f6af7f2c590493fd43e888c183ce13fb7a2823"
+                    ),
+                },
+            },
+        ),
+        "canary1 immutable identity differs",
+    )
+    census = value["terminal_state_file_census"]
+    files = census.get("files")
+    require(
+        set(census)
+        == {
+            "state_file_count",
+            "state_file_bytes",
+            "directory_paths",
+            "directory_modes",
+            "logs_file_count",
+            "symlink_count",
+            "special_file_count",
+            "state_file_map_canonical_sha256",
+            "files",
+        }
+        and isinstance(files, dict)
+        and type(census.get("state_file_count")) is int
+        and census["state_file_count"] == len(files) == 13
+        and type(census.get("state_file_bytes")) is int
+        and census["state_file_bytes"]
+        == sum(row["size"] for row in files.values())
+        == 290_380
+        and exact_json_equal(census.get("directory_paths"), [".", "logs", "source"])
+        and exact_json_equal(
+            census.get("directory_modes"),
+            {".": "0700", "logs": "0700", "source": "0555"},
+        )
+        and type(census.get("logs_file_count")) is int
+        and census["logs_file_count"] == 0
+        and type(census.get("symlink_count")) is int
+        and census["symlink_count"] == 0
+        and type(census.get("special_file_count")) is int
+        and census["special_file_count"] == 0,
+        "canary1 state census summary differs",
+    )
+    expected_file_names = {
+        ".CANARY_CONTROLLER.lock",
+        "CANARY_ABORTED.json",
+        "CANARY_CONTROLLER_IDENTITY.json",
+        "CANARY_RECOVERY_CANCELLED.json",
+        "CANARY_RECOVERY_CANCEL_CALLING_0000.json",
+        "CANARY_RECOVERY_CANCEL_RESULT_0000.json",
+        "CANARY_WAVE0_CALLING.json",
+        "CANARY_WAVE0_SUBMITTED.json",
+        "CANARY_WAVE1_CALLING.json",
+        "source/canary_gpu.slurm",
+        "source/canary_report.slurm",
+        "source/canary_worker.py",
+        "source/two_wave_canary.py",
+    }
+    require(set(files) == expected_file_names, "canary1 state file names differ")
+    require(
+        all(
+            set(row) == {"mode", "sha256", "size"}
+            and isinstance(row["mode"], str)
+            and re.fullmatch(r"0[0-7]{3}", row["mode"]) is not None
+            and isinstance(row["sha256"], str)
+            and SHA256.fullmatch(row["sha256"]) is not None
+            and type(row["size"]) is int
+            and row["size"] >= 0
+            for row in files.values()
+        ),
+        "canary1 state file row differs",
+    )
+    state_map_payload = {"schema_version": 1, "files": files}
+    require(
+        stable_hash(state_map_payload)
+        == census["state_file_map_canonical_sha256"]
+        == binding["state_file_map_canonical_sha256"],
+        "canary1 state file map differs",
+    )
+    require(
+        files["CANARY_CONTROLLER_IDENTITY.json"]["sha256"]
+        == identity["controller_identity_sha256"]
+        and exact_json_equal(
+            {
+                name: files[f"source/{name}"]["sha256"]
+                for name in (
+                    "two_wave_canary.py",
+                    "canary_worker.py",
+                    "canary_gpu.slurm",
+                    "canary_report.slurm",
+                )
+            },
+            identity["source_sha256"],
+        ),
+        "canary1 state census/identity hash links differ",
+    )
+    outcome = value["durable_controller_outcome"]
+    require(
+        set(outcome)
+        == {
+            "abort_status",
+            "abort_error",
+            "known_job_ids",
+            "scheduler_assigned_job_ids_by_role",
+            "durably_submitted_marker_ids_by_role",
+            "cancellation_authority_job_ids_by_role",
+            "calling_intent_sha256_by_role",
+            "submitted_record_sha256_by_role",
+            "wave0_accepted_hold",
+            "authorization_committed",
+            "submission_receipt_committed",
+            "ready_to_release_committed",
+            "release_calling_committed",
+            "wave0_released",
+            "report_calling_committed",
+            "report_submitted",
+            "canary_report_committed",
+            "recovery_status",
+            "recovery_sha256",
+            "cancel_calling_sha256",
+            "cancel_result_sha256",
+            "scheduler_calls_in_recovery",
+            "new_jobs_created_in_recovery",
+            "post_cancel_active_job_ids_by_role",
+            "cancellation_error",
+            "reconciliation_errors",
+        }
+        and outcome["abort_status"] == "two_wave_gpu_canary_aborted"
+        and outcome["abort_error"]
+        == "SubmissionError('accepted wave1 dependency differs')"
+        and exact_json_equal(outcome["known_job_ids"], ["33285485", "33285486"])
+        and exact_json_equal(
+            outcome["scheduler_assigned_job_ids_by_role"],
+            binding["job_ids_by_role"],
+        )
+        and exact_json_equal(
+            outcome["durably_submitted_marker_ids_by_role"],
+            {"wave0": ["33285485"], "wave1": [], "report": []},
+        )
+        and exact_json_equal(
+            outcome["cancellation_authority_job_ids_by_role"],
+            binding["job_ids_by_role"],
+        )
+        and outcome["recovery_status"]
+        == "canary_recovered_terminal_after_cancel_attempts"
+        and type(outcome["scheduler_calls_in_recovery"]) is int
+        and outcome["scheduler_calls_in_recovery"] == 9
+        and type(outcome["new_jobs_created_in_recovery"]) is int
+        and outcome["new_jobs_created_in_recovery"] == 0
+        and exact_json_equal(
+            outcome["post_cancel_active_job_ids_by_role"],
+            {"wave0": [], "wave1": [], "report": []},
+        )
+        and outcome["cancellation_error"] is None
+        and exact_json_equal(outcome["reconciliation_errors"], []),
+        "canary1 durable controller outcome differs",
+    )
+    require(
+        exact_json_equal(
+            {
+                key: outcome.get(key)
+                for key in (
+                    "authorization_committed",
+                    "submission_receipt_committed",
+                    "ready_to_release_committed",
+                    "release_calling_committed",
+                    "wave0_released",
+                    "report_calling_committed",
+                    "report_submitted",
+                    "canary_report_committed",
+                )
+            },
+            {
+                "authorization_committed": False,
+                "submission_receipt_committed": False,
+                "ready_to_release_committed": False,
+                "release_calling_committed": False,
+                "wave0_released": False,
+                "report_calling_committed": False,
+                "report_submitted": False,
+                "canary_report_committed": False,
+            },
+        ),
+        "canary1 durable lifecycle outcome differs",
+    )
+    require(
+        exact_json_equal(
+            outcome["wave0_accepted_hold"],
+            {
+                "state": "PENDING",
+                "reason": "JobHeldUser",
+                "stdout_bytes": 2000,
+                "stdout_sha256": (
+                    "a11edd23eabf58f34049b670b49d6bbe9478e7b80e3b8e1fb26680a256416d3f"
+                ),
+            },
+        ),
+        "canary1 durable wave0 hold evidence differs",
+    )
+    require(
+        outcome["calling_intent_sha256_by_role"]["wave0"]
+        == files["CANARY_WAVE0_CALLING.json"]["sha256"]
+        and outcome["calling_intent_sha256_by_role"]["wave1"]
+        == files["CANARY_WAVE1_CALLING.json"]["sha256"]
+        and outcome["submitted_record_sha256_by_role"]["wave0"]
+        == files["CANARY_WAVE0_SUBMITTED.json"]["sha256"]
+        and outcome["submitted_record_sha256_by_role"]["wave1"] is None
+        and outcome["submitted_record_sha256_by_role"]["report"] is None
+        and outcome["recovery_sha256"]
+        == files["CANARY_RECOVERY_CANCELLED.json"]["sha256"]
+        and outcome["cancel_calling_sha256"]
+        == files["CANARY_RECOVERY_CANCEL_CALLING_0000.json"]["sha256"]
+        and outcome["cancel_result_sha256"]
+        == files["CANARY_RECOVERY_CANCEL_RESULT_0000.json"]["sha256"],
+        "canary1 durable hash links differ",
+    )
+    require(
+        exact_json_equal(
+            value["absent_durable_artifacts"],
+            [
+                "CANARY_WAVE1_SUBMITTED.json",
+                "CANARY_REPORT_CALLING.json",
+                "CANARY_REPORT_SUBMITTED.json",
+                "CANARY_AUTHORIZATION.json",
+                "CANARY_SUBMISSION_RECEIPT.json",
+                "CANARY_READY_TO_RELEASE.json",
+                "CANARY_WAVE0_RELEASE_CALLING.json",
+                "CANARY_WAVE0_RELEASED.json",
+                "WAVE0_READY.json",
+                "WAVE1_COMPLETE.json",
+                "CANARY_REPORT.json",
+            ],
+        ),
+        "canary1 absent durable artifact census differs",
+    )
+    retained = value["retained_wave1_scheduler_observation"]
+    require(
+        exact_json_equal(
+            retained,
+            {
+                "evidence_scope": (
+                    "Contemporaneous operator-recorded scontrol observation made after "
+                    "controller failure and before scheduler purge. The raw stdout was "
+                    "not preserved in the canary root or package; its byte count and "
+                    "SHA-256 are opaque metadata only. The parsed fields cannot be "
+                    "reconstructed from preserved bytes and are non-authoritative "
+                    "corroboration, not cryptographically authenticated scheduler evidence."
+                ),
+                "observed_at_utc": "2026-08-28T20:04:37.342Z",
+                "environment": {
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "SLURM_CONF": (
+                        "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+                    ),
+                },
+                "argv": [
+                    "/usr/local/bin/scontrol",
+                    "show",
+                    "job",
+                    "33285486",
+                    "--oneliner",
+                ],
+                "returncode": 0,
+                "stdout_bytes": 2136,
+                "stdout_sha256": (
+                    "75d00d04459a341ae75f9661e236099d62076eee459de2e9796b43d3f398737f"
+                ),
+                "stderr_bytes": 0,
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+                "raw_stdout_preserved_in_state_root": False,
+                "parsed_fields": {
+                    "JobId": "33285486",
+                    "JobName": "exp23-launch8-canary-e09ce7d5a0cef1b0-wave1",
+                    "JobState": "CANCELLED",
+                    "Reason": "Dependency",
+                    "Dependency": "afterok:33285485(unfulfilled)",
+                    "RunTime": "00:00:00",
+                    "StartTime": "2026-08-28T20:03:08",
+                    "EndTime": "2026-08-28T20:03:08",
+                    "NodeList": "",
+                    "Comment": "treewm-exp23-canary:e09ce7d5a0cef1b0",
+                    "KillOInInvalidDependent": "Yes",
+                },
+            },
+        ),
+        "canary1 retained scalar dependency observation differs",
+    )
+    expected_rows = [
+        (
+            "33285485|exp23-launch8-canary-e09ce7d5a0cef1b0-wave0|"
+            "CANCELLED by 147230|0:0|00:00:00|2026-08-28T20:03:08|"
+            "2026-08-28T20:03:08|None assigned|"
+            "treewm-exp23-canary:e09ce7d5a0cef1b0"
+        ),
+        (
+            "33285486|exp23-launch8-canary-e09ce7d5a0cef1b0-wave1|"
+            "CANCELLED by 147230|0:0|00:00:00|2026-08-28T20:03:08|"
+            "2026-08-28T20:03:08|None assigned|"
+            "treewm-exp23-canary:e09ce7d5a0cef1b0"
+        ),
+    ]
+    require(
+        exact_json_equal(value["scheduler_terminal_rows"], expected_rows),
+        "canary1 scheduler terminal rows differ",
+    )
+    scheduler_payload = {
+        "schema_version": 1,
+        "fields": value["scheduler_terminal_rows_schema"].split("|"),
+        "rows": value["scheduler_terminal_rows"],
+    }
+    scheduler_raw = ("\n".join(value["scheduler_terminal_rows"]) + "\n").encode(
+        "ascii"
+    )
+    scheduler = value["scheduler_terminal_observation"]
+    require(
+        set(scheduler)
+        == {
+            "observed_at_utc",
+            "environment",
+            "argv",
+            "returncode",
+            "stdout_bytes",
+            "stdout_sha256",
+            "stderr_bytes",
+            "stderr_sha256",
+            "row_count",
+            "canonical_reduced_rows_sha256",
+        }
+        and scheduler["observed_at_utc"] == "2026-08-28T20:13:16Z"
+        and exact_json_equal(
+            scheduler["environment"],
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "SLURM_CONF": (
+                    "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+                ),
+            },
+        )
+        and value["scheduler_terminal_rows_schema"]
+        == "JobIDRaw|JobName|State|ExitCode|Elapsed|Start|End|NodeList|Comment"
+        and scheduler["argv"]
+        == [
+            "/usr/local/bin/sacct",
+            "-X",
+            "-n",
+            "-j",
+            "33285485,33285486",
+            "-o",
+            "JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList,Comment",
+            "-P",
+        ]
+        and type(scheduler["returncode"]) is int
+        and scheduler["returncode"] == 0
+        and type(scheduler["row_count"]) is int
+        and scheduler["row_count"] == len(expected_rows) == binding["scheduler_terminal_rows"]
+        and type(scheduler["stdout_bytes"]) is int
+        and scheduler["stdout_bytes"] == len(scheduler_raw) == 354
+        and scheduler["stdout_sha256"] == hashlib.sha256(scheduler_raw).hexdigest()
+        and type(scheduler["stderr_bytes"]) is int
+        and scheduler["stderr_bytes"] == 0
+        and scheduler["stderr_sha256"] == hashlib.sha256(b"").hexdigest()
+        and scheduler["canonical_reduced_rows_sha256"]
+        == stable_hash(scheduler_payload)
+        == "a74fcb1e76eb07d5372f0d8b7f0c80729ca4f64c541d66805e9cecea251ffe56",
+        "canary1 scheduler terminal evidence differs",
+    )
+    root_cause = value["root_cause"]
+    require(
+        exact_json_equal(
+            root_cause,
+            {
+                "classification": "canary_adapter_dependency_validation_bug",
+                "observed_scheduler_dependency": "afterok:33285485(unfulfilled)",
+                "scheduler_dependency_evidence_scope": (
+                    "contemporaneous_operator_recorded_non_reconstructable_"
+                    "corroboration"
+                ),
+                "rejected_validator_dependency": (
+                    "afterok:33285485_*(unfulfilled)"
+                ),
+                "explanation": (
+                    "The canary submits scalar wave0 and wave1 jobs. A contemporaneous "
+                    "non-reconstructable operator observation recorded the "
+                    "scalar-predecessor afterok spelling, while the durable controller "
+                    "abort records that its shared validator rejected the accepted wave1 "
+                    "dependency. Source inspection identifies the validator's incorrect "
+                    "requirement for the production-array _* spelling. The parsed "
+                    "scontrol fields are corroborative only; the preserved root "
+                    "independently proves that failure occurred before sealing wave1 "
+                    "submission or authorizing release."
+                ),
+                "scheduler_or_topology_drift": False,
+                "scientific_runtime_defect": False,
+            },
+        ),
+        "canary1 root-cause classification differs",
+    )
+    conclusion = value["negative_conclusion"]
+    require(
+        conclusion.get("required_successor_policy")
+        == (
+            "Any successor canary must use a fresh state root and token, submit fresh "
+            "jobs, and run only from a newly sealed package protocol after the "
+            "scalar-predecessor validator repair. No file, job identity, receipt, "
+            "source snapshot, or result from canary1 may be read as successor input."
+        ),
+        "canary1 required successor policy differs",
+    )
+    require(
+        exact_json_equal(
+            conclusion,
+            {
+                "wave0_released": False,
+                "authorization_published": False,
+                "receipt_published": False,
+                "report_job_submitted": False,
+                "report_published": False,
+                "gpu_runtime_seconds": 0,
+                "allocated_node_count": 0,
+                "scientific_outputs_created": False,
+                "active_scheduler_jobs_after_recovery": 0,
+                "reuse_allowed": False,
+                "resume_allowed": False,
+                "retry_allowed": False,
+                "recovery_allowed": False,
+                "result_consumption_allowed": False,
+                "required_successor_policy": (
+                    "Any successor canary must use a fresh state root and token, submit "
+                    "fresh jobs, and run only from a newly sealed package protocol after "
+                    "the scalar-predecessor validator repair. No file, job identity, "
+                    "receipt, source snapshot, or result from canary1 may be read as "
+                    "successor input."
+                ),
+            },
+        )
+        and conclusion["gpu_runtime_seconds"] == binding["gpu_runtime_seconds"]
+        and conclusion["allocated_node_count"] == binding["allocated_node_count"]
+        and conclusion["active_scheduler_jobs_after_recovery"]
+        == binding["active_scheduler_jobs_after_recovery"],
+        "canary1 terminal/no-reuse conclusion differs",
+    )
+    require(
+        outcome["authorization_committed"]
+        is conclusion["authorization_published"]
+        and outcome["submission_receipt_committed"]
+        is conclusion["receipt_published"]
+        and outcome["wave0_released"] is conclusion["wave0_released"]
+        and outcome["report_submitted"] is conclusion["report_job_submitted"]
+        and outcome["canary_report_committed"] is conclusion["report_published"],
+        "canary1 durable lifecycle/conclusion binding differs",
+    )
+    require(
+        all(
+            conclusion[key] is binding[key]
+            for key in (
+                "wave0_released",
+                "authorization_published",
+                "receipt_published",
+                "report_job_submitted",
+                "report_published",
+                "reuse_allowed",
+                "resume_allowed",
+                "retry_allowed",
+                "recovery_allowed",
+                "result_consumption_allowed",
+            )
+        ),
+        "canary1 manifest conclusion binding differs",
+    )
+
+
 def validate_manifest(
     manifest: Mapping[str, Any],
     lock: Mapping[str, Any],
@@ -2144,6 +2808,7 @@ def validate_manifest(
         "package launch state differs",
     )
     require(manifest.get("formal_validation") is False, "pilot is marked formal")
+    _validate_canary1_negative_provenance(manifest, Path(repo).resolve())
     _validate_launch7_negative_provenance(manifest, Path(repo).resolve())
     require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
     require(
@@ -2329,6 +2994,7 @@ def validate_manifest(
             ),
             "within_wave_requeue": False,
             "run_during_read_only_preflight": False,
+            "failed_attempts": FAILED_CANARY_ATTEMPTS,
         },
         "real-GPU two-wave canary contract differs",
     )

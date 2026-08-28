@@ -3926,6 +3926,7 @@ def _accepted_dependency_evidence(
     predecessor_id: str,
     job_name: str,
     role: str,
+    predecessor_kind: str,
     comment: str,
     cwd: Path,
     runner: SchedulerRunner,
@@ -3934,6 +3935,11 @@ def _accepted_dependency_evidence(
     observations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     require(role in {"wave1", "report"}, "accepted dependency role differs")
+    require(
+        type(predecessor_kind) is str
+        and predecessor_kind in {"scalar", "array"},
+        "accepted dependency predecessor kind differs",
+    )
     command = [scontrol, "show", "job", job_id, "--oneliner"]
     completed, observation = _scheduler_call(
         command,
@@ -3960,8 +3966,13 @@ def _accepted_dependency_evidence(
         f"accepted {role} scheduler identity differs",
     )
     dependency = _scontrol_oneliner_field(completed.stdout, "Dependency")
+    expected_dependency = (
+        f"afterok:{predecessor_id}(unfulfilled)"
+        if predecessor_kind == "scalar"
+        else f"afterok:{predecessor_id}_*(unfulfilled)"
+    )
     require(
-        dependency == f"afterok:{predecessor_id}_*(unfulfilled)",
+        dependency == expected_dependency,
         f"accepted {role} dependency differs",
     )
     kill_on_invalid_dependency = _scontrol_oneliner_field(
@@ -5635,6 +5646,7 @@ def _submit_campaign_impl(
             predecessor_id=wave0_id,
             job_name=wave1_name,
             role="wave1",
+            predecessor_kind="array",
             comment=scheduler_comment,
             cwd=snapshot_root,
             runner=scheduler_runner,
@@ -5761,6 +5773,7 @@ def _submit_campaign_impl(
             predecessor_id=wave1_id,
             job_name=report_name,
             role="report",
+            predecessor_kind="array",
             comment=scheduler_comment,
             cwd=snapshot_root,
             runner=scheduler_runner,

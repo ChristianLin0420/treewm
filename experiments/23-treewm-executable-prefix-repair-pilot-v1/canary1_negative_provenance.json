@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "status": "terminal_negative_canary_provenance_frozen",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+  "canary_attempt": "canary1",
+  "scientific": false,
+  "observed_at_utc": "2026-08-28T20:13:16Z",
+  "scope": "Terminal negative evidence for one non-scientific real-GPU topology canary. It does not supersede the still-unsubmitted Launch8 scientific campaign and grants no authority to reuse the failed canary namespace.",
+  "canonical_reconstruction": {
+    "canonical_json": "UTF-8 JSON with ensure_ascii=true, allow_nan=false, object keys sorted lexicographically, separators comma and colon, and no trailing newline.",
+    "state_file_map_payload": "Hash canonical JSON of {schema_version:1,files:{state_root_relative_path:{mode,sha256,size}}}; mode is a four-digit octal string, size is the exact raw byte count, and sha256 is the raw-file SHA-256.",
+    "scheduler_rows_payload": "Hash canonical JSON of {schema_version:1,fields:scheduler_terminal_rows_schema.split('|'),rows:scheduler_terminal_rows}.",
+    "scope": "The state-file map is a point-in-time read-only census of the preserved failed canary root; the repository artifact, not the writable owner lock, is the frozen evidence anchor. The embedded sacct rows are independently reconstructable from their preserved raw-row representation. The retained scontrol digest and parsed fields are contemporaneous operator-recorded, non-reconstructable corroborative metadata only. Package validation reads only this embedded artifact and never reads or imports the failed state root."
+  },
+  "immutable_identity": {
+    "source_commit_protocol_equivalent": "af348afdef0fa84f5e8ad4917d469d9729509f09",
+    "package_protocol_sha256": "b4403218d841667b6e68c715fa91cb53090670ca360d284e34d92b0a8763130f",
+    "protocol_lock_raw_sha256": "968e338ece347698ce10d8df9d52b1afe6ba86dcdbab383e2fa6e6de23e0e967",
+    "manifest_raw_sha256": "1976216ad9630509d2a91f023d3ffa88b9e52558a119b805c0bbc07997ac3704",
+    "manifest_canonical_sha256": "782baa33c8129e90be8599074b80f93fdaed8e2a4ffe73aed8fc9f8ab0bc41cc",
+    "state_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-af348af-b4403218",
+    "canary_token": "e09ce7d5a0cef1b0",
+    "state_root_relative": "outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-af348af-b4403218",
+    "scheduler_comment": "treewm-exp23-canary:e09ce7d5a0cef1b0",
+    "controller_identity_sha256": "4a79c2dfa750ca682cfdbab686db3b0e30e870af53851dcacab9e6aa68afb938",
+    "scheduler_control_plane_sha256": "b631db129a9330a869436a1487fe67d99a8692ba73eb3b1a0156de4adc349731",
+    "source_sha256": {
+      "canary_gpu.slurm": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+      "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+      "canary_worker.py": "f0c20908a481382a0734a003a5facf8709c02e4b4763076d40d2cd7b0a50d87f",
+      "two_wave_canary.py": "2fba2cd0c477317e49545b0ed3f6af7f2c590493fd43e888c183ce13fb7a2823"
+    }
+  },
+  "terminal_state_file_census": {
+    "state_file_count": 13,
+    "state_file_bytes": 290380,
+    "directory_paths": [
+      ".",
+      "logs",
+      "source"
+    ],
+    "directory_modes": {
+      ".": "0700",
+      "logs": "0700",
+      "source": "0555"
+    },
+    "logs_file_count": 0,
+    "symlink_count": 0,
+    "special_file_count": 0,
+    "state_file_map_canonical_sha256": "61662d488cf571f26362e3392e49f63239153ef443b515d7c79bcbf094d05648",
+    "files": {
+      ".CANARY_CONTROLLER.lock": {
+        "mode": "0600",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "CANARY_ABORTED.json": {
+        "mode": "0444",
+        "sha256": "308e41a21a670e4eb90dbe3d7683af9614efe83166368fe684ac50ba05462a5b",
+        "size": 26508
+      },
+      "CANARY_CONTROLLER_IDENTITY.json": {
+        "mode": "0444",
+        "sha256": "4a79c2dfa750ca682cfdbab686db3b0e30e870af53851dcacab9e6aa68afb938",
+        "size": 6650
+      },
+      "CANARY_RECOVERY_CANCELLED.json": {
+        "mode": "0444",
+        "sha256": "494f82093e1a10ea31a13a02bc700c9455c771a3ddecc483522703589f22bfb6",
+        "size": 82468
+      },
+      "CANARY_RECOVERY_CANCEL_CALLING_0000.json": {
+        "mode": "0444",
+        "sha256": "34c6455cf0930c7edd5adb61eadfaea5bb4cd06e58409611813386638e7f91c4",
+        "size": 938
+      },
+      "CANARY_RECOVERY_CANCEL_RESULT_0000.json": {
+        "mode": "0444",
+        "sha256": "84f168cf746048ed97a943ef4139819a82b4b747a7bb635d1b1bf9b5993a58f9",
+        "size": 11919
+      },
+      "CANARY_WAVE0_CALLING.json": {
+        "mode": "0444",
+        "sha256": "6e275b912b780cd75bd53e76430940abb484bd7b34fe7f8968be66194ba6b3a8",
+        "size": 2035
+      },
+      "CANARY_WAVE0_SUBMITTED.json": {
+        "mode": "0444",
+        "sha256": "81cbb9e2185248b13b2899e81a021c50eb05df03f9a6c57a0bd5065b187bd7d2",
+        "size": 14597
+      },
+      "CANARY_WAVE1_CALLING.json": {
+        "mode": "0444",
+        "sha256": "a90d1f0745c4c14980ef691ba9340643d2ffd8467015ff386e19fa5d5a14f7b6",
+        "size": 2091
+      },
+      "source/canary_gpu.slurm": {
+        "mode": "0444",
+        "sha256": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+        "size": 1376
+      },
+      "source/canary_report.slurm": {
+        "mode": "0444",
+        "sha256": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+        "size": 1036
+      },
+      "source/canary_worker.py": {
+        "mode": "0444",
+        "sha256": "f0c20908a481382a0734a003a5facf8709c02e4b4763076d40d2cd7b0a50d87f",
+        "size": 42469
+      },
+      "source/two_wave_canary.py": {
+        "mode": "0444",
+        "sha256": "2fba2cd0c477317e49545b0ed3f6af7f2c590493fd43e888c183ce13fb7a2823",
+        "size": 98293
+      }
+    }
+  },
+  "durable_controller_outcome": {
+    "abort_status": "two_wave_gpu_canary_aborted",
+    "abort_error": "SubmissionError('accepted wave1 dependency differs')",
+    "known_job_ids": [
+      "33285485",
+      "33285486"
+    ],
+    "scheduler_assigned_job_ids_by_role": {
+      "wave0": [
+        "33285485"
+      ],
+      "wave1": [
+        "33285486"
+      ],
+      "report": []
+    },
+    "durably_submitted_marker_ids_by_role": {
+      "wave0": [
+        "33285485"
+      ],
+      "wave1": [],
+      "report": []
+    },
+    "cancellation_authority_job_ids_by_role": {
+      "wave0": [
+        "33285485"
+      ],
+      "wave1": [
+        "33285486"
+      ],
+      "report": []
+    },
+    "calling_intent_sha256_by_role": {
+      "wave0": "6e275b912b780cd75bd53e76430940abb484bd7b34fe7f8968be66194ba6b3a8",
+      "wave1": "a90d1f0745c4c14980ef691ba9340643d2ffd8467015ff386e19fa5d5a14f7b6"
+    },
+    "submitted_record_sha256_by_role": {
+      "wave0": "81cbb9e2185248b13b2899e81a021c50eb05df03f9a6c57a0bd5065b187bd7d2",
+      "wave1": null,
+      "report": null
+    },
+    "wave0_accepted_hold": {
+      "state": "PENDING",
+      "reason": "JobHeldUser",
+      "stdout_bytes": 2000,
+      "stdout_sha256": "a11edd23eabf58f34049b670b49d6bbe9478e7b80e3b8e1fb26680a256416d3f"
+    },
+    "authorization_committed": false,
+    "submission_receipt_committed": false,
+    "ready_to_release_committed": false,
+    "release_calling_committed": false,
+    "wave0_released": false,
+    "report_calling_committed": false,
+    "report_submitted": false,
+    "canary_report_committed": false,
+    "recovery_status": "canary_recovered_terminal_after_cancel_attempts",
+    "recovery_sha256": "494f82093e1a10ea31a13a02bc700c9455c771a3ddecc483522703589f22bfb6",
+    "cancel_calling_sha256": "34c6455cf0930c7edd5adb61eadfaea5bb4cd06e58409611813386638e7f91c4",
+    "cancel_result_sha256": "84f168cf746048ed97a943ef4139819a82b4b747a7bb635d1b1bf9b5993a58f9",
+    "scheduler_calls_in_recovery": 9,
+    "new_jobs_created_in_recovery": 0,
+    "post_cancel_active_job_ids_by_role": {
+      "wave0": [],
+      "wave1": [],
+      "report": []
+    },
+    "cancellation_error": null,
+    "reconciliation_errors": []
+  },
+  "absent_durable_artifacts": [
+    "CANARY_WAVE1_SUBMITTED.json",
+    "CANARY_REPORT_CALLING.json",
+    "CANARY_REPORT_SUBMITTED.json",
+    "CANARY_AUTHORIZATION.json",
+    "CANARY_SUBMISSION_RECEIPT.json",
+    "CANARY_READY_TO_RELEASE.json",
+    "CANARY_WAVE0_RELEASE_CALLING.json",
+    "CANARY_WAVE0_RELEASED.json",
+    "WAVE0_READY.json",
+    "WAVE1_COMPLETE.json",
+    "CANARY_REPORT.json"
+  ],
+  "retained_wave1_scheduler_observation": {
+    "evidence_scope": "Contemporaneous operator-recorded scontrol observation made after controller failure and before scheduler purge. The raw stdout was not preserved in the canary root or package; its byte count and SHA-256 are opaque metadata only. The parsed fields cannot be reconstructed from preserved bytes and are non-authoritative corroboration, not cryptographically authenticated scheduler evidence.",
+    "observed_at_utc": "2026-08-28T20:04:37.342Z",
+    "environment": {
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+    },
+    "argv": [
+      "/usr/local/bin/scontrol",
+      "show",
+      "job",
+      "33285486",
+      "--oneliner"
+    ],
+    "returncode": 0,
+    "stdout_bytes": 2136,
+    "stdout_sha256": "75d00d04459a341ae75f9661e236099d62076eee459de2e9796b43d3f398737f",
+    "stderr_bytes": 0,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "raw_stdout_preserved_in_state_root": false,
+    "parsed_fields": {
+      "JobId": "33285486",
+      "JobName": "exp23-launch8-canary-e09ce7d5a0cef1b0-wave1",
+      "JobState": "CANCELLED",
+      "Reason": "Dependency",
+      "Dependency": "afterok:33285485(unfulfilled)",
+      "RunTime": "00:00:00",
+      "StartTime": "2026-08-28T20:03:08",
+      "EndTime": "2026-08-28T20:03:08",
+      "NodeList": "",
+      "Comment": "treewm-exp23-canary:e09ce7d5a0cef1b0",
+      "KillOInInvalidDependent": "Yes"
+    }
+  },
+  "scheduler_terminal_observation": {
+    "observed_at_utc": "2026-08-28T20:13:16Z",
+    "environment": {
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+    },
+    "argv": [
+      "/usr/local/bin/sacct",
+      "-X",
+      "-n",
+      "-j",
+      "33285485,33285486",
+      "-o",
+      "JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End,NodeList,Comment",
+      "-P"
+    ],
+    "returncode": 0,
+    "stdout_bytes": 354,
+    "stdout_sha256": "33f12a390f5eaad64ebe2bed644ce25e70336be7e0110aa0c090ea091fd37ba7",
+    "stderr_bytes": 0,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "row_count": 2,
+    "canonical_reduced_rows_sha256": "a74fcb1e76eb07d5372f0d8b7f0c80729ca4f64c541d66805e9cecea251ffe56"
+  },
+  "scheduler_terminal_rows_schema": "JobIDRaw|JobName|State|ExitCode|Elapsed|Start|End|NodeList|Comment",
+  "scheduler_terminal_rows": [
+    "33285485|exp23-launch8-canary-e09ce7d5a0cef1b0-wave0|CANCELLED by 147230|0:0|00:00:00|2026-08-28T20:03:08|2026-08-28T20:03:08|None assigned|treewm-exp23-canary:e09ce7d5a0cef1b0",
+    "33285486|exp23-launch8-canary-e09ce7d5a0cef1b0-wave1|CANCELLED by 147230|0:0|00:00:00|2026-08-28T20:03:08|2026-08-28T20:03:08|None assigned|treewm-exp23-canary:e09ce7d5a0cef1b0"
+  ],
+  "root_cause": {
+    "classification": "canary_adapter_dependency_validation_bug",
+    "observed_scheduler_dependency": "afterok:33285485(unfulfilled)",
+    "scheduler_dependency_evidence_scope": "contemporaneous_operator_recorded_non_reconstructable_corroboration",
+    "rejected_validator_dependency": "afterok:33285485_*(unfulfilled)",
+    "explanation": "The canary submits scalar wave0 and wave1 jobs. A contemporaneous non-reconstructable operator observation recorded the scalar-predecessor afterok spelling, while the durable controller abort records that its shared validator rejected the accepted wave1 dependency. Source inspection identifies the validator's incorrect requirement for the production-array _* spelling. The parsed scontrol fields are corroborative only; the preserved root independently proves that failure occurred before sealing wave1 submission or authorizing release.",
+    "scheduler_or_topology_drift": false,
+    "scientific_runtime_defect": false
+  },
+  "negative_conclusion": {
+    "wave0_released": false,
+    "authorization_published": false,
+    "receipt_published": false,
+    "report_job_submitted": false,
+    "report_published": false,
+    "gpu_runtime_seconds": 0,
+    "allocated_node_count": 0,
+    "scientific_outputs_created": false,
+    "active_scheduler_jobs_after_recovery": 0,
+    "reuse_allowed": false,
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false,
+    "result_consumption_allowed": false,
+    "required_successor_policy": "Any successor canary must use a fresh state root and token, submit fresh jobs, and run only from a newly sealed package protocol after the scalar-predecessor validator repair. No file, job identity, receipt, source snapshot, or result from canary1 may be read as successor input."
+  }
+}

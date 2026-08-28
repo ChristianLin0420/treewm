@@ -538,6 +538,139 @@ def test_launch8_namespace_and_ordered_superseded_launches_are_exact():
         campaign.validate_manifest(tampered, lock, REPO)
 
 
+def test_canary1_negative_provenance_is_exact_and_never_reused():
+    manifest, _lock = contracts()
+    binding = manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "failed_attempts"
+    ]
+    assert campaign.exact_json_equal(binding, campaign.FAILED_CANARY_ATTEMPTS)
+    assert binding[0]["job_ids_by_role"] == {
+        "wave0": ["33285485"],
+        "wave1": ["33285486"],
+        "report": [],
+    }
+    assert binding[0]["state_file_map_canonical_sha256"] == (
+        "61662d488cf571f26362e3392e49f63239153ef443b515d7c79bcbf094d05648"
+    )
+    campaign._validate_canary1_negative_provenance(manifest, REPO)
+    artifact = campaign.read_json(PACKAGE / binding[0]["path"])
+    census = artifact["terminal_state_file_census"]
+    assert len(census["files"]) == census["state_file_count"] == 13
+    assert sum(row["size"] for row in census["files"].values()) == 290380
+    assert campaign.stable_hash(
+        {"schema_version": 1, "files": census["files"]}
+    ) == census["state_file_map_canonical_sha256"]
+    terminal = artifact["scheduler_terminal_observation"]
+    rows = artifact["scheduler_terminal_rows"]
+    assert campaign.stable_hash(
+        {
+            "schema_version": 1,
+            "fields": artifact["scheduler_terminal_rows_schema"].split("|"),
+            "rows": rows,
+        }
+    ) == terminal["canonical_reduced_rows_sha256"]
+    conclusion = artifact["negative_conclusion"]
+    for key in (
+        "wave0_released",
+        "authorization_published",
+        "receipt_published",
+        "report_job_submitted",
+        "report_published",
+        "reuse_allowed",
+        "resume_allowed",
+        "retry_allowed",
+        "recovery_allowed",
+        "result_consumption_allowed",
+    ):
+        assert conclusion[key] is False
+
+
+@pytest.mark.parametrize(
+    "mutation,error",
+    (
+        ("job-id", "durable controller outcome differs"),
+        ("state-file-size", "state census summary differs"),
+        ("scheduler-row", "scheduler terminal rows differ"),
+        ("authorization-flag", "durable lifecycle outcome differs"),
+        ("release-flag", "durable lifecycle outcome differs"),
+        ("scope", "negative provenance envelope differs"),
+        ("reconstruction", "canonical reconstruction differs"),
+        ("hold", "durable wave0 hold evidence differs"),
+        ("retained-state", "retained scalar dependency observation differs"),
+        ("successor-policy", "required successor policy differs"),
+        ("reuse", "terminal/no-reuse conclusion differs"),
+    ),
+)
+def test_canary1_negative_provenance_rejects_coherently_rehashed_mutations(
+    tmp_path, monkeypatch, mutation, error
+):
+    manifest, _lock = contracts()
+    value = campaign.read_json(PACKAGE / "canary1_negative_provenance.json")
+    if mutation == "job-id":
+        value["durable_controller_outcome"][
+            "scheduler_assigned_job_ids_by_role"
+        ]["wave1"] = ["33285487"]
+    elif mutation == "state-file-size":
+        value["terminal_state_file_census"]["files"][
+            "CANARY_ABORTED.json"
+        ]["size"] += 1
+    elif mutation == "scheduler-row":
+        value["scheduler_terminal_rows"][0] = value["scheduler_terminal_rows"][
+            0
+        ].replace("CANCELLED by 147230", "COMPLETED")
+    elif mutation == "authorization-flag":
+        value["durable_controller_outcome"]["authorization_committed"] = True
+    elif mutation == "release-flag":
+        value["durable_controller_outcome"]["wave0_released"] = True
+    elif mutation == "scope":
+        value["scope"] = "safe to reuse"
+    elif mutation == "reconstruction":
+        value["canonical_reconstruction"]["scope"] = "external bytes are authoritative"
+    elif mutation == "hold":
+        value["durable_controller_outcome"]["wave0_accepted_hold"]["state"] = (
+            "RUNNING"
+        )
+    elif mutation == "retained-state":
+        value["retained_wave1_scheduler_observation"]["parsed_fields"][
+            "JobState"
+        ] = "COMPLETED"
+    elif mutation == "successor-policy":
+        value["negative_conclusion"]["required_successor_policy"] = "reuse allowed"
+    else:
+        value["negative_conclusion"]["reuse_allowed"] = True
+    payload = (
+        json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("ascii")
+    package = tmp_path / mutation / "package"
+    package.mkdir(parents=True)
+    artifact = package / "canary1_negative_provenance.json"
+    artifact.write_bytes(payload)
+    binding = copy.deepcopy(campaign.FAILED_CANARY_ATTEMPTS)
+    binding[0]["raw_sha256"] = hashlib.sha256(payload).hexdigest()
+    binding[0]["canonical_sha256"] = campaign.stable_hash(value)
+    tampered = copy.deepcopy(manifest)
+    tampered["launch_contract"]["real_gpu_two_wave_canary"][
+        "failed_attempts"
+    ] = binding
+    with monkeypatch.context() as patch:
+        patch.setattr(campaign, "PACKAGE_RELATIVE", Path(mutation) / "package")
+        patch.setattr(campaign, "FAILED_CANARY_ATTEMPTS", binding)
+        with pytest.raises(campaign.ContractError, match=error):
+            campaign._validate_canary1_negative_provenance(tampered, tmp_path)
+
+
+def test_canary1_negative_provenance_rejects_symlink(tmp_path, monkeypatch):
+    manifest, _lock = contracts()
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "canary1_negative_provenance.json").symlink_to(
+        PACKAGE / "canary1_negative_provenance.json"
+    )
+    monkeypatch.setattr(campaign, "PACKAGE_RELATIVE", Path("package"))
+    with pytest.raises(campaign.ContractError, match="regular nonsymlink"):
+        campaign._validate_canary1_negative_provenance(manifest, tmp_path)
+
+
 def test_each_matched_pair_differs_only_in_three_audited_weights():
     manifest, lock = contracts()
     cells = campaign.expand_matrix(manifest)
@@ -706,6 +839,7 @@ def test_protocol_inventory_is_closed_and_deterministic():
         "canary_worker.py",
         "canary_gpu.slurm",
         "canary_report.slurm",
+        "canary1_negative_provenance.json",
         "launch7_negative_provenance.json",
         "README.md",
         "tests/test_campaign.py",

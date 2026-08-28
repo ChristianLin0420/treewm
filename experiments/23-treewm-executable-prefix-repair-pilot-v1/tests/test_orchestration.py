@@ -3196,6 +3196,7 @@ def test_accepted_report_dependency_is_verified_before_ready(
         predecessor_id="7000",
         job_name="exact-report",
         role="report",
+        predecessor_kind="array",
         comment="treewm-exp23:" + "c" * 64,
         cwd=tmp_path,
         runner=runner,
@@ -3210,6 +3211,137 @@ def test_accepted_report_dependency_is_verified_before_ready(
         submit._scontrol_oneliner_field(
             "Dependency=afterok:7000 Dependency=afterany:7000\n", "Dependency"
         )
+
+
+@pytest.mark.parametrize(
+    "flow,role,predecessor_kind,canonical_dependency,swapped_dependency",
+    (
+        (
+            "production",
+            "wave1",
+            "array",
+            "afterok:7000_*(unfulfilled)",
+            "afterok:7000(unfulfilled)",
+        ),
+        (
+            "production",
+            "report",
+            "array",
+            "afterok:7000_*(unfulfilled)",
+            "afterok:7000(unfulfilled)",
+        ),
+        (
+            "canary",
+            "wave1",
+            "scalar",
+            "afterok:7000(unfulfilled)",
+            "afterok:7000_*(unfulfilled)",
+        ),
+        (
+            "canary",
+            "report",
+            "scalar",
+            "afterok:7000(unfulfilled)",
+            "afterok:7000_*(unfulfilled)",
+        ),
+    ),
+    ids=(
+        "production-wave1-array-predecessor",
+        "production-report-array-predecessor",
+        "canary-wave1-scalar-predecessor",
+        "canary-report-scalar-predecessor",
+    ),
+)
+def test_dependency_evidence_accepts_only_the_explicit_predecessor_kind(
+    submit,
+    tmp_path,
+    monkeypatch,
+    flow,
+    role,
+    predecessor_kind,
+    canonical_dependency,
+    swapped_dependency,
+):
+    stable = scheduler_observation(submit)
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: stable
+    )
+    observed_dependency = canonical_dependency
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        values = list(command)
+        return subprocess.CompletedProcess(
+            values,
+            0,
+            stdout=(
+                f"JobId=7001 JobName={flow}-{role} JobState=PENDING "
+                f"Dependency={observed_dependency} "
+                "KillOInInvalidDependent=Yes "
+                f"Comment=treewm-exp23:{'d' * 64}\n"
+            ),
+            stderr="",
+        )
+
+    kwargs = {
+        "scontrol": "scontrol",
+        "job_id": "7001",
+        "predecessor_id": "7000",
+        "job_name": f"{flow}-{role}",
+        "role": role,
+        "predecessor_kind": predecessor_kind,
+        "comment": "treewm-exp23:" + "d" * 64,
+        "cwd": tmp_path,
+        "runner": runner,
+        "control_plane": scheduler_contract(),
+        "expected_observation": stable,
+        "observations": [],
+    }
+    accepted = submit._accepted_dependency_evidence(**kwargs)
+    assert accepted["dependency"] == canonical_dependency
+    observed_dependency = swapped_dependency
+    with pytest.raises(submit.SubmissionError, match="dependency differs"):
+        submit._accepted_dependency_evidence(**kwargs)
+
+
+@pytest.mark.parametrize("invalid_kind", ("both", None, [], True))
+def test_dependency_evidence_rejects_invalid_predecessor_kind_before_scheduler_call(
+    submit, tmp_path, invalid_kind
+):
+    called = False
+
+    def runner(*_args):
+        nonlocal called
+        called = True
+        raise AssertionError("scheduler runner must not be called")
+
+    with pytest.raises(
+        submit.SubmissionError,
+        match="accepted dependency predecessor kind differs",
+    ):
+        submit._accepted_dependency_evidence(
+            scontrol="scontrol",
+            job_id="7001",
+            predecessor_id="7000",
+            job_name="exact-report",
+            role="report",
+            predecessor_kind=invalid_kind,
+            comment="treewm-exp23:" + "d" * 64,
+            cwd=tmp_path,
+            runner=runner,
+            control_plane=scheduler_contract(),
+            expected_observation={},
+            observations=[],
+        )
+    assert not called
+
+
+def test_dependency_predecessor_kind_is_bound_at_all_four_runtime_edges(submit):
+    production_source = inspect.getsource(submit._submit_campaign_impl)
+    canary_source = (PACKAGE / "two_wave_canary.py").read_text(encoding="utf-8")
+    assert production_source.count('predecessor_kind="array"') == 2
+    assert 'predecessor_kind="scalar"' not in production_source
+    assert canary_source.count('predecessor_kind="scalar"') == 2
+    assert 'predecessor_kind="array"' not in canary_source
 
 
 @pytest.mark.parametrize(
@@ -3288,6 +3420,7 @@ def test_accepted_report_dependency_rejects_noncanonical_scheduler_records(
             predecessor_id="7000",
             job_name="exact-report",
             role="report",
+            predecessor_kind="array",
             comment="treewm-exp23:" + "c" * 64,
             cwd=tmp_path,
             runner=runner,

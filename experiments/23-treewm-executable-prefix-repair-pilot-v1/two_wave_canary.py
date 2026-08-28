@@ -49,22 +49,88 @@ def require(condition: bool, message: str) -> None:
         raise CanarySubmissionError(message)
 
 
+def _failed_canary_identities(
+    manifest: Mapping[str, Any],
+) -> tuple[set[Path], set[str], set[str]]:
+    launch = manifest.get("launch_contract")
+    require(isinstance(launch, Mapping), "canary launch contract differs")
+    canary = launch.get("real_gpu_two_wave_canary")
+    require(isinstance(canary, Mapping), "real-GPU canary contract differs")
+    attempts = canary.get("failed_attempts")
+    require(isinstance(attempts, list), "failed canary attempts differ")
+    roots: set[Path] = set()
+    tokens: set[str] = set()
+    job_ids: set[str] = set()
+    for attempt in attempts:
+        require(isinstance(attempt, Mapping), "failed canary attempt differs")
+        raw_root = attempt.get("state_root")
+        token = attempt.get("canary_token")
+        role_ids = attempt.get("job_ids_by_role")
+        require(
+            type(raw_root) is str
+            and Path(raw_root).is_absolute()
+            and Path(raw_root) == Path(raw_root).absolute()
+            and all(part not in {"", ".", ".."} for part in Path(raw_root).parts[1:]),
+            "failed canary state root differs",
+        )
+        require(
+            type(token) is str
+            and len(token) == 16
+            and all(character in "0123456789abcdef" for character in token),
+            "failed canary token differs",
+        )
+        require(
+            isinstance(role_ids, Mapping)
+            and set(role_ids) == {"wave0", "wave1", "report"},
+            "failed canary job identities differ",
+        )
+        flattened: list[str] = []
+        for role in ("wave0", "wave1", "report"):
+            values = role_ids[role]
+            require(
+                isinstance(values, list)
+                and all(
+                    type(value) is str
+                    and value.isascii()
+                    and value.isdigit()
+                    and not value.startswith("0")
+                    for value in values
+                ),
+                "failed canary job identities differ",
+            )
+            flattened.extend(values)
+        require(
+            len(flattened) == len(set(flattened)),
+            "failed canary job identities are not injective",
+        )
+        roots.add(Path(raw_root))
+        tokens.add(token)
+        job_ids.update(flattened)
+    require(
+        len(roots) == len(tokens) == len(attempts),
+        "failed canary identities are not injective",
+    )
+    return roots, tokens, job_ids
+
+
 class _CanaryControllerLock:
     """Serialize submit/recovery/cancel over one persistent canary-state inode."""
 
-    def __init__(self, state_root: Path) -> None:
+    def __init__(self, state_root: Path, *, create: bool) -> None:
         self.path = state_root / ".CANARY_CONTROLLER.lock"
+        self.create = create
         self.descriptor: int | None = None
 
     def __enter__(self) -> "_CanaryControllerLock":
-        descriptor = os.open(
-            self.path,
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-            0o600,
-        )
+        flags = (
+            (os.O_RDWR | os.O_CREAT) if self.create else os.O_RDONLY
+        ) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise CanarySubmissionError(
+                "canary controller lock is unavailable"
+            ) from exc
         try:
             opened = os.fstat(descriptor)
             named = self.path.lstat()
@@ -72,11 +138,13 @@ class _CanaryControllerLock:
                 stat.S_ISREG(opened.st_mode)
                 and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
                 and opened.st_uid == os.getuid()
-                and opened.st_nlink == 1,
+                and opened.st_nlink == 1
+                and (self.create or stat.S_IMODE(opened.st_mode) == 0o600),
                 "canary controller lock identity differs",
             )
-            os.fchmod(descriptor, 0o600)
-            os.fsync(descriptor)
+            if self.create:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
         except BaseException:
             os.close(descriptor)
@@ -100,7 +168,8 @@ class _CanaryControllerLock:
             stat.S_ISREG(opened.st_mode)
             and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
             and opened.st_uid == os.getuid()
-            and opened.st_nlink == 1,
+            and opened.st_nlink == 1
+            and stat.S_IMODE(opened.st_mode) == 0o600,
             "canary controller lock identity changed",
         )
         return {
@@ -228,6 +297,8 @@ def _prepare_state(
             forbidden.append(
                 (repo_root / lock).absolute() if not lock.is_absolute() else lock.absolute()
             )
+    failed_roots, _failed_tokens, _failed_job_ids = _failed_canary_identities(manifest)
+    forbidden.extend(failed_roots)
     require(
         all(
             not root.is_relative_to(path)
@@ -236,7 +307,7 @@ def _prepare_state(
             and dedicated_parent != path
             for path in forbidden
         ),
-        "canary state namespace overlaps a scientific/superseded namespace",
+        "canary state namespace overlaps a scientific/superseded/failed-canary namespace",
     )
     require(not os.path.lexists(root), "canary state root already exists")
     root.mkdir(mode=0o700)
@@ -378,6 +449,15 @@ def submit_real_canary(
     protocol_sha256 = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
     pinned = Path(str(manifest["paths"]["python"])).resolve(strict=True)
     require(Path(sys.executable).resolve(strict=True) == pinned, "canary controller interpreter is not pinned")
+    _failed_roots, failed_tokens, failed_job_ids = _failed_canary_identities(manifest)
+    token = secrets.token_hex(8)
+    require(
+        type(token) is str
+        and len(token) == 16
+        and all(character in "0123456789abcdef" for character in token),
+        "new canary token syntax differs",
+    )
+    require(token not in failed_tokens, "new canary token reuses a failed canary token")
     root, source_hashes = _prepare_state(repo_root, state_root, manifest)
     live_source_hashes = {
         name: submit.file_sha256(repo_root / PACKAGE_RELATIVE / name)
@@ -404,7 +484,6 @@ def submit_real_canary(
         submit._regular_nonsymlink(Path(path), f"canary {label}")
         require(os.access(path, os.X_OK), f"canary {label} is not executable")
 
-    token = secrets.token_hex(8)
     names = {
         "wave0": f"exp23-launch8-canary-{token}-wave0",
         "wave1": f"exp23-launch8-canary-{token}-wave1",
@@ -414,7 +493,7 @@ def submit_real_canary(
     known: dict[str, list[str]] = {role: [] for role in names}
     active_role = "wave0"
     observations: list[dict[str, Any]] = []
-    controller_lock = _CanaryControllerLock(root)
+    controller_lock = _CanaryControllerLock(root, create=True)
     controller_lock.__enter__()
     try:
         runner = _runner_with_canary_lock_lease(runner, controller_lock)
@@ -491,6 +570,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        require(
+            wave0_id not in failed_job_ids,
+            "canary scheduler reused a failed canary job ID",
+        )
         _require_direct_canary_acceptance(submit, wave0_id, wave0_record, "wave0")
         wave0_record = {**wave0_record, "calling_sha256": wave0_calling_sha256}
         known["wave0"].append(wave0_id)
@@ -557,6 +640,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        require(
+            wave1_id not in failed_job_ids,
+            "canary scheduler reused a failed canary job ID",
+        )
         _require_direct_canary_acceptance(submit, wave1_id, wave1_record, "wave1")
         require(
             wave1_id != wave0_id,
@@ -570,6 +657,7 @@ def submit_real_canary(
             predecessor_id=wave0_id,
             job_name=names["wave1"],
             role="wave1",
+            predecessor_kind="scalar",
             comment=comment,
             cwd=root,
             runner=runner,
@@ -628,6 +716,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        require(
+            report_id not in failed_job_ids,
+            "canary scheduler reused a failed canary job ID",
+        )
         _require_direct_canary_acceptance(submit, report_id, report_record, "report")
         require(
             report_id not in {wave0_id, wave1_id},
@@ -641,6 +733,7 @@ def submit_real_canary(
             predecessor_id=wave1_id,
             job_name=names["report"],
             role="report",
+            predecessor_kind="scalar",
             comment=comment,
             cwd=root,
             runner=runner,
@@ -1800,21 +1893,37 @@ def recover_or_cancel_real_canary(
         "canary recovery requires the final sealed Launch8 package",
     )
     validated_manifest, _weight_lock = campaign.load_contract(repo_root)
-    require(validated_manifest == manifest, "canary recovery manifest validation differs")
-    protocol_sha256 = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
-    pinned = Path(str(manifest["paths"]["python"])).resolve(strict=True)
-    require(Path(sys.executable).resolve(strict=True) == pinned, "canary recovery interpreter is not pinned")
+    require(
+        submit.exact_json_equal(validated_manifest, manifest),
+        "canary recovery manifest validation differs",
+    )
     root = state_root.absolute()
     require(
         root == state_root
         and root.parent == (repo_root / CANARY_PARENT_RELATIVE).absolute()
-        and root.name.startswith("exp23-launch8-two-wave-canary-")
-        and root.is_dir()
-        and not root.is_symlink(),
+        and root.name.startswith("exp23-launch8-two-wave-canary-"),
+        "canary recovery state root differs",
+    )
+    failed_roots, failed_tokens, failed_job_ids = _failed_canary_identities(
+        manifest
+    )
+    require(
+        root not in failed_roots,
+        "failed canary state root cannot be recovered or read",
+    )
+    protocol_sha256 = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
+    pinned = Path(str(manifest["paths"]["python"])).resolve(strict=True)
+    require(Path(sys.executable).resolve(strict=True) == pinned, "canary recovery interpreter is not pinned")
+    require(
+        not root.parent.is_symlink() and root.parent.is_dir(),
+        "canary recovery state parent differs",
+    )
+    require(
+        not root.is_symlink() and root.is_dir(),
         "canary recovery state root differs",
     )
     runner = submit._default_scheduler_runner if scheduler_runner is None else scheduler_runner
-    with _CanaryControllerLock(root) as controller_lock:
+    with _CanaryControllerLock(root, create=False) as controller_lock:
         runner = _runner_with_canary_lock_lease(runner, controller_lock)
         identity = submit.read_json(root / "CANARY_CONTROLLER_IDENTITY.json")
         require(
@@ -1851,6 +1960,10 @@ def recover_or_cancel_real_canary(
                 identity.get("controller_lock"), controller_lock.binding()
             ),
             "canary recovery controller-lock lineage differs",
+        )
+        require(
+            identity["canary_token"] not in failed_tokens,
+            "canary recovery identity reuses a failed canary token",
         )
         require(
             all(
@@ -1904,6 +2017,21 @@ def recover_or_cancel_real_canary(
             expected_control_plane=authorization,
             scheduler_fallback=fallback,
         )
+        require(
+            all(
+                not failed_job_ids.intersection(attempt["job_ids"])
+                for attempt in existing_cancel_history
+            ),
+            "canary recovery cancellation history reuses a failed canary job ID",
+        )
+        require(
+            not failed_job_ids.intersection(
+                item
+                for values in aborted_ids_by_role.values()
+                for item in values
+            ),
+            "canary recovery abort reuses a failed canary job ID",
+        )
         prior_path = root / "CANARY_RECOVERY_CANCELLED.json"
         if os.path.lexists(prior_path):
             submit._regular_nonsymlink(prior_path, "terminal canary recovery result")
@@ -1925,6 +2053,17 @@ def recover_or_cancel_real_canary(
                 scheduler_control_plane_sha256=scheduler_control_plane_sha256,
                 expected_control_plane=authorization,
                 scheduler_fallback=fallback,
+            )
+            require(
+                not failed_job_ids.intersection(prior["claimed_job_ids"]),
+                "canary recovery result reuses a failed canary job ID",
+            )
+            require(
+                not failed_job_ids.intersection(prior["live_verified_job_ids"])
+                and not failed_job_ids.intersection(
+                    prior["cancelled_live_job_ids"]
+                ),
+                "canary recovery result used a failed canary live job ID",
             )
             residual_identity = {
                 "campaign_id": CAMPAIGN_ID,
@@ -1967,6 +2106,18 @@ def recover_or_cancel_real_canary(
                 expected_control_plane=authorization,
                 scheduler_fallback=fallback,
             )
+            require(
+                all(
+                    not failed_job_ids.intersection(
+                        generation["live_verified_job_ids"]
+                    )
+                    and not failed_job_ids.intersection(
+                        generation["cancelled_live_job_ids"]
+                    )
+                    for generation in residual_chain
+                ),
+                "canary residual recovery used a failed canary live job ID",
+            )
             bound_history_length = len(
                 (
                     residual_chain[-1]["cancel_attempt_history"]
@@ -1993,6 +2144,10 @@ def recover_or_cancel_real_canary(
                     for item in values
                 },
                 key=int,
+            )
+            require(
+                not failed_job_ids.intersection(revalidation_ids),
+                "canary residual recovery found a failed canary live job ID",
             )
             # Historical response/journal IDs are provenance only.  The fresh
             # exact-name/comment/owner census is the sole mutation authority,
@@ -2273,6 +2428,12 @@ def recover_or_cancel_real_canary(
             == sum(len(values) for values in claimed.values()),
             "canary recovery assigns one durable job ID to multiple roles",
         )
+        require(
+            not failed_job_ids.intersection(
+                item for values in claimed.values() for item in values
+            ),
+            "canary recovery durable prefix reuses a failed canary job ID",
+        )
         durable_prefix_sha256 = _validated_canary_postsubmission_prefix(
             submit,
             worker,
@@ -2298,6 +2459,10 @@ def recover_or_cancel_real_canary(
         # targets are derived exclusively from this fresh settled census.
         active_ids = sorted(
             {job_id for values in active.values() for job_id in values}, key=int
+        )
+        require(
+            not failed_job_ids.intersection(active_ids),
+            "canary recovery found a failed canary live job ID",
         )
         cancel_context = {
             "schema_version": 1,

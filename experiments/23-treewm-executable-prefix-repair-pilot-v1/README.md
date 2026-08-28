@@ -107,6 +107,23 @@ cleared at raw SHA-256
 `29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e` and canonical
 SHA-256 `48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62`.
 
+The first non-scientific Launch8 real-GPU topology canary, run from commit
+`af348afdef0fa84f5e8ad4917d469d9729509f09` and protocol `b4403218...`, is also
+terminal negative evidence. Slurm accepted held scalar wave0 job `33285485` and
+scalar-dependent wave1 job `33285486`, but the controller's shared validator
+incorrectly required the production-array dependency spelling
+`afterok:33285485_*(unfulfilled)` instead of the scalar spelling actually returned by
+Slurm in a contemporaneous non-reconstructable operator observation,
+`afterok:33285485(unfulfilled)`. The observation is corroborative metadata rather than
+cryptographically reconstructable evidence. The controller failed before wave1's submitted
+journal, report submission, authorization, receipt, or wave0 release. Exact recovery
+cancelled both jobs; terminal accounting records zero runtime and no assigned node.
+The protocol-bound `canary1_negative_provenance.json` distinguishes durable root bytes
+from independently captured scheduler evidence and binds the complete 13-file state
+census. That root, token, both job IDs, copied sources, and every state/result artifact
+are permanently non-reusable. Any successor canary must use a newly sealed protocol,
+fresh token, fresh root, and fresh scheduler IDs.
+
 Exact protocols, manifests, inventories, claims, contracts, fingerprints, scheduler
 evidence, and journals for all seven attempts are recorded in order in
 `manifest.superseded_launches`. Launch6's run root contains 629 regular files,

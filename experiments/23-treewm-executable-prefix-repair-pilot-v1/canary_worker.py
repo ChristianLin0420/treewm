@@ -439,7 +439,7 @@ def _validate_scheduler_evidence(
         )
         return
     predecessor = jobs["wave0" if role == "wave1" else "wave1"]
-    dependency = f"afterok:{predecessor}_*(unfulfilled)"
+    dependency = f"afterok:{predecessor}(unfulfilled)"
     require(
         value.get("role") == role
         and value.get("dependency") == dependency
