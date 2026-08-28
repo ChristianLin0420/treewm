@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
   "classification": "bounded_prospective_matched_causal_repair_pilot",
   "status": "sealed_launch_ready_unsubmitted",
   "formal_validation": false,
@@ -464,6 +464,515 @@
     "resume_allowed": false,
     "retry_allowed": false,
     "recovery_allowed": false
+  }, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch6",
+    "submission_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch6/state/submission",
+    "snapshot_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch6/state/submission/source-snapshot/repo",
+    "transaction_lock": "outputs/.exp23-34d79ab13d65ef27.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch6",
+    "status": "cancelled_after_retrospective_tensorboard_scalar_identity_failure",
+    "failure_phase": "retrospective_5000_boundary_append_only_scalar_audit",
+    "failure_error": "The immutable Launch6 event streams contain 718 repeated (cell,tag,step) groups, including 560 conflict-classified groups, so no single-valued append-only report can be assembled.",
+    "source_commit": "d09e842acaf7909edf4ea6ba29138ea5c646fc1a",
+    "source_commit_claimed_by_contract": true,
+    "source_commit_claimed_by_journal": false,
+    "source_commit_evidence": "contract_clean_head_origin_and_independent_138_of_138_snapshot_file_byte_match",
+    "proof_scope": "The sealed contract records clean HEAD and origin/main at commit d09e842acaf7909edf4ea6ba29138ea5c646fc1a, and all 138 snapshot files were independently byte-matched to that commit. All twenty cells entered the sealed trainer from a generation-zero scratch start and performed partial training before an operator's retrospective 5k audit found irreparable same-tag/same-step scalar conflicts. Durable cancellation bytes prove one exact-ID scancel call returned zero. The later sacct/squeue ledger and scalar census are independent observations serialized only into Launch7 negative provenance, not records originally sealed inside Launch6. No Launch6 result, checkpoint, W&B identity, optimizer state, or namespace may be consumed.",
+    "package_protocol_sha256": "33288668441622bb30b205c98a0373e96f2c11f5ec5ba0e76bd5255098a8b7bd",
+    "manifest_canonical_sha256": "ea35d1e2f36179b99ce950036ed3a8673eb7cc5ed91fa7c022cb1f6c9b03d442",
+    "manifest_raw_sha256": "a621177815c69bb2685c84eee13804cedd5b896c281e25c022310818047078b2",
+    "snapshot": {
+      "inventory_sha256": "7982b2b5d9470f4bab4b16c59bc7acd42cb8eebc7905a3a0af404e471e197819",
+      "file_count": 138,
+      "independently_matched_files": 138,
+      "all_files_match": true
+    },
+    "canonical_evidence_serialization": "json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii'); SHA-256 is over those exact bytes",
+    "preserved_tree": {
+      "aggregate_schema_version": 1,
+      "aggregate_algorithm": "sha256(json.dumps({schema_version:1,files:{relative_posix_path:raw_file_sha256}},sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('utf-8'))",
+      "run_root": {
+        "directory_count_including_root": 297,
+        "regular_file_count": 629,
+        "regular_file_bytes": 2009101434,
+        "symlink_count": 80,
+        "special_file_count": 0,
+        "canonical_json_bytes": 101693,
+        "aggregate_sha256": "0ba872f7a03f42a58dfd9dcbc55afef0ec94dba6bef66744845c12f55cd340a8"
+      },
+      "submission_root": {
+        "directory_count_including_root": 85,
+        "regular_file_count": 309,
+        "regular_file_bytes": 13694950,
+        "symlink_count": 0,
+        "special_file_count": 0,
+        "canonical_json_bytes": 36226,
+        "aggregate_sha256": "98d131fbd80b46d34e978b9b23f7c0137bc07711cc32b35bd89877a49f8c0242"
+      },
+      "task_root": {
+        "directory_count_including_root": 61,
+        "regular_file_count": 119,
+        "regular_file_bytes": 369713,
+        "symlink_count": 0,
+        "special_file_count": 0,
+        "canonical_json_bytes": 12201,
+        "aggregate_sha256": "07217ed94c148f7751c46c776b114c593f6b92a17d79c45aceeaa55fa0895ec4"
+      },
+      "symlink_target_envelope": {
+        "schema_version": 1,
+        "policy": "raw readlink target text; links are never followed",
+        "canonical_payload_schema": "{schema_version:1,symlinks:{relative_posix_path:raw_readlink_target}}",
+        "symlink_count": 80,
+        "wandb_leaf_links_per_run": 4,
+        "canonical_json_bytes": 13357,
+        "aggregate_sha256": "fb1ef56fa6e93ae69f01e54438a377c36e9978ab64af8232f9f109582fecbfb4"
+      }
+    },
+    "claim_token": "45b8bb00c3ea0fd7fcb763cad34ce7cdf7300ca64638e7db3ce0387c3cc3f681",
+    "transaction_lock_state": {
+      "regular_file": true,
+      "symlink": false,
+      "mode": "0600",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "scientific_output_fingerprint_at_claim": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "contract_sha256": "e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+    "submission_sha256": "e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+    "receipt_sha256": "ab0574d776dec229420e207752abc257cbe3f17115def2061a1248d22d12a110",
+    "journal_sha256": {
+      "0000_CLAIMED.json": "6f96d1fa8e6562e459cce1339a09bdbabbba8ca94e33720d5f1b007abfa44e62",
+      "0001_SNAPSHOT_SEALED.json": "eea22f3b79588783d13ac0ca65891d84ba49a8830d658c537795cee9a9ffe837",
+      "0002_CONTRACT_SEALED.json": "c13c34f7d65dd606741675631087b9a0bd75ee849cea5c53d42c047eaa2be5f3",
+      "0003_TRAIN_SUBMITTED.json": "cc9b931f3053513723e816ebfce8e727dac63692283486aa3c063b045906c2d8",
+      "0004_REPORT_SUBMITTED.json": "10e704d8ea8c34b50d9e4ae9bfaaae54e81c49258357eadc8d4919b11c9fd1b5",
+      "0005_READY_TO_COMMIT.json": "d669d13504b140f68e4a536defd4bc3fa99dd3ec2158e8d9176a84b10c522b09"
+    },
+    "scheduler_submission": {
+      "train_array_job_id": "33223076",
+      "report_job_id": "33223079",
+      "requested_dependency": "afterok:33223076",
+      "accepted_dependency": "afterok:33223076_*(unfulfilled)",
+      "kill_on_invalid_dependency": "Yes",
+      "actual_sbatch_calls": 2
+    },
+    "cancellation": {
+      "latch_sha256": "a95defbc689623a08d48cead6c6959a585b461a6a70894b56d57d021c52584aa",
+      "call_token": "1787897778572633216-1585470",
+      "call_sha256": "f706ebbbd16f2ecaa0a2c10af38a6fb3251b7323e6399f970090878d7f3e82fe",
+      "result_sha256": "cb3be62a3e4a0e7ca9b9b61ee30771f32099aa61a671b5efb044cb95c7c5909e",
+      "command": [
+        "/usr/local/bin/scancel",
+        "33223076",
+        "33223079"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "scheduler_calls": 1,
+      "task_cancel_latch_count": 20,
+      "task_cancel_latch_canonical_payload_schema": "{schema_version:1,files:{tasks/cell-NN/CANCEL_REQUESTED.json:raw_file_sha256}}",
+      "task_cancel_latch_canonical_json_bytes": 2130,
+      "task_cancel_latch_aggregate_sha256": "c606ca738b0ee29a6cec57d670dae6bb17abeb25c35d4cbccec6885f1cdc947c"
+    },
+    "partial_checkpoints": {
+      "canonical_payload_schema": "{schema_version:1,validation,rows:[{cell,completed_updates,checkpoint_sha256,kind,phase,reason}]}",
+      "validation": "sealed_launch6_worker.inspect_run; exact-resume shared validator enabled",
+      "row_constant_fields": {
+        "kind": "train",
+        "phase": "train",
+        "reason": "graceful-stop:SIGTERM"
+      },
+      "row_count": 20,
+      "minimum_completed_updates": 4337,
+      "maximum_completed_updates": 6000,
+      "total_completed_updates": 102017,
+      "canonical_json_bytes": 3867,
+      "aggregate_sha256": "b4498f2787600681b5c90862c48f23571be6fce23343c9f5957aae5e993628b5",
+      "rows": [
+        {
+          "cell": 0,
+          "completed_updates": 4579,
+          "checkpoint_sha256": "b953b1cc54cb6193a66a626f008af13fcc4298f22a7e98b4428d99e20688cd73"
+        },
+        {
+          "cell": 1,
+          "completed_updates": 4590,
+          "checkpoint_sha256": "d4f6ca833c03ef7fbc0ef7b29c57297a30879ee864de38449e68cc7c3f5a9649"
+        },
+        {
+          "cell": 2,
+          "completed_updates": 4711,
+          "checkpoint_sha256": "434cacbfc172a8b188f7cd592874876f50cafd565ed73f901089bd276132105d"
+        },
+        {
+          "cell": 3,
+          "completed_updates": 4525,
+          "checkpoint_sha256": "a307b2d4c15b5872c745c0e575485f9237db4d8fa545ee410402b2217d3917d8"
+        },
+        {
+          "cell": 4,
+          "completed_updates": 4413,
+          "checkpoint_sha256": "f9ace36a0dc829397d2bc2cc2eb0b76ed13b21416abc37adaa557511012430de"
+        },
+        {
+          "cell": 5,
+          "completed_updates": 4721,
+          "checkpoint_sha256": "9fa84a01bb026ced6ae66d5e98406e5dc0db300dda272cd8b0b3eb4006b486c0"
+        },
+        {
+          "cell": 6,
+          "completed_updates": 4337,
+          "checkpoint_sha256": "065a68e531bd4400df4cadc8b8be8a9bd20fdaa022437e2226b01a93d08c5b3f"
+        },
+        {
+          "cell": 7,
+          "completed_updates": 4574,
+          "checkpoint_sha256": "70c97661f8ebfdf4681d7b400e5c56a2c8c93b7d1b4a16f6501dfb4562e8d689"
+        },
+        {
+          "cell": 8,
+          "completed_updates": 5950,
+          "checkpoint_sha256": "c717edd639af6b8152ece728c8b6de69bdb4558b63221836026b0379b77dfd92"
+        },
+        {
+          "cell": 9,
+          "completed_updates": 5736,
+          "checkpoint_sha256": "c2ffe9b9669afb837694d34c4e70dbeae99d306a821ed4a656928e92e937d4ba"
+        },
+        {
+          "cell": 10,
+          "completed_updates": 5699,
+          "checkpoint_sha256": "7bcb376844d7642edceeda6dc5c3b1299ff9b0fc817c2f9dedf7be5db4b56958"
+        },
+        {
+          "cell": 11,
+          "completed_updates": 5913,
+          "checkpoint_sha256": "f2237ff1fdf93bb894b601a03df10d0c65eca9af1b115fd2aa82a9bbac745a87"
+        },
+        {
+          "cell": 12,
+          "completed_updates": 4568,
+          "checkpoint_sha256": "30649da40677784021aed0e4772dffdf14ff93289d7e22400195cb69d8747ba8"
+        },
+        {
+          "cell": 13,
+          "completed_updates": 4644,
+          "checkpoint_sha256": "bc02094735d90db15a1a9b7d6c71bbd2242c021849a423246e3f8429aa24965b"
+        },
+        {
+          "cell": 14,
+          "completed_updates": 4687,
+          "checkpoint_sha256": "3b48d93508100d8c85e11b6d54ce78fa82a7e8b3b3bb6c58ac39a2e1235b9ebb"
+        },
+        {
+          "cell": 15,
+          "completed_updates": 4787,
+          "checkpoint_sha256": "61c34a70781c83822c07d2064651d1ae3a644f528d8288de08d9dde8c10f7231"
+        },
+        {
+          "cell": 16,
+          "completed_updates": 5938,
+          "checkpoint_sha256": "068a0caa081b5d328486d08a8194dc7fbd7ce1400d41174d66772c3386667cfa"
+        },
+        {
+          "cell": 17,
+          "completed_updates": 6000,
+          "checkpoint_sha256": "573111ae23b8d6d95846be27e8239ef931fd097b7d690fe99e0fa853e58229eb"
+        },
+        {
+          "cell": 18,
+          "completed_updates": 5853,
+          "checkpoint_sha256": "f4e2359d9b2a0f627d530015925485385a3895272a29d0c5dd874908d78dd187"
+        },
+        {
+          "cell": 19,
+          "completed_updates": 5792,
+          "checkpoint_sha256": "4152c7a9a9ac9eeaa83c892c09eb05beb7fd723c3a1aaa331100ab3e666a8832"
+        }
+      ]
+    },
+    "tensorboard_scalar_evidence": {
+      "comparison": "EventAccumulator scalar float converted to IEEE-754 binary64 big-endian bits; group key=(cell,tag,step)",
+      "event_file_count": 20,
+      "event_file_map_canonical_payload_schema": "{schema_version:1,files:{run_root_relative_event_path:raw_file_sha256}}",
+      "event_file_selection": "For cells 0..19, read the sealed launch record's run_directory and take sorted run_directory.glob('events.out.tfevents.*') at the run root only.",
+      "event_file_map_canonical_json_bytes": 3864,
+      "event_file_map_sha256": "91f77de5c3313a519312cde4244ae08fea0788180d5f2ceefeb8e08b5ccd8da2",
+      "scalar_event_records": 803745,
+      "unique_cell_tag_steps": 802659,
+      "duplicate_groups": 718,
+      "duplicate_extra_occurrences": 1086,
+      "conflict_groups": 560,
+      "conflict_extra_occurrences": 722,
+      "identical_groups": 158,
+      "identical_extra_occurrences": 364,
+      "census_construction": "EventAccumulator(size_guidance={'scalars':0,'tensors':0}, purge_orphaned_data=False); cells ascend 0..19, files and tags are lexically sorted, scalar float values become IEEE-754 binary64 big-endian hex, duplicate rows sort by (tag,step), and bit-count rows sort by hex.",
+      "duplicate_row_keys": [
+        "cell",
+        "tag",
+        "step",
+        "occurrences",
+        "bit_counts",
+        "classification"
+      ],
+      "bit_count_row_keys": [
+        "float64_bits_hex",
+        "count"
+      ],
+      "full_census_payload_schema": "{schema_version:1,comparison,rows:all_duplicate_rows}",
+      "conflict_census_payload_schema": "{schema_version:1,comparison,rows:conflict_classified_rows}",
+      "identical_census_payload_schema": "{schema_version:1,comparison,rows:identical_classified_rows}",
+      "per_cell_census_payload_schema": "{schema_version:1,rows:per_cell_rows}",
+      "per_cell_row_keys": [
+        "cell",
+        "setting",
+        "arm",
+        "seed",
+        "event_files",
+        "scalar_events",
+        "unique_tag_steps",
+        "duplicate_groups",
+        "identical_groups",
+        "conflict_groups",
+        "identical_extra_events",
+        "conflict_extra_events",
+        "conflict_steps",
+        "conflict_tags"
+      ],
+      "later_occurrences_compared_with_first": {
+        "value_conflicting": 715,
+        "bit_identical": 371,
+        "total": 1086,
+        "counting_rule": "Each occurrence after the first in a group is compared only with that group's first occurrence; these are not group classifications."
+      },
+      "full_census_canonical_json_bytes": 152562,
+      "full_census_sha256": "26c7127632470128fdfc92441ce2fce5b74f95a17195c4fa07175ef236926f98",
+      "conflict_census_canonical_json_bytes": 126485,
+      "conflict_census_sha256": "f4a6f0f22549617004c5390601dada4e6acbebe6a3393902a0cae90f9679b053",
+      "identical_census_canonical_json_bytes": 26225,
+      "identical_census_sha256": "04ce578d994c36af58a3db3ad7fad527290831059c96e62964557b2a84c673ea",
+      "per_cell_census_canonical_json_bytes": 9994,
+      "per_cell_census_sha256": "47bd1c52254571a74cf32388484c67f318dbdb41b0f8356741c23d978bb23a5e",
+      "validation_aliases": {
+        "tags": [
+          "bind/negative_margin_loss",
+          "control/loss_metric",
+          "control/loss_rank",
+          "latent_gauge/future/loss",
+          "latent_gauge/loss",
+          "latent_gauge/root/loss"
+        ],
+        "groups": 534,
+        "conflict_groups": 479,
+        "identical_groups": 55,
+        "occurrences_per_group": 2,
+        "extra_occurrences": 534,
+        "conflict_group_extra_occurrences": 479,
+        "identical_group_extra_occurrences": 55
+      },
+      "visualization_structural_aliases": {
+        "tag_count": 23,
+        "maze_cell_count": 4,
+        "boundaries": [
+          1000,
+          2000
+        ],
+        "groups": 184,
+        "conflict_groups": 81,
+        "identical_groups": 103,
+        "occurrences_per_group": 4,
+        "extra_occurrences": 552,
+        "conflict_group_extra_occurrences": 243,
+        "identical_group_extra_occurrences": 309,
+        "later_occurrences_compared_with_first": {
+          "value_conflicting": 236,
+          "bit_identical": 316
+        }
+      },
+      "conflict_interpretation": "There are 560 groups containing at least two distinct float64 bit values and 722 occurrences beyond the first within those groups; the 722 are not claimed to be pairwise distinct."
+    },
+    "report_blockers": {
+      "immutable_launch6_axis_contract_defect": {
+        "tags": [
+          "expansion/gain_rank_correlation",
+          "expansion/gain_pairwise_accuracy",
+          "expansion/gain_eligible_decision_fraction",
+          "expansion/gain_ordered_pair_count",
+          "expansion/gain_pair_coverage_fraction",
+          "tree/support_recall",
+          "tree/support_precision"
+        ],
+        "producer_axis": "dense training cadence: every 50 optimizer updates",
+        "sealed_reporter_axis": "sparse validation cadence: every 1000 optimizer updates",
+        "evidence": "The independent twenty-event-file census places every listed tag on its exact dense 50-update training axis."
+      },
+      "immutable_launch6_reporter_order": [
+        "durable CANCEL_REQUESTED latch rejects report assembly",
+        "if the latch were bypassed, the pre-fix reporter rejects the 80 W&B symlinks",
+        "if both were bypassed, conflicting scalar identities reject assembly",
+        "if those blockers were repaired, its wrong sparse-axis classification rejects seven dense tags",
+        "all cells are below 25k, so terminal 25k axes and triplets are incomplete"
+      ],
+      "current_launch7_candidate_reporter_probe": "The repaired reporter authenticates four W&B leaf links without following them, classifies the seven method diagnostics on their dense 50-update training axis, and then deterministically rejects conflicting duplicate scalar bind/negative_margin_loss@1000.",
+      "worker_complete_count": 0,
+      "terminal_triplet_count": 0,
+      "report_bundle_created": false,
+      "report_job_started": false
+    },
+    "unsealed_later_terminal_scheduler_observation": {
+      "provenance": "independent_operator_observation_after_exact_cancellation_reached_terminal_state",
+      "observation_date_utc": "2026-08-28",
+      "preserved_in_launch6_bytes": false,
+      "evidence_policy": "corroborative point-in-time state serialized only into Launch7 negative provenance",
+      "environment": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+      },
+      "sacct_command": [
+        "/usr/local/bin/sacct",
+        "-X",
+        "-n",
+        "-P",
+        "-S",
+        "2026-08-28",
+        "-j",
+        "33223076,33223079",
+        "-o",
+        "JobID,JobIDRaw,JobName%100,State,ElapsedRaw,AllocNodes,NodeList%100,Submit,Start,End,ExitCode,DerivedExitCode,Reason%100,Comment%150"
+      ],
+      "columns": [
+        "JobID",
+        "JobIDRaw",
+        "JobName%100",
+        "State",
+        "ElapsedRaw",
+        "AllocNodes",
+        "NodeList%100",
+        "Submit",
+        "Start",
+        "End",
+        "ExitCode",
+        "DerivedExitCode",
+        "Reason%100",
+        "Comment%150"
+      ],
+      "sacct_raw_stdout_bytes": 5320,
+      "sacct_raw_stdout_sha256": "ed61d986df986bca184c5355acadabb388446e5ee39ab9282ffb75ea780e470e",
+      "canonical_ledger_json_bytes": 6152,
+      "canonical_ledger_sha256": "447a0b38dbbd0ead850aa1eb16010e67334452a698f103824393cd0341cbce4d",
+      "canonical_ledger_payload_schema": "{schema_version:1,columns:columns,rows:[serialized_row.split('|') for serialized_row in serialized_rows]}",
+      "serialized_row_policy": "Exactly 21 rows in sacct stdout order; each stored string contains exactly 14 pipe-delimited fields and no trailing delimiter.",
+      "serialized_rows": [
+        "33223076_0|33223113|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-04037|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_1|33223114|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03148|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_2|33223115|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03148|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_3|33223116|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03148|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_4|33223117|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03915|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_5|33223118|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03073|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_6|33223119|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03846|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_7|33223120|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-03732|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_8|33223121|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-01993|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_9|33223122|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-00449|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_10|33223123|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-00419|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_11|33223124|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3461|1|batch-block5-01592|2026-08-28T05:18:02|2026-08-28T05:18:38|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_12|33223176|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3402|1|batch-block5-04044|2026-08-28T05:18:02|2026-08-28T05:19:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_13|33223330|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3342|1|batch-block5-04037|2026-08-28T05:18:02|2026-08-28T05:20:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_14|33223331|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3342|1|batch-block5-00297|2026-08-28T05:18:02|2026-08-28T05:20:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_15|33223332|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3342|1|batch-block5-00297|2026-08-28T05:18:02|2026-08-28T05:20:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_16|33223333|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3342|1|batch-block5-00297|2026-08-28T05:18:02|2026-08-28T05:20:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_17|33223334|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3342|1|batch-block5-00297|2026-08-28T05:18:02|2026-08-28T05:20:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_18|33223372|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3282|1|batch-block5-00642|2026-08-28T05:18:02|2026-08-28T05:21:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223076_19|33223076|exp23-launch6-e2758413a5bb28af-train|CANCELLED by 147230|3282|1|batch-block5-03613|2026-08-28T05:18:02|2026-08-28T05:21:37|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e",
+        "33223079|33223079|exp23-launch6-e2758413a5bb28af-report|CANCELLED by 147230|0|0|None assigned|2026-08-28T05:18:07|None|2026-08-28T06:16:19|0:0|0:0|None|treewm-exp23:e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e"
+      ],
+      "sacct_row_count": 21,
+      "cancelled_task_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "task_state": "CANCELLED by 147230",
+      "report_state": "CANCELLED by 147230",
+      "task_exit_codes": [
+        "0:0"
+      ],
+      "task_derived_exit_codes": [
+        "0:0"
+      ],
+      "squeue_command": [
+        "/usr/local/bin/squeue",
+        "--array",
+        "--noheader",
+        "--jobs=33223076,33223079",
+        "--format=%i|%T|%R|%N"
+      ],
+      "squeue_raw_stdout_bytes": 0,
+      "squeue_raw_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "squeue_row_count": 0
+    },
+    "scientific_state": {
+      "worker_started_cell_count": 20,
+      "trainer_bridge_started_cell_count": 20,
+      "hydra_composition_completed_cell_count": 20,
+      "model_constructed_cell_count": 20,
+      "optimizer_update_total_across_cells": 102017,
+      "minimum_optimizer_updates_per_cell": 4337,
+      "maximum_optimizer_updates_per_cell": 6000,
+      "cells_reaching_analysis_boundary_5000": 8,
+      "latest_checkpoint_count": 20,
+      "best_validation_checkpoint_count": 20,
+      "online_wandb_identity_count": 20,
+      "scientific_ready_marker_committed": false,
+      "scientific_report_bundle_committed": false,
+      "results_consumed": false,
+      "checkpoints_consumed": false
+    },
+    "known_job_ids": [
+      "33223076",
+      "33223079"
+    ],
+    "job_ids_by_role": {
+      "train": [
+        "33223076"
+      ],
+      "report": [
+        "33223079"
+      ]
+    },
+    "submission_contract_committed": true,
+    "submission_receipt_committed": true,
+    "cancel_latch_committed": true,
+    "scientific_run_started": true,
+    "checkpoint_created": true,
+    "wandb_run_created": true,
+    "scientific_run_completed": false,
+    "results_consumed": false,
+    "checkpoints_consumed": false,
+    "reuse_allowed": false,
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false
   }],
   "method": {
     "arm": "treewm",
@@ -481,7 +990,7 @@
     "seeds": [110, 111],
     "expected_cells": 20,
     "index_mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
-    "fresh_start_policy": "Every launch6 cell starts from scratch in the fresh launch6 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from any superseded abort may be imported, reused, or resumed.",
+    "fresh_start_policy": "Every launch7 generation-zero cell starts from scratch in the fresh launch7 namespace; no checkpoint, result, optimizer, model initialization, W&B identity, or state from any superseded launch may be imported, reused, resumed, retried, or recovered. Resume=auto and W&B resume are permitted only within a genuine scheduler requeue lineage of that same fresh Launch7 cell.",
     "common_random_numbers": "Within each setting and seed, GS and GSEP use identical initialization seed, published-union data identity/order, validation sample seed, evaluation seed bank, and evaluation profile.",
     "midpoint_policy": "No selection, promotion, dropping, early-stopping, or arm-dependent decision occurs at 5k or 12.5k; all cells continue to 25k.",
     "analysis_boundaries": [5000, 25000],
@@ -514,16 +1023,16 @@
   "weight_audit": {
     "lock": "weight_audit.lock.json",
     "audit_source": "weight_audit.py",
-    "artifact_sha256": "080d7148df25b055cebf7238025ac9f0275808eeedb615d391b5dea628e2272d",
+    "artifact_sha256": "34f6aa6cc8a8bfe6aeca4fd716d0497d778464e1d6f308fdd25d462b101f5fcc",
     "rows_sha256": "1b9926c4893f90915b3ad87b6d6cd4b0dae0a70633ffb6599a90907b143a23f5",
-    "summary_sha256": "9ac8778a62ed1f9e3898cb2b4fc162fab10146f9aa9899b2ba66e3f38ae720c7",
+    "summary_sha256": "1609291e61093aa2b63d4988b1f0755f15ed5501c7e38c9a2cf7f7fcf9ead6fa",
     "outcome_blind": true,
     "weights_frozen_before_package_matrix": true
   },
   "prefix_target_contract": {
     "lock": "prefix_target.lock.json",
     "audit_source": "prefix_target_audit.py",
-    "artifact_sha256": "98e1c8476bab243419ba7e0de9f241c64a1a052437162c97b76f85866dc4a58a",
+    "artifact_sha256": "256cf920458c75455910906f6aa3d13b2dcae143b27adab337840dd655afbb48",
     "source_sha256": "2086d30eaeff74e79054c60cf0ab513e3268d43a3534fe5b1f426bd3fd003962",
     "outcome_blind": true,
     "validation_anchor_count_per_setting": 5120,
@@ -534,7 +1043,7 @@
   "resolved_config_contract": {
     "lock": "resolved_config.lock.json",
     "audit_source": "resolved_config_audit.py",
-    "artifact_sha256": "c710857865a451d92bac740572b39972481f04c70cd04399a3befddb59e99a79",
+    "artifact_sha256": "0c7f74fc94abc154afd562d7f82fa7d8b2ad185b15b21b44c0700ccd23f724dd",
     "source_sha256": "8d13ebc60f3ba574b8a5a800da915864b36f540f35a22aafeba89be6a92f4150",
     "direct_entrypoint": "scripts/train.py",
     "cell_count": 20,
@@ -543,11 +1052,11 @@
   "causal_parity_contract": {
     "lock": "causal_parity.lock.json",
     "audit_source": "causal_parity_audit.py",
-    "artifact_sha256": "3c941ea251cf97e1df01ac412db84ce6d5bb581d82ef675cb4e9dda133b710a2",
+    "artifact_sha256": "0f78a0da44adef23cb920d2f5f1c9e8a0fe42aaeb76aaf9cbb60fb149dd1fd11",
     "source_sha256": "7ed6e6f7f9f68480b42e17f6af7b276c7f4151703e2689971438b011b74ace40",
-    "audit_manifest_input_sha256": "cd315f07e8b6f5ddf42ab91c16dda0eb27a7a1535497b383e3860655fe682a0a",
+    "audit_manifest_input_sha256": "ac643c5d000684f127b5aeb92573a4fc35dc15401fd0be21415f1360e9e5667a",
     "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
-    "stdout_sha256": "9e754748a32a0d1b3084690cb54c573a3589389e4397b462586a6002ad307ee6",
+    "stdout_sha256": "11fc79b1392b835396c99469cc292b5895b9af389e8dbfba17f9b6547b0d735a",
     "stdout_bytes": 91081,
     "clean_and_adversarial_thread_replays_byte_identical": true,
     "outcome_blind": true,
@@ -555,8 +1064,8 @@
   },
   "core_binding": {
     "executable_prefix_schema_version": 1,
-    "trainer_code_fingerprint": "d2449e88ab7652411b167375f7ea131b84b8e173c666b1e6a94f76322b56fdac",
-    "trainer_sha256": "3fcfd8ac429a1fc98f3424bcba4665aeb05e0c49cee3cfad3dc44a3e05a29c29",
+    "trainer_code_fingerprint": "a547375cb37e9daa431a56ba72cbd6e993a9fb89a8c00aa03ec400bade448a59",
+    "trainer_sha256": "fd00c2e8fcff8bbe6867cf89e228b6a6df06a3f15d6be5f949f3d71aaa618dd4",
     "executable_loss_sha256": "e2e1c9e7199bd8dbba5b1601e6c88945bff510e7c899226431ac7e7003be9392",
     "action_projection_sha256": "b270ee8c557aba58f8351ed7f92784d079d04161ff0cc255c1d2fdb96ba4ca86",
     "objective_config_sha256": "954a86bf01544add91dba2ad414e650dbc2af7a51598be317498c49b34282975",
@@ -728,14 +1237,14 @@
     "actual_submit_performed": false
   },
   "paths": {
-    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch6",
-    "transaction_lock": "outputs/.exp23-34d79ab13d65ef27.transaction.lock",
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch6",
+    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch7",
+    "transaction_lock": "outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch7",
     "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch6"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
   },
   "compatible_v2_recipe_input": {
     "campaign_id": "treewm-50task-1m-v2",
@@ -775,8 +1284,8 @@
     "scontrol": "/usr/local/bin/scontrol"
   },
   "logging": {
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch6",
-    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch6",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch7",
+    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch7",
     "wandb_mode": "online"
   },
   "settings": [

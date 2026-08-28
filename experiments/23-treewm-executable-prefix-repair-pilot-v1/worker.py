@@ -31,7 +31,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",
@@ -1128,8 +1128,8 @@ def bootstrap_submission(
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch6-scheduler-test-train",
-                "report": "exp23-launch6-scheduler-test-report",
+                "train": "exp23-launch7-scheduler-test-train",
+                "report": "exp23-launch7-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,

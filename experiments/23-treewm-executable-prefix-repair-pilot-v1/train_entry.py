@@ -54,6 +54,30 @@ SNAPSHOT_IMPORT_FILES = {
     "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 }
+TELEMETRY_CONTRACT_EVIDENCE = {
+    "schema_version": 1,
+    "status": "telemetry_contract_verified",
+    "validation_namespace_sha256": (
+        "8f58904f1d6ead6530902886b6ae24dc9529c58ec3562ee25c79c67369368883"
+    ),
+    "terminal_evaluation_namespace_sha256": (
+        "40b28ebb3e286038da6815396452389d1d78a2ef0d42d44bc5cb149145ed2c54"
+    ),
+    "monitor_evaluation_namespace_sha256": (
+        "0d7ec142f9f0715d9e8f3f2f028ab54f5f6d5b9b2066b46da73d3102c8e53e9b"
+    ),
+    "visualization_namespace_sha256": (
+        "cab5e85de7fb86cdd42757529daf307584886ad0f8349b892b12fbbc58a247e2"
+    ),
+    "float32_identity_bits": "0x3f800000",
+    "identical_duplicate_suppressed": True,
+    "conflicting_duplicate_rejected": True,
+    "batch_preflight_atomic": True,
+    "out_of_order_step_rejected": True,
+    "invalid_step_rejected": True,
+    "backend_writes_performed": 0,
+    "persistent_writes_performed": 0,
+}
 TRAINER_BOOTSTRAP_SMOKE_FIELDS = frozenset(
     {
         "schema_version", "status", "cell_index", "python_flags",
@@ -538,7 +562,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch6", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch7", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(
@@ -551,7 +575,7 @@ def bootstrap_submission(
         and scheduler_preclaim.get("schema_version") == 1
         and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
         and scheduler_preclaim.get("campaign_id")
-        == "treewm-executable-prefix-repair-pilot-v1-launch6"
+        == "treewm-executable-prefix-repair-pilot-v1-launch7"
         and scheduler_preclaim.get("scheduler_calls") == 7
         and scheduler_preclaim.get("scheduler_mutation_calls") == 0
         and scheduler_preclaim.get("persistent_writes_performed") == 0,
@@ -565,8 +589,8 @@ def bootstrap_submission(
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch6-scheduler-test-train",
-                "report": "exp23-launch6-scheduler-test-report",
+                "train": "exp23-launch7-scheduler-test-train",
+                "report": "exp23-launch7-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -965,7 +989,7 @@ def hydra_composition_smoke(argv: Sequence[str] | None = None) -> int:
     )
     _require(
         launch.get("schema_version") == 1
-        and launch.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch6",
+        and launch.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch7",
         "composition smoke launch identity differs",
     )
     cell = launch.get("cell")
@@ -1020,6 +1044,10 @@ def hydra_composition_smoke(argv: Sequence[str] | None = None) -> int:
         ("scripts.train", snapshot / "scripts/train.py"),
     ):
         _verify_imported_module(module_name, expected_path)
+    _require(
+        train.telemetry_contract_self_test() == TELEMETRY_CONTRACT_EVIDENCE,
+        "trainer telemetry contract self-test differs",
+    )
 
     # ``--cfg job --resolve`` returns before the decorated application function is
     # entered, so this exercises Hydra's real module-relative package lookup without

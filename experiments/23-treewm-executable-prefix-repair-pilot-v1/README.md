@@ -1,18 +1,18 @@
-# Exp23 executable-prefix repair pilot v1 launch6
+# Exp23 executable-prefix repair pilot v1 launch7
 
-This is the sealed, launch-capable but unsubmitted launch6 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch7 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch6`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch6` namespace,
-`outputs/.exp23-34d79ab13d65ef27.transaction.lock`, and `exp23-launch6-*` run names.
-No launch6 submission, persistent submission snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch7`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch7` namespace,
+`outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock`, and `exp23-launch7-*` run names.
+No launch7 submission, persistent submission snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
 verifying this package; the required private snapshot-test copy was removed on success.
 
-Launch1 through launch5 are permanently ordered negative provenance. Each
-preserved read-only source snapshot was independently byte-matched 137/137 to its
-recorded commit. Launch1 aborted before the submission contract because its isolated
+Launch1 through Launch6 are permanently ordered negative provenance. The preserved
+read-only source snapshots for Launch1 through Launch5 were independently byte-matched
+137/137 to their recorded commits. Launch1 aborted before the submission contract because its isolated
 audit inputs were unavailable. Launch2 also aborted before the contract: its causal
 replay incorrectly included the newly created controlled `state/submission` tree in an
 output fingerprint. Neither attempt produced a submission SHA, contract, job ID,
@@ -55,8 +55,9 @@ byte-identical log because Hydra could not import the relative `configs` package
 occurred before config composition, model construction, or any optimizer update. The
 exact cancel latch, call, and result preserve a successful exact-ID `scancel`. A later
 independent terminal observation showed eight other tasks and the reporter cancelled.
-That 21-row `sacct` ledger and empty `squeue` observation are explicitly unsealed
-Launch6 attestation, not bytes preserved by Launch5. By contrast, the accepted
+That 21-row `sacct` ledger and empty `squeue` observation are explicitly an unsealed
+later observation subsequently encoded in Launch6 provenance, not bytes preserved by
+Launch5. By contrast, the accepted
 array-wide dependency and `KillOInInvalidDependent=Yes` are durable in Launch5 journal
 `0004`.
 
@@ -72,11 +73,41 @@ empty `configs/__init__.py` package marker to both trainer and snapshot identity
 exercises the actual sealed trainer bridge through resolved Hydra composition before
 submission.
 
-Exact protocols, manifests, inventories, claims, contracts,
-fingerprints, scheduler evidence, and journals for all five attempts are sealed in order
-in `manifest.superseded_launches`; no superseded namespace, identity, snapshot, or
-state may be reused or resumed by launch6. Launch1–5 must never be retried, recovered
-into submission, or used as a recovery source.
+Launch6 sealed contract
+`e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e`,
+then started all 20 cells in train array `33223076` with dependent reporter `33223079`.
+Every cell reached the sealed trainer from generation-zero scratch and produced a
+validated SIGTERM checkpoint between 4,337 and 6,000 updates; together they performed
+102,017 updates. A retrospective event-stream audit then found 718 repeated
+`(cell,tag,step)` groups: 560 conflict-classified groups with 722 extra occurrences and
+158 bit-identical groups with 364 extra occurrences. The 722 are occurrences beyond
+the first within conflict groups, not a claim that all are pairwise different. This
+prevents a single-valued append-only report, so the exact-ID cancel call was committed
+and returned zero. A later unsealed 21-row terminal `sacct` observation records every
+task and the reporter `CANCELLED by 147230`; its exact rows and empty `squeue` evidence
+are embedded only in Launch7 provenance, not Launch6's sealed bytes.
+
+The immutable Launch6 reporter rejects the durable cancel latch first. If that were
+bypassed, its pre-fix policy rejects the 80 W&B leaf symlinks; if both were bypassed,
+the conflicting scalar identities reject assembly. It also incorrectly assigns five
+`expansion/gain_*` diagnostics plus `tree/support_recall` and
+`tree/support_precision` to the sparse 1,000-update validation axis even though every
+preserved event stream emits those seven on the dense 50-update training axis. The
+Launch7 candidate reporter—not the immutable Launch6 snapshot—authenticates the four
+allowed W&B leaves per run without following them, rejects conflicting scalar keys,
+and assigns those seven diagnostics to the dense training axis.
+
+Exact protocols, manifests, inventories, claims, contracts, fingerprints, scheduler
+evidence, and journals for all six attempts are recorded in order in
+`manifest.superseded_launches`. Launch6's run root contains 629 regular files,
+2,009,101,434 regular-file bytes, 297 directories including the root, 80 symlinks, and
+no special files; the canonical regular-file inventory SHA-256 is
+`0ba872f7a03f42a58dfd9dcbc55afef0ec94dba6bef66744845c12f55cd340a8`.
+No superseded namespace, W&B identity, snapshot, checkpoint, optimizer state, result,
+or other state may enter Launch7. Launch1–6 have `reuse_allowed`, `resume_allowed`,
+`retry_allowed`, and `recovery_allowed` all false and must never be retried, requeued,
+resumed, or recovered. `resume=auto` and W&B resume are allowed only inside a genuine
+scheduler requeue lineage of the same fresh Launch7 generation-zero cell.
 
 ## Scientific design
 
@@ -158,7 +189,7 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-Any launch6 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch7 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` and `configs/__init__.py` are exact
 empty-file import markers recorded in `campaign.SNAPSHOT_IMPORT_FILES`; both also enter

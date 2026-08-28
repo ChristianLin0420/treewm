@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
@@ -23,6 +24,7 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType
+from urllib.parse import quote
 
 import hydra
 import numpy as np
@@ -54,7 +56,7 @@ from treewm.evaluation.tasks import build_tasks, describe_tasks
 from treewm.evaluation.coverage import StateQuantizer
 from treewm.data.maze_utils import MazeSpec
 from treewm.logging.metrics import MetricTracker
-from treewm.logging.tensorboard import TreeWMLogger
+from treewm.logging.tensorboard import ScalarCollisionError, TreeWMLogger
 from treewm.losses.expansion_losses import novelty_gain_loss
 from treewm.losses.latent_gauge import LatentGauge
 from treewm.losses.recursive_losses import multi_step_recursive_loss, scheduled_sampling_schedule
@@ -803,6 +805,358 @@ def _finite_metrics(values: dict[str, float]) -> dict[str, float]:
     return {key: float(value) for key, value in values.items() if np.isfinite(float(value))}
 
 
+def validation_metric_tag(tag: str) -> str:
+    """Put one selected held-out objective metric in an unambiguous namespace."""
+    if not isinstance(tag, str) or not tag:
+        raise ValueError("validation metric tags must be non-empty strings")
+    if tag.startswith("train/"):
+        suffix = tag.removeprefix("train/")
+    elif tag.startswith("val/"):
+        suffix = tag.removeprefix("val/")
+    else:
+        suffix = f"aux/{tag}"
+    if not suffix:
+        raise ValueError(f"validation metric tag has no suffix: {tag!r}")
+    return f"val/{suffix}"
+
+
+def namespace_validation_metrics(values: Mapping[str, object]) -> dict[str, object]:
+    """Namespace selected held-out objectives and reject aliases before reduction."""
+    namespaced: dict[str, object] = {}
+    sources: dict[str, str] = {}
+    for source, value in values.items():
+        target = validation_metric_tag(source)
+        if target in namespaced:
+            raise ValueError(
+                f"validation metric namespace collision: {sources[target]!r} and "
+                f"{source!r} both map to {target!r}"
+            )
+        namespaced[target] = value
+        sources[target] = source
+    return namespaced
+
+
+def namespace_terminal_evaluation_metrics(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    """Separate terminal evaluation from the same-step periodic monitor estimate."""
+    namespaced: dict[str, object] = {}
+    sources: dict[str, str] = {}
+    for source, value in values.items():
+        if not isinstance(source, str) or not source.startswith("eval/"):
+            raise ValueError(f"terminal evaluation metric is outside eval/: {source!r}")
+        suffix = source.removeprefix("eval/")
+        if not suffix:
+            raise ValueError("terminal evaluation metric has no suffix")
+        target = f"eval/final/{suffix}"
+        if target in namespaced:
+            raise ValueError(
+                f"terminal evaluation namespace collision: {sources[target]!r} and "
+                f"{source!r} both map to {target!r}"
+            )
+        namespaced[target] = value
+        sources[target] = source
+    return namespaced
+
+
+def validated_monitor_evaluation_metrics(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    """Preserve periodic evaluator tags only after proving the eval/ boundary."""
+    validated: dict[str, object] = {}
+    for source, value in values.items():
+        if not isinstance(source, str) or not source.startswith("eval/"):
+            raise ValueError(f"monitor evaluation metric is outside eval/: {source!r}")
+        if not source.removeprefix("eval/"):
+            raise ValueError("monitor evaluation metric has no suffix")
+        if source in validated:
+            raise ValueError(f"duplicate monitor evaluation metric: {source!r}")
+        validated[source] = value
+    return validated
+
+
+def validated_evaluation_cache_metrics(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    """Preserve cache/recipe compatibility tags after validating their namespace."""
+    validated: dict[str, object] = {}
+    for source, value in values.items():
+        if not isinstance(source, str) or not source:
+            raise ValueError(f"evaluation cache metric tag is invalid: {source!r}")
+        prefix = next(
+            (
+                candidate
+                for candidate in ("cache/", "future_recipe/")
+                if source.startswith(candidate)
+            ),
+            None,
+        )
+        if prefix is None or not source.removeprefix(prefix):
+            raise ValueError(
+                "evaluation cache metric must be under cache/ or future_recipe/: "
+                f"{source!r}"
+            )
+        if source in validated:
+            raise ValueError(f"duplicate evaluation cache metric: {source!r}")
+        validated[source] = value
+    return validated
+
+
+def namespace_monitor_evaluation_resource_metrics(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    """Separate evaluation-time peaks from dense same-step resource observations."""
+    namespaced: dict[str, object] = {}
+    sources: dict[str, str] = {}
+    for source, value in values.items():
+        if not isinstance(source, str) or not source.startswith("resource/"):
+            raise ValueError(
+                f"monitor evaluation resource metric is outside resource/: {source!r}"
+            )
+        suffix = source.removeprefix("resource/")
+        if not suffix:
+            raise ValueError("monitor evaluation resource metric has no suffix")
+        target = f"eval/monitor/resource/{suffix}"
+        if target in namespaced:
+            raise ValueError(
+                f"monitor evaluation resource namespace collision: "
+                f"{sources[target]!r} and {source!r} both map to {target!r}"
+            )
+        namespaced[target] = value
+        sources[target] = source
+    return namespaced
+
+
+def visualization_anchor_scalar_prefix(anchor_index: int, anchor_name: object) -> str:
+    """Stable per-anchor namespace for descriptive visualization-only scalars."""
+    if type(anchor_index) is not int or anchor_index < 0:
+        raise ValueError("visualization anchor index must be a non-negative integer")
+    if not isinstance(anchor_name, str) or not anchor_name:
+        raise ValueError("visualization anchor name must be non-empty")
+    # The numeric component is the collision-proof identity even if display names are
+    # repeated. Percent-encoding keeps slashes, controls, and Unicode from creating an
+    # ambiguous TensorBoard hierarchy while retaining a reversible audit label.
+    encoded_name = quote(anchor_name, safe="-_.")
+    return f"viz/anchor/{anchor_index:02d}/{encoded_name}/"
+
+
+def telemetry_contract_self_test() -> dict[str, object]:
+    """Exercise telemetry identity semantics without a backend, file, RNG, or output."""
+    validation_sources = (
+        "train/loss_total",
+        "train/executable_prefix/loss_latent",
+        "val/already_namespaced",
+        "bind/negative_margin_loss",
+        "control/loss_metric",
+        "control/loss_rank",
+        "latent_gauge/future/loss",
+        "latent_gauge/loss",
+        "latent_gauge/root/loss",
+    )
+    validation_mapping = {
+        source: validation_metric_tag(source) for source in validation_sources
+    }
+    expected_validation_mapping = {
+        "train/loss_total": "val/loss_total",
+        "train/executable_prefix/loss_latent": "val/executable_prefix/loss_latent",
+        "val/already_namespaced": "val/already_namespaced",
+        "bind/negative_margin_loss": "val/aux/bind/negative_margin_loss",
+        "control/loss_metric": "val/aux/control/loss_metric",
+        "control/loss_rank": "val/aux/control/loss_rank",
+        "latent_gauge/future/loss": "val/aux/latent_gauge/future/loss",
+        "latent_gauge/loss": "val/aux/latent_gauge/loss",
+        "latent_gauge/root/loss": "val/aux/latent_gauge/root/loss",
+    }
+    if validation_mapping != expected_validation_mapping:
+        raise RuntimeError("telemetry self-test validation namespace differs")
+    mapped = namespace_validation_metrics(
+        {source: float(index) for index, source in enumerate(validation_sources)}
+    )
+    if tuple(mapped) != tuple(validation_mapping.values()):
+        raise RuntimeError("telemetry self-test validation mapping is not injective")
+    try:
+        namespace_validation_metrics(
+            {"train/aux/collision": 1.0, "collision": 1.0}
+        )
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("telemetry self-test accepted a validation namespace alias")
+
+    terminal_sources = (
+        "eval/success_rate",
+        "eval/guard/rejection_rate",
+        "eval/task-1/num_episodes",
+    )
+    terminal_mapping = {
+        source: next(
+            iter(namespace_terminal_evaluation_metrics({source: 1.0}))
+        )
+        for source in terminal_sources
+    }
+    expected_terminal_mapping = {
+        "eval/success_rate": "eval/final/success_rate",
+        "eval/guard/rejection_rate": "eval/final/guard/rejection_rate",
+        "eval/task-1/num_episodes": "eval/final/task-1/num_episodes",
+    }
+    if terminal_mapping != expected_terminal_mapping:
+        raise RuntimeError("telemetry self-test terminal evaluation namespace differs")
+    for invalid_terminal_tag in ("success_rate", "val/success_rate", "eval/"):
+        try:
+            namespace_terminal_evaluation_metrics({invalid_terminal_tag: 1.0})
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted an invalid terminal metric")
+
+    monitor_sources = {
+        "eval/success_rate": 0.5,
+        "eval/guard/rejection_rate": 0.25,
+    }
+    if validated_monitor_evaluation_metrics(monitor_sources) != monitor_sources:
+        raise RuntimeError("telemetry self-test changed periodic evaluation metrics")
+    for invalid_monitor_tag in ("success_rate", "val/success_rate", "eval/"):
+        try:
+            validated_monitor_evaluation_metrics({invalid_monitor_tag: 1.0})
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted an invalid monitor metric")
+
+    cache_sources = {
+        "cache/consumed": 1.0,
+        "future_recipe/consumed": 1.0,
+    }
+    if validated_evaluation_cache_metrics(cache_sources) != cache_sources:
+        raise RuntimeError("telemetry self-test changed compatible cache metrics")
+    monitor_resource_sources = (
+        "resource/host_rss_gb",
+        "resource/peak_reserved_gb",
+    )
+    monitor_mapping = {
+        **{source: source for source in monitor_sources},
+        **{source: source for source in cache_sources},
+        **{
+            source: next(
+                iter(namespace_monitor_evaluation_resource_metrics({source: 1.0}))
+            )
+            for source in monitor_resource_sources
+        },
+    }
+    expected_monitor_mapping = {
+        "eval/success_rate": "eval/success_rate",
+        "eval/guard/rejection_rate": "eval/guard/rejection_rate",
+        "cache/consumed": "cache/consumed",
+        "future_recipe/consumed": "future_recipe/consumed",
+        "resource/host_rss_gb": "eval/monitor/resource/host_rss_gb",
+        "resource/peak_reserved_gb": "eval/monitor/resource/peak_reserved_gb",
+    }
+    if monitor_mapping != expected_monitor_mapping:
+        raise RuntimeError("telemetry self-test monitor evaluation namespace differs")
+    for invalid_cache_tag in ("resource/host_rss_gb", "cache/", "unexpected"):
+        try:
+            validated_evaluation_cache_metrics({invalid_cache_tag: 1.0})
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted an invalid cache metric")
+    for invalid_resource_tag in ("cache/consumed", "resource/", "unexpected"):
+        try:
+            namespace_monitor_evaluation_resource_metrics(
+                {invalid_resource_tag: 1.0}
+            )
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted an invalid resource metric")
+
+    visualization_prefixes = {
+        "anchor_0": visualization_anchor_scalar_prefix(0, "same"),
+        "anchor_1": visualization_anchor_scalar_prefix(1, "same"),
+        "encoded_anchor": visualization_anchor_scalar_prefix(2, "task/a\nβ"),
+    }
+    expected_visualization_prefixes = {
+        "anchor_0": "viz/anchor/00/same/",
+        "anchor_1": "viz/anchor/01/same/",
+        "encoded_anchor": "viz/anchor/02/task%2Fa%0A%CE%B2/",
+    }
+    if visualization_prefixes != expected_visualization_prefixes:
+        raise RuntimeError("telemetry self-test visualization namespace differs")
+    for invalid_index in (True, 1.0, np.int64(1), -1):
+        try:
+            visualization_anchor_scalar_prefix(invalid_index, "anchor")
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted a lossy anchor index")
+
+    probe_path = Path(".treewm-telemetry-contract-self-test-must-not-exist")
+
+    def require_probe_absent() -> None:
+        try:
+            probe_path.lstat()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return
+            raise RuntimeError("telemetry self-test probe lstat failed") from exc
+        raise RuntimeError("telemetry self-test probe path already exists")
+
+    require_probe_absent()
+    logger = TreeWMLogger(probe_path, is_main=False)
+    if logger._writer is not None or logger._wandb_run is not None:
+        raise RuntimeError("telemetry self-test unexpectedly initialized a backend")
+    logger.scalar("telemetry/probe", 1.0, 7)
+    identity = dict(logger._scalar_ledger)
+    same_float32 = float(np.nextafter(np.float64(1.0), np.float64(2.0)))
+    logger.scalars({"telemetry/probe": same_float32}, 7)
+    if logger._scalar_ledger != identity:
+        raise RuntimeError("telemetry self-test re-emitted an identical scalar")
+    try:
+        logger.scalars({"telemetry/fresh": 3.0, "telemetry/probe": 2.0}, 7)
+    except ScalarCollisionError:
+        pass
+    else:
+        raise RuntimeError("telemetry self-test accepted a conflicting scalar")
+    if logger._scalar_ledger != identity or "telemetry/fresh" in logger._scalar_ledger:
+        raise RuntimeError("telemetry self-test conflict preflight was not atomic")
+    try:
+        logger.scalar("telemetry/probe", 1.0, 6)
+    except ScalarCollisionError:
+        pass
+    else:
+        raise RuntimeError("telemetry self-test accepted an out-of-order scalar")
+    if logger._scalar_ledger != identity:
+        raise RuntimeError("telemetry self-test changed its ledger after an old step")
+    for invalid_step in (True, 1.5, np.int64(1), -1):
+        try:
+            logger.scalar("telemetry/invalid-step", 1.0, invalid_step)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("telemetry self-test accepted an invalid scalar step")
+    if logger._scalar_ledger.get("telemetry/probe") != (7, 0x3F800000):
+        raise RuntimeError("telemetry self-test float32 identity differs")
+    logger.close()
+    require_probe_absent()
+
+    return {
+        "schema_version": 1,
+        "status": "telemetry_contract_verified",
+        "validation_namespace_sha256": _stable_hash(validation_mapping),
+        "terminal_evaluation_namespace_sha256": _stable_hash(terminal_mapping),
+        "monitor_evaluation_namespace_sha256": _stable_hash(monitor_mapping),
+        "visualization_namespace_sha256": _stable_hash(visualization_prefixes),
+        "float32_identity_bits": "0x3f800000",
+        "identical_duplicate_suppressed": True,
+        "conflicting_duplicate_rejected": True,
+        "batch_preflight_atomic": True,
+        "out_of_order_step_rejected": True,
+        "invalid_step_rejected": True,
+        "backend_writes_performed": 0,
+        "persistent_writes_performed": 0,
+    }
+
+
 def gradients_finite(parameters) -> bool:
     """Return false on the first non-finite gradient (parameters without grads are inert)."""
     checks = [
@@ -1309,7 +1663,9 @@ def main(cfg: DictConfig) -> None:
         **executable_dataset_kwargs,
     )
     # Prove the shared cache is actually backing the loader rather than merely present.
-    cache_metrics = getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
+    cache_metrics = validated_evaluation_cache_metrics(
+        getattr(train_ds, "cache_metrics", {"cache/consumed": 0.0})
+    )
     print(f"[treewm] dataset backend={getattr(train_ds, 'cache_backend', '?')} "
           f"cache={cache_metrics}", flush=True)
     # AntMaze env configs leave obs/action dims null; fill them from the loaded data so
@@ -2321,16 +2677,25 @@ def main(cfg: DictConfig) -> None:
                             tv.view_selected_path(rendered, maze_spec, name),
                             viz_step,
                         )
+                        structural_scalars = tstats.structural_summary(
+                            tree, model, normalizer
+                        )
+                        if a == 0:
+                            logger.scalars(structural_scalars, viz_step)
                         logger.scalars(
-                            tstats.structural_summary(tree, model, normalizer),
+                            structural_scalars,
                             viz_step,
+                            prefix=visualization_anchor_scalar_prefix(a, name),
                         )
                         logger.histogram(
                             f"tree/horizon_hist/{name}",
                             tree.action_mask.sum(-1)[tree.valid].float(),
                             viz_step,
                         )
-            except Exception as exc:  # visualisation must never kill a run
+            except ScalarCollisionError:
+                # Telemetry identity is a scientific contract, not a rendering error.
+                raise
+            except Exception as exc:  # ordinary rendering failures remain best-effort
                 print(f"[treewm] visualisation skipped at step {viz_step}: {exc}")
         elif dist_info.is_main:
             model.eval()
@@ -2396,15 +2761,25 @@ def main(cfg: DictConfig) -> None:
                             dvz.branch_divergence(model, tree, normalizer, domain),
                             viz_step,
                         )
+                        structural_scalars = tstats.structural_summary(
+                            tree, model, normalizer
+                        )
+                        logger.scalars(structural_scalars, viz_step)
                         logger.scalars(
-                            tstats.structural_summary(tree, model, normalizer),
+                            structural_scalars,
                             viz_step,
+                            prefix=visualization_anchor_scalar_prefix(
+                                task_index, name
+                            ),
                         )
                         logger.histogram(
                             "tree/horizon_hist",
                             tree.action_mask.sum(-1)[tree.valid].float(),
                             viz_step,
                         )
+            except ScalarCollisionError:
+                # Telemetry identity is a scientific contract, not a rendering error.
+                raise
             except Exception as exc:
                 print(
                     f"[treewm] domain visualisation skipped at step {viz_step}: {exc}"
@@ -2431,26 +2806,37 @@ def main(cfg: DictConfig) -> None:
                     generator=rng.reset("eval"),
                     domain=domain,
                 )
-                emetrics = evaluate(
-                    env,
-                    planner,
-                    tasks,
-                    int(cfg.eval.episodes_per_task),
-                    int(cfg.planner.max_env_steps),
-                    int(cfg.eval.seed),
-                    domain=domain,
-                    stop_callback=lambda: stop.requested,
-                    episode_seed_table=(
-                        evaluation_seed_tables["monitor"]
-                        if use_protocol_bound_evaluation_seeds
-                        else None
-                    ),
-                    expected_episode_seed_split=(
-                        "monitor" if use_protocol_bound_evaluation_seeds else None
-                    ),
+                emetrics = validated_monitor_evaluation_metrics(
+                    evaluate(
+                        env,
+                        planner,
+                        tasks,
+                        int(cfg.eval.episodes_per_task),
+                        int(cfg.planner.max_env_steps),
+                        int(cfg.eval.seed),
+                        domain=domain,
+                        stop_callback=lambda: stop.requested,
+                        episode_seed_table=(
+                            evaluation_seed_tables["monitor"]
+                            if use_protocol_bound_evaluation_seeds
+                            else None
+                        ),
+                        expected_episode_seed_split=(
+                            "monitor" if use_protocol_bound_evaluation_seeds else None
+                        ),
+                    )
                 )
+                monitor_resource_metrics = (
+                    namespace_monitor_evaluation_resource_metrics(resource_metrics())
+                )
+                overlap = set(emetrics).intersection(monitor_resource_metrics)
+                if overlap:
+                    raise ValueError(
+                        "evaluation metric namespace collision: "
+                        + ", ".join(sorted(overlap))
+                    )
                 emetrics.update(cache_metrics)
-                emetrics.update(resource_metrics())
+                emetrics.update(monitor_resource_metrics)
                 logger.scalars(emetrics, eval_step)
                 eval_success = float(emetrics["eval/success_rate"])
                 print(
@@ -2777,14 +3163,16 @@ def main(cfg: DictConfig) -> None:
                         vmetrics["train/objective_matches_train_branch"] = 1.0
                         vmetrics["train/objective_includes_gain"] = 0.0
                         val_tracker.add_many(
-                            {
-                                k.replace("train/", "val/"): v
-                                for k, v in vmetrics.items()
-                                if "loss" in k
-                                or "objective_" in k
-                                or "grounded/" in k
-                                or "executable_prefix/" in k
-                            },
+                            namespace_validation_metrics(
+                                {
+                                    k: v
+                                    for k, v in vmetrics.items()
+                                    if "loss" in k
+                                    or "objective_" in k
+                                    or "grounded/" in k
+                                    or "executable_prefix/" in k
+                                }
+                            ),
                             count=vbatch["obs"].shape[0],
                         )
                         add_validation_label_metrics(
@@ -3055,7 +3443,9 @@ def main(cfg: DictConfig) -> None:
     save_training_checkpoint("final-evaluation-complete")
 
     if dist_info.is_main:
-        logger.scalars(final_eval, total_steps)
+        logger.scalars(
+            namespace_terminal_evaluation_metrics(final_eval), total_steps
+        )
         logger.hparams(
             {
                 "arm": str(cfg.arm), "env": str(cfg.env.name), "seed": int(cfg.seed),

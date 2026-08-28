@@ -28,7 +28,7 @@ sys.dont_write_bytecode = True
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
 BOUNDARIES = (5_000, 25_000)
 SHA256 = frozenset("0123456789abcdef")
 WORKER_COMPLETE_KEYS = frozenset(
@@ -390,7 +390,11 @@ def _verify_tfrecord_fd(descriptor: int, label: str, masked_crc32c: Any) -> None
 
 
 def _secure_tree_rows(
-    root: Path, label: str, *, hash_files: bool
+    root: Path,
+    label: str,
+    *,
+    hash_files: bool,
+    allow_wandb_symlink_leaves: bool = False,
 ) -> list[dict[str, Any]]:
     root = nonsymlink_directory(root, f"{label} root")
     root_fd = _open_directory_components(root, f"{label} root")
@@ -421,8 +425,75 @@ def _secure_tree_rows(
             raise ReportError(f"cannot enumerate {label} directory {parent}: {exc}") from exc
         for name, listed in sorted(children, key=lambda value: value[0]):
             relative = parent / name
-            require(not stat.S_ISLNK(listed.st_mode), f"{label} contains symlink: {relative}")
-            if stat.S_ISDIR(listed.st_mode):
+            if stat.S_ISLNK(listed.st_mode):
+                # W&B creates four observational convenience links per run.  They are
+                # not scientific inputs: authenticate each link inode and exact target
+                # text as leaf metadata, and never follow it.  The wandb directory
+                # itself and every non-W&B symlink remain forbidden.
+                require(
+                    allow_wandb_symlink_leaves
+                    and len(relative.parts) >= 2
+                    and relative.parts[0] == "wandb",
+                    f"{label} contains symlink: {relative}",
+                )
+                path_flag = getattr(os, "O_PATH", 0)
+                require(path_flag != 0, f"{label} symlink authentication requires O_PATH")
+                link_fd: int | None = None
+                try:
+                    link_fd = os.open(
+                        name,
+                        path_flag
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=directory_fd,
+                    )
+                    opened = os.fstat(link_fd)
+                    require(
+                        stat.S_ISLNK(opened.st_mode)
+                        and opened.st_uid == os.getuid()
+                        and opened.st_nlink == 1
+                        and _file_identity(opened) == _file_identity(listed),
+                        f"{label} symlink raced: {relative}",
+                    )
+                    target = os.readlink(b"", dir_fd=link_fd)
+                    middle = os.fstat(link_fd)
+                    target_after = os.readlink(b"", dir_fd=link_fd)
+                    after = os.fstat(link_fd)
+                    named_after = os.stat(
+                        name, dir_fd=directory_fd, follow_symlinks=False
+                    )
+                    require(
+                        len(target) == opened.st_size
+                        and target_after == target
+                        and _file_identity(middle) == _file_identity(opened)
+                        and _file_identity(after) == _file_identity(opened)
+                        and _file_identity(named_after) == _file_identity(opened),
+                        f"{label} symlink changed: {relative}",
+                    )
+                except OSError as exc:
+                    raise ReportError(
+                        f"cannot authenticate {label} symlink {relative}: {exc}"
+                    ) from exc
+                finally:
+                    if link_fd is not None:
+                        os.close(link_fd)
+                rows.append(
+                    {
+                        "path": str(relative),
+                        "kind": "symlink",
+                        "mode": stat.S_IMODE(opened.st_mode),
+                        "device": opened.st_dev,
+                        "inode": opened.st_ino,
+                        "uid": opened.st_uid,
+                        "gid": opened.st_gid,
+                        "nlink": opened.st_nlink,
+                        "size": opened.st_size,
+                        "mtime_ns": opened.st_mtime_ns,
+                        "ctime_ns": opened.st_ctime_ns,
+                        "readlink_bytes_hex": target.hex(),
+                    }
+                )
+            elif stat.S_ISDIR(listed.st_mode):
                 permissions = stat.S_IMODE(listed.st_mode)
                 require(
                     permissions & 0o444 != 0 and permissions & 0o111 != 0,
@@ -815,7 +886,12 @@ def parse_event_files(
     from tensorboard.compat.tensorflow_stub.pywrap_tensorflow import masked_crc32c
 
     run_root = nonsymlink_directory(run_dir, "scientific run directory")
-    tree_rows = _secure_tree_rows(run_root, "scientific run tree", hash_files=True)
+    tree_rows = _secure_tree_rows(
+        run_root,
+        "scientific run tree",
+        hash_files=True,
+        allow_wandb_symlink_leaves=True,
+    )
     initial_rows = {str(row["path"]): row for row in tree_rows}
     event_relatives = sorted(
         Path(str(row["path"]))
@@ -1012,7 +1088,13 @@ def parse_event_files(
         )
         hparams_hashes[str(relative)] = digest
     require(
-        _secure_tree_rows(run_root, "scientific run tree", hash_files=True) == tree_rows,
+        _secure_tree_rows(
+            run_root,
+            "scientific run tree",
+            hash_files=True,
+            allow_wandb_symlink_leaves=True,
+        )
+        == tree_rows,
         "scientific run tree changed while parsing TensorBoard events",
     )
     require(fixed_text_events == len(path_relatives), "fixed-validation text generation coverage differs")
@@ -1063,10 +1145,21 @@ def validate_boundary_axes(
         *gate.GAUGE_EXACT_TAGS,
         *gate.GRADIENT_NORM_TAGS,
         *gate.GRADIENT_CLIP_TAGS,
+        *gate.DENSE_TRAIN_METHOD_TAGS,
         *(gate.TRAIN_PREFIX + suffix for suffix in gate.PREFIX_COMMON_SUFFIXES),
     )
+    dense_method_tags = frozenset(gate.DENSE_TRAIN_METHOD_TAGS)
+    require(
+        dense_method_tags <= frozenset(gate.METHOD_EXACT_TAGS),
+        "dense training method tags are not a subset of exact method tags",
+    )
     validation_tags = (
-        *(tag for tag in gate.METHOD_EXACT_TAGS if tag != "data/validation_fixed_sample_count"),
+        *(
+            tag
+            for tag in gate.METHOD_EXACT_TAGS
+            if tag != "data/validation_fixed_sample_count"
+            and tag not in dense_method_tags
+        ),
         *(gate.PREFIX + suffix for suffix in gate.PREFIX_COMMON_SUFFIXES),
     )
     training_axis = tuple(range(train_cadence, 25_000 + 1, train_cadence))

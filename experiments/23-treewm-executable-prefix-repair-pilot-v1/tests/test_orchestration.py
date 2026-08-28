@@ -237,13 +237,13 @@ def interpreter_identity(submit):
     }
 
 
-def test_launch6_transaction_lock_path_is_exact(submit):
+def test_launch7_transaction_lock_path_is_exact(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     run_root = Path(manifest["paths"]["run_root"])
     submission_root = run_root / "state" / "submission"
     expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
     assert submit._transaction_lock_path(submission_root) == expected
-    assert expected.name == ".exp23-34d79ab13d65ef27.transaction.lock"
+    assert expected.name == ".exp23-8fc3c9e0775ae4d7.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -1173,7 +1173,7 @@ def _trainer_smoke_unit_inputs(submit, tmp_path: Path):
     config = {"seed": 110, "objective_version": "smoke"}
     launch_body = {
         "schema_version": 1,
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
         "cell": {"index": 0, "seed": 110},
         "argv": [
             "/pinned/python",
@@ -1364,7 +1364,7 @@ def _real_trainer_smoke_case(
         )
     launch_body = {
         "schema_version": 1,
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
         "cell": {"index": 0, "seed": 110},
         "argv": [
             manifest["paths"]["python"],
@@ -3442,7 +3442,12 @@ def test_successful_abort_cancellation_is_idempotent_recovery_evidence(submit):
 
 class GateStub:
     GAUGE_EXACT_TAGS = ("gauge",)
-    METHOD_EXACT_TAGS = ("method", "data/validation_fixed_sample_count")
+    DENSE_TRAIN_METHOD_TAGS = ("dense_method",)
+    METHOD_EXACT_TAGS = (
+        "method",
+        *DENSE_TRAIN_METHOD_TAGS,
+        "data/validation_fixed_sample_count",
+    )
     GRADIENT_NORM_TAGS = ("grad",)
     GRADIENT_CLIP_TAGS = ("clip",)
     TRAIN_PREFIX = "train/p/"
@@ -3454,7 +3459,10 @@ def exact_scalars():
     train = tuple(range(50, 25_001, 50))
     validation = tuple(range(1000, 25_001, 1000))
     return {
-        **{tag: {step: 1.0 for step in train} for tag in ("gauge", "grad", "clip", "train/p/one")},
+        **{
+            tag: {step: 1.0 for step in train}
+            for tag in ("gauge", "grad", "clip", "dense_method", "train/p/one")
+        },
         **{tag: {step: 1.0 for step in validation} for tag in ("method", "val/p/one")},
         "data/validation_fixed_sample_count": {step: 5120.0 for step in (0, *validation)},
     }
@@ -3469,7 +3477,61 @@ def test_reporter_requires_exact_full_axes(report):
         report.validate_boundary_axes(scalars, GateStub, manifest)
 
 
-def test_event_parser_excludes_periodic_terminal_eval_collision(report, tmp_path):
+def test_reporter_binds_real_dense_method_tags_to_training_axis(report):
+    gate = load("gate")
+    assert gate.DENSE_TRAIN_METHOD_TAGS == (
+        "expansion/gain_rank_correlation",
+        "expansion/gain_pairwise_accuracy",
+        "expansion/gain_eligible_decision_fraction",
+        "expansion/gain_ordered_pair_count",
+        "expansion/gain_pair_coverage_fraction",
+        "tree/support_recall",
+        "tree/support_precision",
+    )
+    train = tuple(range(50, 25_001, 50))
+    validation = tuple(range(1000, 25_001, 1000))
+    scalars = {
+        **{
+            tag: {step: 1.0 for step in train}
+            for tag in (
+                *gate.GAUGE_EXACT_TAGS,
+                *gate.GRADIENT_NORM_TAGS,
+                *gate.GRADIENT_CLIP_TAGS,
+                *gate.DENSE_TRAIN_METHOD_TAGS,
+                *(gate.TRAIN_PREFIX + suffix for suffix in gate.PREFIX_COMMON_SUFFIXES),
+            )
+        },
+        **{
+            tag: {step: 1.0 for step in validation}
+            for tag in (
+                *(
+                    tag
+                    for tag in gate.METHOD_EXACT_TAGS
+                    if tag != "data/validation_fixed_sample_count"
+                    and tag not in gate.DENSE_TRAIN_METHOD_TAGS
+                ),
+                *(gate.PREFIX + suffix for suffix in gate.PREFIX_COMMON_SUFFIXES),
+            )
+        },
+        "data/validation_fixed_sample_count": {
+            step: 5120.0 for step in (0, *validation)
+        },
+    }
+    manifest = {
+        "scientific_contract": {
+            "training_telemetry_every_updates": 50,
+            "validation_every_updates": 1000,
+        }
+    }
+    report.validate_boundary_axes(scalars, gate, manifest)
+    del scalars[gate.DENSE_TRAIN_METHOD_TAGS[0]][50]
+    with pytest.raises(report.ReportError, match="full training telemetry.*axis differs"):
+        report.validate_boundary_axes(scalars, gate, manifest)
+
+
+def test_event_parser_excludes_distinct_periodic_and_terminal_eval_namespaces(
+    report, tmp_path
+):
     from torch.utils.tensorboard import SummaryWriter
 
     sampler = {"global_sample_size": 5120, "seed": 1701}
@@ -3478,13 +3540,125 @@ def test_event_parser_excludes_periodic_terminal_eval_collision(report, tmp_path
     writer.add_text("meta/fixed_validation_sample", text, 0)
     writer.add_scalar("train/loss_total", 2.0, 50)
     writer.add_scalar("eval/success_rate", 0.2, 25_000)
-    writer.add_scalar("eval/success_rate", 0.8, 25_000)
+    writer.add_scalar("eval/final/success_rate", 0.8, 25_000)
     writer.flush()
     writer.close()
     parsed = report.parse_event_files(tmp_path, sampler)
     assert "eval/success_rate" not in parsed["scalars"]
-    assert parsed["excluded_eval_tags"] == ["eval/success_rate"]
+    assert "eval/final/success_rate" not in parsed["scalars"]
+    assert parsed["excluded_eval_tags"] == [
+        "eval/final/success_rate",
+        "eval/success_rate",
+    ]
     assert parsed["scalars"]["train/loss_total"] == {50: 2.0}
+
+
+def test_event_parser_authenticates_wandb_symlink_leaves_only(report, tmp_path):
+    from torch.utils.tensorboard import SummaryWriter
+
+    sampler = {"global_sample_size": 5120, "seed": 1701}
+    text = "<pre>" + json.dumps(sampler, sort_keys=True, indent=2) + "</pre>"
+    writer = SummaryWriter(str(tmp_path))
+    writer.add_text("meta/fixed_validation_sample", text, 0)
+    writer.add_scalar("train/loss_total", 2.0, 50)
+    writer.flush()
+    writer.close()
+
+    run = tmp_path / "wandb" / "run-identity"
+    logs = run / "logs"
+    logs.mkdir(parents=True)
+    (logs / "debug.log").write_text("observational\n")
+    (tmp_path / "wandb" / "latest-run").symlink_to("run-identity")
+    (tmp_path / "wandb" / "debug.log").symlink_to(
+        "run-identity/logs/debug.log"
+    )
+    # Broken and absolute targets are observational link text only.  Mutating an
+    # external target must not affect the authenticated scientific tree.
+    (tmp_path / "wandb" / "debug-internal.log").symlink_to(
+        "run-identity/logs/does-not-exist.log"
+    )
+    external = tmp_path.parent / f"{tmp_path.name}-external.log"
+    external.write_text("before\n")
+    (logs / "debug-core.log").symlink_to(external)
+    parsed = report.parse_event_files(tmp_path, sampler)
+    assert parsed["scalars"]["train/loss_total"] == {50: 2.0}
+    external.write_text("after with different bytes\n")
+    parsed = report.parse_event_files(tmp_path, sampler)
+    assert parsed["scalars"]["train/loss_total"] == {50: 2.0}
+    external.unlink()
+
+    (tmp_path / "outside-link").symlink_to("wandb/run-identity")
+    with pytest.raises(report.ReportError, match="contains symlink: outside-link"):
+        report.parse_event_files(tmp_path, sampler)
+
+
+def test_wandb_symlink_policy_rejects_root_swap_special_and_unreadable(
+    report, tmp_path, monkeypatch
+):
+    root_link_case = tmp_path / "root-link-case"
+    root_link_case.mkdir()
+    (root_link_case / "target").mkdir()
+    (root_link_case / "wandb").symlink_to("target")
+    with pytest.raises(report.ReportError, match="contains symlink: wandb"):
+        report._secure_tree_rows(
+            root_link_case,
+            "root-link case",
+            hash_files=True,
+            allow_wandb_symlink_leaves=True,
+        )
+
+    special_case = tmp_path / "special-case"
+    wandb = special_case / "wandb"
+    wandb.mkdir(parents=True)
+    fifo = wandb / "hidden.fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(report.ReportError, match="contains special file"):
+        report._secure_tree_rows(
+            special_case,
+            "special case",
+            hash_files=True,
+            allow_wandb_symlink_leaves=True,
+        )
+    fifo.unlink()
+    closed = wandb / "closed"
+    closed.mkdir()
+    closed.chmod(0)
+    try:
+        with pytest.raises(report.ReportError, match="directory is not traversable"):
+            report._secure_tree_rows(
+                special_case,
+                "unreadable case",
+                hash_files=True,
+                allow_wandb_symlink_leaves=True,
+            )
+    finally:
+        closed.chmod(0o700)
+
+    swap_case = tmp_path / "swap-case"
+    swap_wandb = swap_case / "wandb"
+    swap_wandb.mkdir(parents=True)
+    link = swap_wandb / "latest-run"
+    link.symlink_to("first")
+    real_readlink = report.os.readlink
+    swapped = False
+
+    def swapping_readlink(path, *, dir_fd=None):
+        nonlocal swapped
+        value = real_readlink(path, dir_fd=dir_fd)
+        if path == b"" and not swapped:
+            swapped = True
+            link.unlink()
+            link.symlink_to("second")
+        return value
+
+    monkeypatch.setattr(report.os, "readlink", swapping_readlink)
+    with pytest.raises(report.ReportError, match="symlink changed"):
+        report._secure_tree_rows(
+            swap_case,
+            "swap case",
+            hash_files=True,
+            allow_wandb_symlink_leaves=True,
+        )
 
 
 def _write_test_event(directory: Path, sampler: dict, scalar: float) -> Path:
@@ -3670,7 +3844,7 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3728,7 +3902,7 @@ def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3779,7 +3953,7 @@ def test_explicit_cancel_retries_exact_ids_when_canonical_failure_closes_on_drif
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
         "submission_sha256": "d" * 64,
         "train_array_job_id": "200",
         "report_job_id": "201",

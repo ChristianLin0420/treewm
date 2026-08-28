@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -1598,7 +1598,7 @@ def _ephemeral_child_environment(
 
     temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch6-{os.getuid()}-", dir=temporary_parent
+        prefix=f"treewm-exp23-launch7-{os.getuid()}-", dir=temporary_parent
     ) as raw_root:
         root = Path(raw_root)
         root_info = root.lstat()
@@ -3762,8 +3762,8 @@ def scheduler_preclaim_test(
         ),
     }
     job_names = {
-        "train": f"exp23-launch6-scheduler-test-train",
-        "report": f"exp23-launch6-scheduler-test-report",
+        "train": f"exp23-launch7-scheduler-test-train",
+        "report": f"exp23-launch7-scheduler-test-report",
     }
     observations: list[dict[str, Any]] = []
     commands: list[list[str]] = []
@@ -4003,8 +4003,8 @@ def _validated_scheduler_preclaim(
         result["zero_job_proof"]
         == {
             "job_names": {
-                "train": "exp23-launch6-scheduler-test-train",
-                "report": "exp23-launch6-scheduler-test-report",
+                "train": "exp23-launch7-scheduler-test-train",
+                "report": "exp23-launch7-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -4230,7 +4230,7 @@ def _restore_snapshot_test_permissions(task_root: Path) -> None:
     root = task_root.absolute()
     require(
         root.parent == temporary_parent
-        and root.name.startswith(f"treewm-exp23-launch6-snapshot-test-{os.getuid()}-"),
+        and root.name.startswith(f"treewm-exp23-launch7-snapshot-test-{os.getuid()}-"),
         "refusing to restore permissions outside a snapshot-test temporary tree",
     )
     if not _lexical_exists(root):
@@ -4284,7 +4284,7 @@ def snapshot_test(
     task_root: Path | None = None
     copied: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch6-snapshot-test-{os.getuid()}-",
+        prefix=f"treewm-exp23-launch7-snapshot-test-{os.getuid()}-",
         dir=temporary_parent,
     ) as raw_task_root:
         task_root = Path(raw_task_root)
@@ -4676,8 +4676,8 @@ def _submit_campaign_impl(
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch6-{token}-train"
-    report_name = f"exp23-launch6-{token}-report"
+    train_name = f"exp23-launch7-{token}-train"
+    report_name = f"exp23-launch7-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
@@ -5358,8 +5358,8 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch6-{token}-train"
-    report_name = f"exp23-launch6-{token}-report"
+    train_name = f"exp23-launch7-{token}-train"
+    report_name = f"exp23-launch7-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
     role_names = {"train": train_name, "report": report_name}
     journal_paths = {

@@ -1,18 +1,24 @@
 """TensorBoard wrapper.
 
-Rank-0-only by construction: on non-zero ranks every method is a no-op, so call sites
-never need ``if rank == 0`` guards. ``add_hparams`` writes to a *separate* writer
-(``<run_dir>/hparams``) so the final-eval hparam entry does not clutter training curves
-(spec section 21).
+Rank-0-only output by construction: on non-zero ranks backend operations are no-ops, so
+call sites never need ``if rank == 0`` guards. Scalar identity checks remain local to
+every process. ``add_hparams`` writes to a *separate* writer (``<run_dir>/hparams``) so
+the final-eval hparam entry does not clutter training curves (spec section 21).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+import threading
 from typing import Any
 
 import numpy as np
 import torch
+
+
+class ScalarCollisionError(RuntimeError):
+    """One process attempted to give a scalar boundary two different values."""
 
 
 class TreeWMLogger:
@@ -34,6 +40,12 @@ class TreeWMLogger:
         self._hparam_writer = None
         self._wandb_run = None
         self._wandb_error_reported = False
+        # TensorBoard stores simple scalars as float32. Keep the latest exact
+        # (step, bits) for each process-local tag. Monotonic-step enforcement makes this
+        # a bounded ledger even across a formal million-update run: an equal boundary is
+        # identity-checked and an older boundary is rejected rather than replayed.
+        self._scalar_ledger: dict[str, tuple[int, int]] = {}
+        self._scalar_ledger_lock = threading.Lock()
         if self.is_main:
             from torch.utils.tensorboard import SummaryWriter
 
@@ -58,6 +70,11 @@ class TreeWMLogger:
                         dir=str(self.run_dir),
                         config=wandb_config,
                         mode=mode,
+                        # Suppress Python-SDK convenience links and minimize observational
+                        # links in the scientific tree. The pinned Go core may retain its
+                        # single debug-core leaf, which the reporter authenticates without
+                        # following its target.
+                        settings=wandb.Settings(symlink=False),
                         reinit=True,
                     )
                     self._wandb_run.define_metric("global_step")
@@ -72,26 +89,86 @@ class TreeWMLogger:
     # ------------------------------------------------------------------ scalars
 
     def scalar(self, tag: str, value: float, step: int) -> None:
-        value = float(value)
-        if not np.isfinite(value):
+        clean = self._new_scalars({tag: value}, step)
+        if not clean:
             return
+        name, value = next(iter(clean.items()))
         if self._writer is not None:
-            self._writer.add_scalar(tag, value, step)
+            self._writer.add_scalar(name, value, int(step))
         if self._wandb_run is not None:
-            self._wandb_log({"global_step": int(step), tag: value})
+            self._wandb_log({"global_step": int(step), name: value})
 
     def scalars(self, values: dict[str, float], step: int, prefix: str = "") -> None:
-        clean: dict[str, float] = {}
-        for tag, value in values.items():
-            name = f"{prefix}{tag}" if prefix else tag
-            value = float(value)
-            if not np.isfinite(value):
-                continue
-            clean[name] = value
+        clean = self._new_scalars(values, step, prefix=prefix)
+        for name, value in clean.items():
             if self._writer is not None:
-                self._writer.add_scalar(name, value, step)
+                self._writer.add_scalar(name, value, int(step))
         if self._wandb_run is not None and clean:
             self._wandb_log({"global_step": int(step), **clean})
+
+    def _new_scalars(
+        self,
+        values: Mapping[str, float],
+        step: int,
+        *,
+        prefix: str = "",
+    ) -> dict[str, float]:
+        """Return only new finite scalars after an atomic collision preflight.
+
+        Values are quantized exactly as TensorBoard simple scalars are.  An identical
+        repeat is observationally redundant and is suppressed for both backends; a
+        different float32 bit pattern raises before either backend sees this call.
+        """
+        if type(step) is not int or step < 0:
+            raise ValueError("scalar step must be a non-negative built-in integer")
+        scalar_step = step
+        candidates: dict[str, tuple[float, int]] = {}
+        for tag, raw_value in values.items():
+            name = f"{prefix}{tag}" if prefix else tag
+            value = float(raw_value)
+            if not np.isfinite(value):
+                continue
+            with np.errstate(over="ignore", invalid="ignore"):
+                value32 = np.float32(value)
+            if not np.isfinite(value32):
+                continue
+            bits = int(np.asarray(value32).view(np.uint32).item())
+            prior_candidate = candidates.get(name)
+            if prior_candidate is not None:
+                if prior_candidate[1] != bits:
+                    raise ScalarCollisionError(
+                        f"conflicting scalar duplicate {name}@{scalar_step} within batch: "
+                        f"0x{prior_candidate[1]:08x} != 0x{bits:08x}"
+                    )
+                continue
+            candidates[name] = (float(value32), bits)
+
+        fresh: list[tuple[str, float, int]] = []
+        with self._scalar_ledger_lock:
+            # Preflight the whole batch before changing the ledger.  In particular, a
+            # conflict in the last mapping entry cannot partially emit earlier entries.
+            for name, (value, bits) in candidates.items():
+                previous = self._scalar_ledger.get(name)
+                if previous is None:
+                    fresh.append((name, value, bits))
+                    continue
+                previous_step, previous_bits = previous
+                if scalar_step < previous_step:
+                    raise ScalarCollisionError(
+                        f"out-of-order scalar {name}@{scalar_step}: "
+                        f"latest step is {previous_step}"
+                    )
+                if scalar_step > previous_step:
+                    fresh.append((name, value, bits))
+                    continue
+                if previous_bits != bits:
+                    raise ScalarCollisionError(
+                        f"conflicting scalar duplicate {name}@{scalar_step}: "
+                        f"0x{previous_bits:08x} != 0x{bits:08x}"
+                    )
+            for name, _, bits in fresh:
+                self._scalar_ledger[name] = (scalar_step, bits)
+        return {name: value for name, value, _ in fresh}
 
     def _wandb_log(self, payload: dict[str, Any]) -> None:
         try:

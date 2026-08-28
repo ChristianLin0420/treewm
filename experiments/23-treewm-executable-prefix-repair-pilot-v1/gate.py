@@ -21,7 +21,7 @@ from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = PACKAGE_DIR / "manifest.json"
 PREFIX_TARGET_LOCK = PACKAGE_DIR / "prefix_target.lock.json"
@@ -98,6 +98,14 @@ GAIN_TAGS = (
     "expansion/gain_ordered_pair_count",
     "expansion/gain_pair_coverage_fraction",
 )
+# These method diagnostics are produced by the training loss path and therefore have
+# the dense training cadence.  Keep the origin explicit so the reporter cannot
+# accidentally require them only on the sparse validation axis.
+DENSE_TRAIN_METHOD_TAGS = (
+    *GAIN_TAGS,
+    "tree/support_recall",
+    "tree/support_precision",
+)
 GAUGE_EXACT_TAGS = (
     "latent_gauge/root/scale",
     "latent_gauge/root/reference",
@@ -117,9 +125,7 @@ METHOD_EXACT_TAGS = (
     "control/retrieval_uses_task_metric_endpoint",
     "control/q_advantage_over_z",
     "control/q_advantage_over_random_proj",
-    *GAIN_TAGS,
-    "tree/support_recall",
-    "tree/support_precision",
+    *DENSE_TRAIN_METHOD_TAGS,
     "data/validation_fixed_sample_count",
     *(f"data/validation_horizon_label_fraction_h{h}" for h in HORIZONS),
 )

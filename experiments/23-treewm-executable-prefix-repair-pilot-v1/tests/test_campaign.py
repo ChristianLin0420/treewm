@@ -40,10 +40,10 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch6-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch7-") for cell in cells)
 
 
-def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
+def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
     manifest, lock = contracts()
     superseded = manifest["superseded_launches"]
     assert superseded == campaign.SUPERSEDED_LAUNCHES
@@ -53,8 +53,9 @@ def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
         "treewm-executable-prefix-repair-pilot-v1-launch3",
         "treewm-executable-prefix-repair-pilot-v1-launch4",
         "treewm-executable-prefix-repair-pilot-v1-launch5",
+        "treewm-executable-prefix-repair-pilot-v1-launch6",
     ]
-    launch1, launch2, launch3, launch4, launch5 = superseded
+    launch1, launch2, launch3, launch4, launch5, launch6 = superseded
     assert launch1["source_commit_claimed_by_journal"] is False
     assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
@@ -308,6 +309,160 @@ def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
     assert launch5["submission_contract_committed"] is True
     assert launch5["submission_receipt_committed"] is True
     assert launch5["cancel_latch_committed"] is True
+    assert launch6["status"] == (
+        "cancelled_after_retrospective_tensorboard_scalar_identity_failure"
+    )
+    assert launch6["source_commit"] == "d09e842acaf7909edf4ea6ba29138ea5c646fc1a"
+    assert launch6["package_protocol_sha256"] == (
+        "33288668441622bb30b205c98a0373e96f2c11f5ec5ba0e76bd5255098a8b7bd"
+    )
+    assert launch6["contract_sha256"] == launch6["submission_sha256"] == (
+        "e2758413a5bb28af05b99441f0f6e27e279ba2940840be31403fe7cc6870649e"
+    )
+    assert launch6["receipt_sha256"] == (
+        "ab0574d776dec229420e207752abc257cbe3f17115def2061a1248d22d12a110"
+    )
+    assert launch6["transaction_lock"] == (
+        "outputs/.exp23-34d79ab13d65ef27.transaction.lock"
+    )
+    preserved = launch6["preserved_tree"]
+    assert preserved["run_root"] == {
+        "directory_count_including_root": 297,
+        "regular_file_count": 629,
+        "regular_file_bytes": 2009101434,
+        "symlink_count": 80,
+        "special_file_count": 0,
+        "canonical_json_bytes": 101693,
+        "aggregate_sha256": (
+            "0ba872f7a03f42a58dfd9dcbc55afef0ec94dba6bef66744845c12f55cd340a8"
+        ),
+    }
+    assert preserved["submission_root"]["aggregate_sha256"] == (
+        "98d131fbd80b46d34e978b9b23f7c0137bc07711cc32b35bd89877a49f8c0242"
+    )
+    assert preserved["task_root"]["aggregate_sha256"] == (
+        "07217ed94c148f7751c46c776b114c593f6b92a17d79c45aceeaa55fa0895ec4"
+    )
+    assert preserved["symlink_target_envelope"]["aggregate_sha256"] == (
+        "fb1ef56fa6e93ae69f01e54438a377c36e9978ab64af8232f9f109582fecbfb4"
+    )
+    cancellation = launch6["cancellation"]
+    assert cancellation["latch_sha256"] == (
+        "a95defbc689623a08d48cead6c6959a585b461a6a70894b56d57d021c52584aa"
+    )
+    assert cancellation["call_token"] == "1787897778572633216-1585470"
+    assert cancellation["call_sha256"] == (
+        "f706ebbbd16f2ecaa0a2c10af38a6fb3251b7323e6399f970090878d7f3e82fe"
+    )
+    assert cancellation["result_sha256"] == (
+        "cb3be62a3e4a0e7ca9b9b61ee30771f32099aa61a671b5efb044cb95c7c5909e"
+    )
+    assert cancellation["task_cancel_latch_aggregate_sha256"] == (
+        "c606ca738b0ee29a6cec57d670dae6bb17abeb25c35d4cbccec6885f1cdc947c"
+    )
+    checkpoints = launch6["partial_checkpoints"]
+    assert checkpoints["row_count"] == len(checkpoints["rows"]) == 20
+    assert sum(row["completed_updates"] for row in checkpoints["rows"]) == 102017
+    checkpoint_payload = {
+        "schema_version": 1,
+        "validation": checkpoints["validation"],
+        "rows": [
+            {**row, **checkpoints["row_constant_fields"]}
+            for row in checkpoints["rows"]
+        ],
+    }
+    checkpoint_bytes = json.dumps(
+        checkpoint_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    assert len(checkpoint_bytes) == checkpoints["canonical_json_bytes"] == 3867
+    assert hashlib.sha256(checkpoint_bytes).hexdigest() == checkpoints[
+        "aggregate_sha256"
+    ] == "b4498f2787600681b5c90862c48f23571be6fce23343c9f5957aae5e993628b5"
+    scalars = launch6["tensorboard_scalar_evidence"]
+    assert (
+        scalars["scalar_event_records"],
+        scalars["unique_cell_tag_steps"],
+        scalars["duplicate_groups"],
+        scalars["conflict_groups"],
+        scalars["identical_groups"],
+    ) == (803745, 802659, 718, 560, 158)
+    assert (
+        scalars["duplicate_extra_occurrences"],
+        scalars["conflict_extra_occurrences"],
+        scalars["identical_extra_occurrences"],
+    ) == (1086, 722, 364)
+    assert scalars["later_occurrences_compared_with_first"] == {
+        "value_conflicting": 715,
+        "bit_identical": 371,
+        "total": 1086,
+        "counting_rule": (
+            "Each occurrence after the first in a group is compared only with "
+            "that group's first occurrence; these are not group classifications."
+        ),
+    }
+    assert scalars["event_file_map_sha256"] == (
+        "91f77de5c3313a519312cde4244ae08fea0788180d5f2ceefeb8e08b5ccd8da2"
+    )
+    assert scalars["full_census_sha256"] == (
+        "26c7127632470128fdfc92441ce2fce5b74f95a17195c4fa07175ef236926f98"
+    )
+    assert scalars["conflict_census_sha256"] == (
+        "f4a6f0f22549617004c5390601dada4e6acbebe6a3393902a0cae90f9679b053"
+    )
+    assert scalars["identical_census_sha256"] == (
+        "04ce578d994c36af58a3db3ad7fad527290831059c96e62964557b2a84c673ea"
+    )
+    assert scalars["per_cell_census_sha256"] == (
+        "47bd1c52254571a74cf32388484c67f318dbdb41b0f8356741c23d978bb23a5e"
+    )
+    assert scalars["validation_aliases"]["groups"] == 534
+    assert scalars["visualization_structural_aliases"]["groups"] == 184
+    assert scalars["visualization_structural_aliases"]["extra_occurrences"] == 552
+    blockers = launch6["report_blockers"]
+    assert blockers["immutable_launch6_axis_contract_defect"]["tags"] == [
+        "expansion/gain_rank_correlation",
+        "expansion/gain_pairwise_accuracy",
+        "expansion/gain_eligible_decision_fraction",
+        "expansion/gain_ordered_pair_count",
+        "expansion/gain_pair_coverage_fraction",
+        "tree/support_recall",
+        "tree/support_precision",
+    ]
+    assert "pre-fix reporter rejects the 80 W&B symlinks" in blockers[
+        "immutable_launch6_reporter_order"
+    ][1]
+    assert "dense 50-update training axis" in blockers[
+        "current_launch7_candidate_reporter_probe"
+    ]
+    terminal = launch6["unsealed_later_terminal_scheduler_observation"]
+    assert terminal["preserved_in_launch6_bytes"] is False
+    assert terminal["sacct_raw_stdout_bytes"] == 5320
+    assert terminal["sacct_raw_stdout_sha256"] == (
+        "ed61d986df986bca184c5355acadabb388446e5ee39ab9282ffb75ea780e470e"
+    )
+    terminal_payload = {
+        "schema_version": 1,
+        "columns": terminal["columns"],
+        "rows": [row.split("|") for row in terminal["serialized_rows"]],
+    }
+    assert len(terminal_payload["rows"]) == 21
+    assert {len(row) for row in terminal_payload["rows"]} == {14}
+    terminal_bytes = json.dumps(
+        terminal_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    assert len(terminal_bytes) == terminal["canonical_ledger_json_bytes"] == 6152
+    assert hashlib.sha256(terminal_bytes).hexdigest() == terminal[
+        "canonical_ledger_sha256"
+    ] == "447a0b38dbbd0ead850aa1eb16010e67334452a698f103824393cd0341cbce4d"
+    assert launch6["scientific_state"]["optimizer_update_total_across_cells"] == 102017
     for row in superseded[:2]:
         assert row["submission_sha256"] is None
         assert row["known_job_ids"] == []
@@ -331,14 +486,14 @@ def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
             assert row[key] is False
     assert launch2["submission_contract_committed"] is False
     assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch6"
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
     )
     assert manifest["paths"]["transaction_lock"] == (
-        "outputs/.exp23-34d79ab13d65ef27.transaction.lock"
+        "outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock"
     )
     assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
-    assert manifest["logging"]["wandb_project"].endswith("-launch6")
-    assert manifest["logging"]["wandb_group"].endswith("-launch6")
+    assert manifest["logging"]["wandb_project"].endswith("-launch7")
+    assert manifest["logging"]["wandb_group"].endswith("-launch7")
 
     tampered = copy.deepcopy(manifest)
     tampered["paths"]["run_root"] = launch2["run_root"]
@@ -347,6 +502,27 @@ def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
     tampered = copy.deepcopy(manifest)
     tampered["superseded_launches"][1]["resume_allowed"] = True
     with pytest.raises(campaign.ContractError):
+        campaign.validate_manifest(tampered, lock, REPO)
+    tampered = copy.deepcopy(manifest)
+    tampered["design"]["fresh_start_policy"] = (
+        "Every launch7 cell starts from scratch; no superseded state may be "
+        "imported, reused, or resumed."
+    )
+    with pytest.raises(
+        campaign.ContractError, match="superseded-launch exclusion policy differs"
+    ):
+        campaign.validate_manifest(tampered, lock, REPO)
+    tampered = copy.deepcopy(manifest)
+    tampered["design"]["fresh_start_policy"] = manifest["design"][
+        "fresh_start_policy"
+    ].replace(
+        "only within a genuine scheduler requeue lineage of that same fresh "
+        "Launch7 cell",
+        "within any Launch7 process",
+    )
+    with pytest.raises(
+        campaign.ContractError, match="superseded-launch exclusion policy differs"
+    ):
         campaign.validate_manifest(tampered, lock, REPO)
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch6
+#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch7
 #SBATCH --partition=polar4,polar3,polar,grizzly
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal
