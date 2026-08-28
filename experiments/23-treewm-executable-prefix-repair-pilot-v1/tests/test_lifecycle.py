@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -33,6 +34,130 @@ def _load(name: str, filename: str):
 
 worker = _load("exp23_lifecycle_worker", "worker.py")
 train_entry = _load("exp23_lifecycle_train_entry", "train_entry.py")
+
+
+def _scheduler_config_bytes() -> bytes:
+    return (
+        "ClusterName=cs-oci-ord\n"
+        "SlurmctldHost=cs-oci-ord-a\n"
+        "SlurmctldHost=cs-oci-ord-b\n"
+        "SlurmctldPort=6817\n"
+        "AuthType=auth/munge\n"
+        "GresTypes=gpu\n"
+        "CliFilterPlugins=lua\n"
+        "JobSubmitPlugins=lua\n"
+        "CommunicationParameters=NoAddrCache\n"
+    ).encode("utf-8")
+
+
+def _scheduler_critical() -> dict:
+    return {
+        key: worker.SCHEDULER_CONTROL_PLANE[key]
+        for key in (
+            "cluster_name",
+            "slurmctld_hosts",
+            "slurmctld_port",
+            "auth_type",
+            "gres_types",
+            "cli_filter_plugins",
+            "job_submit_plugins",
+        )
+    }
+
+
+def _scheduler_observation() -> dict:
+    payload = _scheduler_config_bytes()
+    return {
+        "schema_version": 1,
+        "trust_model": worker.SCHEDULER_CONTROL_PLANE["trust_model"],
+        "config": {
+            "path": worker.SCHEDULER_CONTROL_PLANE["slurm_conf"],
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "identity": {"size": len(payload)},
+        },
+        "critical": _scheduler_critical(),
+        "cli_filter_policy": {"files": {}, "tree_sha256": "a" * 64},
+    }
+
+
+def _scheduler_fallback() -> dict:
+    payload = _scheduler_config_bytes()
+    return {
+        "schema_version": 1,
+        "purpose": (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        ),
+        "encoding": "base64",
+        "payload_base64": base64.b64encode(payload).decode("ascii"),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+        "source_control_plane": _scheduler_observation(),
+    }
+
+
+def _scheduler_preclaim() -> dict:
+    comment = "treewm-exp23:" + "0" * 64
+    train_output = "/repo/scheduler-test-never-executed/logs/train_%A_%a.out"
+    report_output = "/repo/scheduler-test-never-executed/logs/report_%j.out"
+    return {
+        "schema_version": 1,
+        "status": "scheduler_preclaim_verified",
+        "campaign_id": worker.CAMPAIGN_ID,
+        "scheduler_control_plane": _scheduler_observation(),
+        "controller_configuration": _scheduler_critical(),
+        "sbatch_test_only": {
+            "train": {
+                "role": "train",
+                "defined_options": {
+                    "array": "0-19%20", "comment": comment, "export": "NONE",
+                    "output": train_output, "parsable": "set", "test-only": "set",
+                    "verbose": "3",
+                },
+                "decision": {},
+                "warnings": [],
+            },
+            "report": {
+                "role": "report",
+                "defined_options": {
+                    "comment": comment, "export": "NONE", "output": report_output,
+                    "parsable": "set", "test-only": "set", "verbose": "3",
+                },
+                "decision": {},
+                "warnings": [],
+            },
+        },
+        "report_dependency_test": worker.REPORT_DEPENDENCY_TEST_REQUIREMENT,
+        "scheduler_probe_commands": [
+            ["scontrol"],
+            ["squeue"],
+            ["squeue"],
+            [
+                "sbatch", "-vvv", "--test-only", "--parsable", "--export=NONE",
+                "--array=0-19%20",
+                f"--comment={comment}", f"--output={train_output}", "train.slurm",
+            ],
+            [
+                "sbatch", "-vvv", "--test-only", "--parsable", "--export=NONE",
+                f"--comment={comment}", f"--output={report_output}", "report.slurm",
+            ],
+            ["squeue"],
+            ["squeue"],
+        ],
+        "zero_job_proof": {
+            "job_names": {
+                "train": "exp23-launch4-scheduler-test-train",
+                "report": "exp23-launch4-scheduler-test-report",
+            },
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "scheduler_calls": 7,
+        "scheduler_mutation_calls": 0,
+        "persistent_writes_performed": 0,
+    }
 
 
 class FakeGeneratorState:
@@ -566,6 +691,11 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
             "launch_sha256": "d" * 64,
             "cell": {"run_directory": str(run)},
         },
+        "manifest": {"execution": {"scontrol": "/usr/local/bin/scontrol"}},
+        "submission_contract": {
+            "scheduler_preclaim": _scheduler_preclaim(),
+            "scheduler_fallback_config": _scheduler_fallback(),
+        },
         **_run_layout(run),
     }
     current_state = {
@@ -616,13 +746,24 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
         previous / worker.REQUEUE_CALLING_NAME,
         {
             **common,
-            "status": "scontrol_requeue_calling",
-            "requeue_target": "12345_3",
-            "requeue_ready_sha256": worker.file_sha256(ready_path),
+                "status": "scontrol_requeue_calling",
+                "requeue_target": "12345_3",
+                "requeue_ready_sha256": worker.file_sha256(ready_path),
                 "checkpoint_sha256": checkpoint_sha,
                 "checkpoint_file_identity": checkpoint_identity,
+                "scheduler_control_plane": _scheduler_observation(),
+                "scheduler_config_sha256": _scheduler_fallback()["sha256"],
+                "scheduler_config_size": _scheduler_fallback()["size"],
+                "scontrol_executable_sha256": "e" * 64,
+                "scontrol_show_command": [
+                    "/usr/local/bin/scontrol", "show", "job", "12345_3", "--oneliner",
+                ],
+                "scontrol_show_stdout_sha256": "f" * 64,
+                "scontrol_requeue_command": [
+                    "/usr/local/bin/scontrol", "requeue", "12345_3",
+                ],
             },
-    )
+        )
     worker._verify_previous_lineage(args, task, context)
     current_state["completed_updates"] = 1235
     with pytest.raises(worker.LifecycleError, match="completed_updates differs"):
@@ -851,6 +992,9 @@ def _submission(root: Path) -> tuple[Path, str]:
         "trainer_code_fingerprint": "a" * 64,
         "runtime_sha256": "b" * 64,
         "orchestration_interpreter": _interpreter_contract(),
+        "scheduler_control_plane_contract": worker.SCHEDULER_CONTROL_PLANE,
+        "scheduler_preclaim": _scheduler_preclaim(),
+        "scheduler_fallback_config": _scheduler_fallback(),
         **audits,
         "snapshot_inventory": inventory,
         "snapshot_inventory_sha256": worker.stable_hash(inventory),
@@ -1190,7 +1334,11 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         "resolved_config_contract": {"artifact_sha256": "3" * 64},
         "causal_parity_contract": {"artifact_sha256": "4" * 64},
     }
-    manifest = {"campaign_id": worker.CAMPAIGN_ID, **audits}
+    manifest = {
+        "campaign_id": worker.CAMPAIGN_ID,
+        "execution": {"scheduler_control_plane": worker.SCHEDULER_CONTROL_PLANE},
+        **audits,
+    }
     launches = [
         {
             "cell": {
@@ -1219,6 +1367,7 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         "full_output_fingerprint_before": {},
         "full_output_fingerprint_after": {},
     }
+    scheduler_preclaim = _scheduler_preclaim()
     contract = submit._submission_contract(
         manifest=manifest,
         protocol="e" * 64,
@@ -1231,6 +1380,8 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         compositions=[],
         snapshot_preflight=snapshot_preflight,
         git={},
+        scheduler_preclaim=scheduler_preclaim,
+        scheduler_fallback=_scheduler_fallback(),
     )
     assert set(contract) == worker.SUBMISSION_CONTRACT_FIELDS
     assert worker.SUBMISSION_CONTRACT_FIELDS == train_entry.SUBMISSION_CONTRACT_FIELDS
@@ -1278,17 +1429,239 @@ def test_batch_script_is_direct_no_stage_and_orders_calling_before_requeue() -> 
     assert "s" + "run" not in source
     assert 'exec "$PYTHON_EXECUTABLE" -I -S -B "$WORKER" run' in source
     assert source.count('"$PYTHON_EXECUTABLE" -I -S -B "$WORKER"') == 3
-    assert "SCONTROL_EXECUTABLE=/usr/local/bin/scontrol" in source
-    calling = source.index('"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" mark-requeue-calling')
-    requeue = source.index('"$SCONTROL_EXECUTABLE" requeue "$REQUEUE_TARGET"')
-    assert calling < requeue
+    assert '"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" requeue' in source
+    assert "scontrol" not in source.lower()
+    assert "SLURM_CONF" not in source
+    assert "SCHEDULER_ENV" not in source
     assert "if [[ -f \"$REQUEUE_CALLING\" && ! -L \"$REQUEUE_CALLING\" ]]" in source
     worker_source = (PACKAGE / "worker.py").read_text(encoding="utf-8")
+    authenticated = worker_source[
+        worker_source.index("def authenticated_requeue"):worker_source.index("def _common_parser")
+    ]
+    show = authenticated.index("shown = scheduler_runner")
+    calling = authenticated.index("seal_json(generation / REQUEUE_CALLING_NAME")
+    requeue = authenticated.index("requeued = scheduler_runner")
+    assert show < calling < requeue
     trainer_spawn = worker_source[
         worker_source.index("def _spawn_trainer"):worker_source.index("def _claim_fresh_run")
     ]
     assert '"-P",\n        "-S",\n        "-B"' in trainer_spawn
     assert '"-I"' not in trainer_spawn
+
+
+def test_authenticated_requeue_pins_preclaim_config_across_show_and_requeue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission = tmp_path / "submission"
+    task = worker.task_root_for(submission, 2)
+    generation = worker.generation_root_for(task, 1)
+    generation.mkdir(parents=True)
+    args = argparse.Namespace(
+        submission_root=submission,
+        submission_sha256="c" * 64,
+        cell_index=2,
+        restart_count=1,
+        array_job_id="7000",
+        array_task_id=2,
+        _bootstrap_contract={},
+        _bootstrap_snapshot_root=tmp_path / "snapshot",
+    )
+    args._bootstrap_snapshot_root.mkdir()
+    context = {
+        "launch": {"launch_sha256": "d" * 64},
+        "manifest": {
+            "execution": {
+                "scontrol": "/usr/local/bin/scontrol",
+                "scheduler_control_plane": worker.SCHEDULER_CONTROL_PLANE,
+            }
+        },
+        "submission_contract": {
+            "scheduler_preclaim": _scheduler_preclaim(),
+            "scheduler_fallback_config": _scheduler_fallback(),
+        },
+    }
+    common = {
+        "schema_version": 1,
+        "campaign_id": worker.CAMPAIGN_ID,
+        "submission_sha256": args.submission_sha256,
+        "launch_sha256": "d" * 64,
+        "cell_index": 2,
+        "restart_count": 1,
+        "array_job_id": "7000",
+        "array_task_id": 2,
+    }
+    checkpoint_identity = {
+        "device": 1,
+        "inode": 2,
+        "size": 3,
+        "mtime_ns": 4,
+        "ctime_ns": 5,
+    }
+    checkpoint = {
+        "kind": "train",
+        "completed_updates": 1000,
+        "phase": "train",
+        "pending_eval_step": None,
+        "checkpoint_sha256": "f" * 64,
+        "checkpoint_file_identity": checkpoint_identity,
+        "progress": None,
+    }
+    _write_json(
+        generation / worker.REQUEUE_READY_NAME,
+        {
+            **common,
+            "status": "requeue_ready",
+            "trainer_exit_code": 75,
+            "checkpoint_kind": "train",
+            "completed_updates": 1000,
+            "phase": "train",
+            "pending_eval_step": None,
+            "checkpoint_sha256": "f" * 64,
+            "checkpoint_file_identity": checkpoint_identity,
+            "final_eval_progress_sha256": None,
+        },
+    )
+    monkeypatch.setattr(worker, "load_launch_context", lambda **_kwargs: context)
+    monkeypatch.setattr(worker, "resolve_checkpoint", lambda _context: checkpoint)
+    monkeypatch.setattr(
+        worker,
+        "scheduler_control_plane_observation",
+        lambda _context: pytest.fail("requeue reopened mutable canonical scheduler state"),
+    )
+    calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+    config_descriptors: list[int] = []
+    executable_descriptors: list[int] = []
+    canonical_drifted = False
+
+    def runner(command, _cwd, environment, inherited_fds):
+        nonlocal canonical_drifted
+        values = list(command)
+        descriptors = tuple(inherited_fds)
+        calls.append((values, dict(environment), descriptors))
+        assert set(environment) == {"PATH", "LANG", "LC_ALL", "SLURM_CONF"}
+        assert environment["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(descriptors) == 2
+        config_fd, executable_fd = descriptors
+        config_descriptors.append(config_fd)
+        executable_descriptors.append(executable_fd)
+        assert environment["SLURM_CONF"] == f"/proc/self/fd/{config_fd}"
+        assert values[0] == f"/proc/self/fd/{executable_fd}"
+        assert os.pread(config_fd, len(_scheduler_config_bytes()), 0) == _scheduler_config_bytes()
+        if values[1:3] == ["show", "job"]:
+            canonical_drifted = True
+            return subprocess.CompletedProcess(
+                values,
+                0,
+                stdout=(
+                    "JobId=7000_2 ArrayJobId=7000 ArrayTaskId=2 "
+                    "JobState=RUNNING\n"
+                ),
+                stderr="",
+            )
+        assert canonical_drifted
+        assert values[1:] == ["requeue", "7000_2"]
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    assert worker.authenticated_requeue(args, runner) == 0
+    assert len(calls) == 2
+    assert config_descriptors[0] == config_descriptors[1]
+    assert executable_descriptors[0] == executable_descriptors[1]
+    calling = json.loads(
+        (generation / worker.REQUEUE_CALLING_NAME).read_text(encoding="utf-8")
+    )
+    assert set(calling) == worker.REQUEUE_CALLING_FIELDS
+    assert calling["scheduler_config_sha256"] == _scheduler_fallback()["sha256"]
+    assert calling["scheduler_config_size"] == _scheduler_fallback()["size"]
+    assert calling["scontrol_show_command"] == [
+        "/usr/local/bin/scontrol", "show", "job", "7000_2", "--oneliner",
+    ]
+    assert calling["scontrol_requeue_command"] == [
+        "/usr/local/bin/scontrol", "requeue", "7000_2",
+    ]
+    for descriptor in {config_descriptors[0], executable_descriptors[0]}:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_authenticated_requeue_rejects_fallback_not_bound_to_preclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission = tmp_path / "submission"
+    task = worker.task_root_for(submission, 2)
+    generation = worker.generation_root_for(task, 1)
+    generation.mkdir(parents=True)
+    args = argparse.Namespace(
+        submission_root=submission,
+        submission_sha256="c" * 64,
+        cell_index=2,
+        restart_count=1,
+        array_job_id="7000",
+        array_task_id=2,
+        _bootstrap_contract={},
+        _bootstrap_snapshot_root=tmp_path / "snapshot",
+    )
+    args._bootstrap_snapshot_root.mkdir()
+    preclaim = _scheduler_preclaim()
+    preclaim["scheduler_control_plane"]["cli_filter_policy"]["tree_sha256"] = "9" * 64
+    context = {
+        "launch": {"launch_sha256": "d" * 64},
+        "manifest": {"execution": {"scontrol": "/usr/local/bin/scontrol"}},
+        "submission_contract": {
+            "scheduler_preclaim": preclaim,
+            "scheduler_fallback_config": _scheduler_fallback(),
+        },
+    }
+    checkpoint_identity = {
+        "device": 1, "inode": 2, "size": 3, "mtime_ns": 4, "ctime_ns": 5,
+    }
+    checkpoint = {
+        "kind": "train",
+        "completed_updates": 1000,
+        "phase": "train",
+        "pending_eval_step": None,
+        "checkpoint_sha256": "f" * 64,
+        "checkpoint_file_identity": checkpoint_identity,
+        "progress": None,
+    }
+    _write_json(
+        generation / worker.REQUEUE_READY_NAME,
+        {
+            "schema_version": 1,
+            "campaign_id": worker.CAMPAIGN_ID,
+            "submission_sha256": args.submission_sha256,
+            "launch_sha256": "d" * 64,
+            "cell_index": 2,
+            "restart_count": 1,
+            "array_job_id": "7000",
+            "array_task_id": 2,
+            "status": "requeue_ready",
+            "trainer_exit_code": 75,
+            "checkpoint_kind": "train",
+            "completed_updates": 1000,
+            "phase": "train",
+            "pending_eval_step": None,
+            "checkpoint_sha256": "f" * 64,
+            "checkpoint_file_identity": checkpoint_identity,
+            "final_eval_progress_sha256": None,
+        },
+    )
+    monkeypatch.setattr(worker, "load_launch_context", lambda **_kwargs: context)
+    monkeypatch.setattr(worker, "resolve_checkpoint", lambda _context: checkpoint)
+    with pytest.raises(worker.LifecycleError, match="differs from the exact preclaim"):
+        worker.authenticated_requeue(
+            args, lambda *_args: pytest.fail("unbound scheduler config reached client")
+        )
+    assert not (generation / worker.REQUEUE_CALLING_NAME).exists()
+
+
+@pytest.mark.parametrize("field", ["JobId", "ArrayJobId", "ArrayTaskId", "JobState"])
+def test_scontrol_show_rejects_duplicate_identity_or_state_field(field: str) -> None:
+    line = (
+        "JobId=7000_2 ArrayJobId=7000 ArrayTaskId=2 JobState=RUNNING "
+        f"{field}=forged\n"
+    )
+    with pytest.raises(worker.LifecycleError, match=field):
+        worker._scontrol_field(line, field)
 
 
 def test_train_entry_forbidden_environment_is_fail_closed() -> None:

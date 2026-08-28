@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch3",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
   "classification": "bounded_prospective_matched_causal_repair_pilot",
   "status": "sealed_launch_ready_unsubmitted",
   "formal_validation": false,
   "claim_policy": "This 20-cell 25k pilot is engineering evidence only; it is neither a formal result nor support for a 1M claim.",
   "package_policy": {
     "launch_surface": true,
-    "allowed_actions": ["verify_package", "render_matrix", "evaluate_supplied_report_bundle", "rerun_outcome_blind_weight_audit", "static_launch_test", "dry_run", "explicit_submit"],
+    "allowed_actions": ["verify_package", "render_matrix", "evaluate_supplied_report_bundle", "rerun_outcome_blind_weight_audit", "scheduler_control_plane_test", "static_launch_test", "dry_run", "explicit_submit"],
     "forbidden_actions": ["implicit_submit", "import_checkpoint", "import_optimizer", "select_at_midpoint", "drop_cell", "write_exp20_exp21_exp22", "consume_exp20_outcomes"],
-    "submission_policy": "No command submits unless submit.py is invoked with --submit under the pinned interpreter; --test-only and default dry-run are read-only and create neither snapshot nor job."
+    "submission_policy": "No command submits unless submit.py is invoked with --submit under the pinned interpreter; --scheduler-test, --test-only, and default dry-run are read-only and create neither snapshot nor job."
   },
   "superseded_launches": [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
@@ -48,7 +48,9 @@
     "results_consumed": false,
     "checkpoints_consumed": false,
     "reuse_allowed": false,
-    "resume_allowed": false
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false
   }, {
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch2",
     "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch2",
@@ -87,7 +89,88 @@
     "results_consumed": false,
     "checkpoints_consumed": false,
     "reuse_allowed": false,
-    "resume_allowed": false
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false
+  }, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3",
+    "submission_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3/state/submission",
+    "snapshot_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3/state/submission/source-snapshot/repo",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "status": "aborted_after_contract_before_scheduler_submission",
+    "source_commit": "ca979a2b0329d6775793cd8ce51d57a9200e6b8a",
+    "source_commit_claimed_by_contract": true,
+    "source_commit_claimed_by_journal": false,
+    "source_commit_evidence": "contract_clean_head_origin_and_independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": "The sealed contract records clean HEAD and origin/main at commit ca979a2b0329d6775793cd8ce51d57a9200e6b8a, and all 137 snapshot files were independently byte-matched to that commit. The source order at that commit and the preserved abort journals prove failure in the first sanitized train-name squeue reconciliation before either sbatch call. Current exact-name squeue and sacct emptiness corroborates absence but is not used alone as a historical proof.",
+    "package_protocol_sha256": "6178ed54273d13c88fce750414131c98d002b394231618f11f6d8d6a1a3fb49a",
+    "manifest_canonical_sha256": "7259a76924ac6f4566541a00f74923c67151619b36411048dd82ee20747a8d09",
+    "manifest_raw_sha256": "92a9e17b78075805503907e4d9b71b732b54f5127da981ca17524feba650f74a",
+    "snapshot": {
+      "inventory_sha256": "7e237d31f9d49e3b55d0e0598c299b6064ab16b9caa77b62329c9bb8a2839eae",
+      "file_count": 137,
+      "independently_matched_files": 137,
+      "all_files_match": true
+    },
+    "preserved_tree": {
+      "regular_file_count": 163,
+      "symlink_count": 0,
+      "snapshot_file_count": 137,
+      "launch_file_count": 20,
+      "contract_file_count": 1,
+      "journal_file_count": 5
+    },
+    "claim_token": "2741418c7e528a0b64b8115cafa46cfac391abd53312cf29b0ffc8a4e1afca4d",
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "contract_sha256": "0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2",
+    "submission_sha256": "0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2",
+    "journal_sha256": {
+      "0000_CLAIMED.json": "25d607cef5aaf49e932e86a56c2272d37be6936010f089f8e7230bb44166be28",
+      "0001_SNAPSHOT_SEALED.json": "d4acf9fb3fa6af98adedf45abd0269d1e491abd48b3cb992509b7641ad05b4c6",
+      "0002_CONTRACT_SEALED.json": "3936a8717d096a93cf7d0eb3dea5293e32c14cdd0b986dd7a738f9501a92a044",
+      "9999_ABORTED.json": "915dd5a3869a6784f3eb9d8e0d564a16b96fb17689c3d31f5a2e21431365199a",
+      "9998_OUTER_ABORTED.json": "e65e9b39d268c2497e98e1d66b0cadd7f80b0f53c98a243057cc03ca399b47b0"
+    },
+    "failure_phase": "first_sanitized_squeue_before_any_sbatch",
+    "no_job_proof": {
+      "scheduler_job_names": {
+        "train": "exp23-launch3-0cd594c8a49499b5-train",
+        "report": "exp23-launch3-0cd594c8a49499b5-report"
+      },
+      "source_order_at_commit": {
+        "contract_sealed_first": true,
+        "train_absence_check_line": 3112,
+        "report_absence_check_line": 3113,
+        "first_sbatch_call_line": 3114,
+        "recorded_failure": "first_train_absence_check"
+      },
+      "preserved_journal_known_job_ids": [],
+      "preserved_journal_job_ids_by_role": {"train": [], "report": []},
+      "current_scheduler_observation": {
+        "environment": {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"},
+        "history_start_utc": "2026-08-01",
+        "squeue_command": ["/usr/local/bin/squeue", "-h", "-n", "exp23-launch3-0cd594c8a49499b5-train,exp23-launch3-0cd594c8a49499b5-report", "-o", "%i|%j|%T|%k"],
+        "squeue_matching_rows": 0,
+        "sacct_command": ["/usr/local/bin/sacct", "-X", "-n", "-S", "2026-08-01", "--name", "exp23-launch3-0cd594c8a49499b5-train,exp23-launch3-0cd594c8a49499b5-report", "-o", "JobIDRaw,JobName,State,Comment"],
+        "sacct_matching_rows": 0
+      }
+    },
+    "actual_sbatch_calls": 0,
+    "known_job_ids": [],
+    "job_ids_by_role": {"train": [], "report": []},
+    "submission_contract_committed": true,
+    "submission_receipt_committed": false,
+    "scientific_run_started": false,
+    "checkpoint_created": false,
+    "wandb_run_created": false,
+    "optimizer_updates": 0,
+    "results_consumed": false,
+    "checkpoints_consumed": false,
+    "reuse_allowed": false,
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false
   }],
   "method": {
     "arm": "treewm",
@@ -105,7 +188,7 @@
     "seeds": [110, 111],
     "expected_cells": 20,
     "index_mapping": "index=((setting_index*2)+arm_index)*2+seed_index",
-    "fresh_start_policy": "Every launch3 cell starts from scratch in the fresh launch3 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from either superseded pre-contract abort may be imported, reused, or resumed.",
+    "fresh_start_policy": "Every launch4 cell starts from scratch in the fresh launch4 namespace; no checkpoint, result, optimizer, model initialization, identity, or state from any superseded abort may be imported, reused, or resumed.",
     "common_random_numbers": "Within each setting and seed, GS and GSEP use identical initialization seed, published-union data identity/order, validation sample seed, evaluation seed bank, and evaluation profile.",
     "midpoint_policy": "No selection, promotion, dropping, early-stopping, or arm-dependent decision occurs at 5k or 12.5k; all cells continue to 25k.",
     "analysis_boundaries": [5000, 25000],
@@ -158,7 +241,7 @@
   "resolved_config_contract": {
     "lock": "resolved_config.lock.json",
     "audit_source": "resolved_config_audit.py",
-    "artifact_sha256": "01db5c91effff86d6a6c7a63b11cfaf689e7a46de86cb35012e69e0b5485dc16",
+    "artifact_sha256": "f13cfad8e5edf0e5821fe4d6b76c662ee3dc6ee450d778dbd24af1cf8273059e",
     "source_sha256": "8d13ebc60f3ba574b8a5a800da915864b36f540f35a22aafeba89be6a92f4150",
     "direct_entrypoint": "scripts/train.py",
     "cell_count": 20,
@@ -167,11 +250,11 @@
   "causal_parity_contract": {
     "lock": "causal_parity.lock.json",
     "audit_source": "causal_parity_audit.py",
-    "artifact_sha256": "f62ba7429ea6a6c0a5869b35369a20d0f0084010d29aa2a47c4abf3e698f117a",
+    "artifact_sha256": "d50fb113304989503605717e0d1e6e25e1bd95a76e94bef9862906c79475b03c",
     "source_sha256": "7ed6e6f7f9f68480b42e17f6af7b276c7f4151703e2689971438b011b74ace40",
-    "audit_manifest_input_sha256": "8bc7feb852b97da0892624b7cffc3d0e5c0fc79e291a4dcf978a20b5c26e36f4",
+    "audit_manifest_input_sha256": "fec119e5662222399533eee8821cf07997ca9d0267625245ac38b133289b4a54",
     "runtime_sha256": "77da91d49a1db99850fbf0632dc02ec58a3209f1a87949d6f5640ae6bf505c6b",
-    "stdout_sha256": "8cf4c7ebfc5831c6548e94b783954987a69e0a02c55c7134362f82646ab53be8",
+    "stdout_sha256": "cb52751dd34dcc633b62a4452d240bb636a989a52e0dcef4a78ee2df5ade712a",
     "stdout_bytes": 91081,
     "clean_and_adversarial_thread_replays_byte_identical": true,
     "outcome_blind": true,
@@ -352,14 +435,14 @@
     "actual_submit_performed": false
   },
   "paths": {
-    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch3",
-    "transaction_lock": "outputs/.exp23-6e55bb3083712144.transaction.lock",
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "prospective_run_root": "outputs/treewm-executable-prefix-repair-pilot-v1-launch4",
+    "transaction_lock": "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch4",
     "python": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python",
     "data_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/ogbench-rql-50task",
     "raw_cache_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-full-cache-v1",
     "compatible_contract_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/datasets/treewm-50task-formal-v2-contracts-v1",
-    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+    "run_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
   },
   "compatible_v2_recipe_input": {
     "campaign_id": "treewm-50task-1m-v2",
@@ -383,13 +466,24 @@
     "control_python_flags": ["-I", "-S", "-B"],
     "trainer_python_flags": ["-P", "-S", "-B"],
     "sealed_trainer_environment": {"MUJOCO_GL": "egl", "XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+    "scheduler_control_plane": {
+      "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+      "cluster_name": "cs-oci-ord",
+      "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+      "slurmctld_port": 6817,
+      "auth_type": "auth/munge",
+      "gres_types": ["gpu"],
+      "cli_filter_plugins": ["lua"],
+      "job_submit_plugins": ["lua"],
+      "trust_model": "root-admin mutable scheduler control plane; config and Lua policy bytes are observation-bound from preclaim through submission; root-owned Slurm clients, plugin binaries, and shared libraries are trusted mutable external runtime"
+    },
     "sbatch": "/usr/local/bin/sbatch",
     "scancel": "/usr/local/bin/scancel",
     "scontrol": "/usr/local/bin/scontrol"
   },
   "logging": {
-    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch3",
-    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch4",
+    "wandb_group": "treewm-executable-prefix-repair-pilot-v1-launch4",
     "wandb_mode": "online"
   },
   "settings": [

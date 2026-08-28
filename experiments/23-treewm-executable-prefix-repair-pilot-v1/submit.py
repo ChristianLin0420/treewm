@@ -9,6 +9,7 @@ snapshot, or a scheduler process.
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import contextlib
 import fcntl
@@ -32,7 +33,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch4"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -443,6 +444,21 @@ class SchedulerSubmissionError(SubmissionError):
             role: tuple(values)
             for role, values in (job_ids_by_role or {}).items()
         }
+
+
+class SchedulerBoundaryError(SubmissionError):
+    """A scheduler client returned, but its authenticated boundary did not close."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        completed: subprocess.CompletedProcess[str] | None,
+        observation: Mapping[str, Any] | None,
+    ) -> None:
+        super().__init__(message)
+        self.completed = completed
+        self.observation = None if observation is None else dict(observation)
 
 
 class CommitRecoveryRequired(SchedulerSubmissionError):
@@ -1559,7 +1575,7 @@ def _ephemeral_child_environment(
 
     temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch3-{os.getuid()}-", dir=temporary_parent
+        prefix=f"treewm-exp23-launch4-{os.getuid()}-", dir=temporary_parent
     ) as raw_root:
         root = Path(raw_root)
         root_info = root.lstat()
@@ -2392,11 +2408,524 @@ def append_journal(submission_root: Path, ordinal: int, name: str, value: Mappin
     return path
 
 
-SchedulerRunner = Callable[[Sequence[str], Path, Mapping[str, str]], subprocess.CompletedProcess[str]]
+SchedulerRunner = Callable[
+    [Sequence[str], Path, Mapping[str, str], Sequence[int]],
+    subprocess.CompletedProcess[str],
+]
+
+SCHEDULER_CONTROL_PLANE_FIELDS = frozenset(
+    {
+        "slurm_conf",
+        "cluster_name",
+        "slurmctld_hosts",
+        "slurmctld_port",
+        "auth_type",
+        "gres_types",
+        "cli_filter_plugins",
+        "job_submit_plugins",
+        "trust_model",
+    }
+)
+SCHEDULER_TRUST_MODEL = (
+    "root-admin mutable scheduler control plane; config and Lua policy bytes are "
+    "observation-bound from preclaim through submission; root-owned Slurm clients, "
+    "plugin binaries, and shared libraries are trusted mutable external runtime"
+)
+SCHEDULER_POLICY_FILES = (
+    "cli_filter.lua",
+    "cli_filter_config.lua",
+    "cli_filter_config_defaults.lua",
+)
+SCHEDULER_POLICY_DIRECTORY = "cli_filters"
+SCHEDULER_REQUIRED_POLICY_MODULES = frozenset(
+    {
+        "util.lua",
+        "cli_filter_checks_nvl72.lua",
+        "cli_filter_checks_qos.lua",
+        "cli_filter_checks_stale_data.lua",
+    }
+)
+REPORT_DEPENDENCY_TEST_REQUIREMENT = {
+    "phase": "after_train_reconciliation_before_report_submission",
+    "dependency": "afterok:<accepted_train_array_job_id>",
+    "kill_on_invalid_dep": "yes",
+    "required": True,
+}
+
+
+def _external_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _root_owned_directory_chain(
+    path: Path, label: str
+) -> tuple[list[int], list[os.stat_result]]:
+    """Pin a normalized absolute root-owned path without following any link."""
+
+    lexical = path.absolute()
+    require(
+        path.is_absolute()
+        and lexical == path
+        and all(part not in ("", ".", "..") for part in path.parts[1:]),
+        f"{label} is not an exact normalized absolute path",
+    )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptors: list[int] = []
+    identities: list[os.stat_result] = []
+    try:
+        descriptor = os.open(path.anchor, flags)
+        descriptors.append(descriptor)
+        root_info = os.fstat(descriptor)
+        require(
+            stat.S_ISDIR(root_info.st_mode)
+            and root_info.st_uid == 0
+            and stat.S_IMODE(root_info.st_mode) & 0o022 == 0,
+            f"{label} filesystem root is not root-owned and non-writable",
+        )
+        identities.append(root_info)
+        for part in path.parts[1:]:
+            listed = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
+            require(stat.S_ISDIR(listed.st_mode), f"{label} component is not a directory: {part}")
+            child = os.open(part, flags, dir_fd=descriptor)
+            descriptors.append(child)
+            opened = os.fstat(child)
+            require(
+                _external_stat_identity(opened) == _external_stat_identity(listed),
+                f"{label} component raced: {part}",
+            )
+            require(
+                opened.st_uid == 0
+                and stat.S_IMODE(opened.st_mode) & 0o022 == 0,
+                f"{label} component is not root-owned and non-writable: {part}",
+            )
+            identities.append(opened)
+            descriptor = child
+        return descriptors, identities
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise SubmissionError(f"{label} cannot be opened without symlinks: {exc}") from exc
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _root_owned_regular_observation(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
+    """Read one exact root-owned 0644 file and rebind its complete path."""
+
+    require(path.name not in ("", ".", ".."), f"{label} leaf is unsafe")
+    descriptors, directory_infos = _root_owned_directory_chain(path.parent, f"{label} parent")
+    file_descriptor: int | None = None
+    rebound_descriptors: list[int] = []
+    try:
+        parent_fd = descriptors[-1]
+        listed = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        file_descriptor = os.open(
+            path.name,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+        opened = os.fstat(file_descriptor)
+        require(
+            _external_stat_identity(opened) == _external_stat_identity(listed),
+            f"{label} raced before open",
+        )
+        require(
+            stat.S_ISREG(opened.st_mode)
+            and opened.st_uid == 0
+            and opened.st_gid == 0
+            and opened.st_nlink == 1
+            and stat.S_IMODE(opened.st_mode) == 0o644,
+            f"{label} must be root:root regular mode 0644 with one link",
+        )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        total = 0
+        while block := os.read(file_descriptor, 1024 * 1024):
+            total += len(block)
+            require(total <= 16 * 1024 * 1024, f"{label} exceeds the 16 MiB bound")
+            digest.update(block)
+            chunks.append(block)
+        after = os.fstat(file_descriptor)
+        named_after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        require(
+            _external_stat_identity(after) == _external_stat_identity(opened)
+            and _external_stat_identity(named_after) == _external_stat_identity(opened),
+            f"{label} changed while reading",
+        )
+        rebound_descriptors, rebound_infos = _root_owned_directory_chain(
+            path.parent, f"{label} parent revalidation"
+        )
+        require(
+            [_external_stat_identity(value) for value in rebound_infos]
+            == [_external_stat_identity(value) for value in directory_infos],
+            f"{label} parent path changed while reading",
+        )
+        rebound_named = os.stat(
+            path.name, dir_fd=rebound_descriptors[-1], follow_symlinks=False
+        )
+        require(
+            _external_stat_identity(rebound_named) == _external_stat_identity(opened),
+            f"{label} lexical path changed while reading",
+        )
+        payload = b"".join(chunks)
+        return payload, {
+            "path": str(path),
+            "sha256": digest.hexdigest(),
+            "identity": {
+                "device": opened.st_dev,
+                "inode": opened.st_ino,
+                "mode": stat.S_IMODE(opened.st_mode),
+                "uid": opened.st_uid,
+                "gid": opened.st_gid,
+                "nlink": opened.st_nlink,
+                "size": opened.st_size,
+                "mtime_ns": opened.st_mtime_ns,
+                "ctime_ns": opened.st_ctime_ns,
+            },
+        }
+    except OSError as exc:
+        raise SubmissionError(f"{label} cannot be authenticated: {exc}") from exc
+    finally:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        for descriptor in reversed(rebound_descriptors):
+            os.close(descriptor)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _scheduler_contract(value: object) -> dict[str, Any]:
+    require(isinstance(value, Mapping), "scheduler control-plane contract is absent")
+    contract = dict(value)
+    require(
+        set(contract) == SCHEDULER_CONTROL_PLANE_FIELDS,
+        "scheduler control-plane fields differ",
+    )
+    require(
+        contract
+        == {
+            "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+            "cluster_name": "cs-oci-ord",
+            "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+            "slurmctld_port": 6817,
+            "auth_type": "auth/munge",
+            "gres_types": ["gpu"],
+            "cli_filter_plugins": ["lua"],
+            "job_submit_plugins": ["lua"],
+            "trust_model": SCHEDULER_TRUST_MODEL,
+        },
+        "scheduler control-plane contract differs",
+    )
+    return contract
+
+
+def _parse_slurm_config(payload: bytes, contract: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SubmissionError(f"canonical Slurm config is not UTF-8: {exc}") from exc
+    require("\x00" not in text, "canonical Slurm config contains NUL")
+    directives: dict[str, list[str]] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        require(
+            re.match(r"(?i)^include(?:\s|=)", line) is None,
+            "canonical Slurm config may not include another file",
+        )
+        require("=" in line, "canonical Slurm config contains a malformed directive")
+        raw_key, raw_value = line.split("=", 1)
+        key = raw_key.strip().lower()
+        value = raw_value.strip()
+        require(key and value, "canonical Slurm config contains an empty directive")
+        directives.setdefault(key, []).append(value)
+
+    expected = _scheduler_contract(contract)
+    require(
+        directives.get("clustername") == [expected["cluster_name"]],
+        "canonical Slurm ClusterName differs",
+    )
+    require(
+        directives.get("slurmctldhost") == expected["slurmctld_hosts"],
+        "canonical Slurm controller hosts differ",
+    )
+    ports = directives.get("slurmctldport", [str(expected["slurmctld_port"])])
+    require(ports == [str(expected["slurmctld_port"])], "canonical Slurm controller port differs")
+    require(
+        directives.get("authtype") == [expected["auth_type"]],
+        "canonical Slurm AuthType differs",
+    )
+    require(
+        directives.get("grestypes") == [",".join(expected["gres_types"])],
+        "canonical Slurm GresTypes differs",
+    )
+    require(
+        directives.get("clifilterplugins")
+        == [",".join(expected["cli_filter_plugins"])],
+        "canonical Slurm CliFilterPlugins differs",
+    )
+    require(
+        directives.get("jobsubmitplugins")
+        == [",".join(expected["job_submit_plugins"])],
+        "canonical Slurm JobSubmitPlugins differs",
+    )
+    require(
+        directives.get("communicationparameters") == ["NoAddrCache"],
+        "canonical Slurm communication parameters differ",
+    )
+    return {
+        "cluster_name": expected["cluster_name"],
+        "slurmctld_hosts": list(expected["slurmctld_hosts"]),
+        "slurmctld_port": expected["slurmctld_port"],
+        "auth_type": expected["auth_type"],
+        "gres_types": list(expected["gres_types"]),
+        "cli_filter_plugins": list(expected["cli_filter_plugins"]),
+        "job_submit_plugins": list(expected["job_submit_plugins"]),
+    }
+
+
+def _scheduler_policy_observation(config_path: Path) -> dict[str, Any]:
+    policy_root = config_path.parent
+    names = [*SCHEDULER_POLICY_FILES]
+    policy_directory = policy_root / SCHEDULER_POLICY_DIRECTORY
+    descriptors, directory_infos = _root_owned_directory_chain(
+        policy_directory, "Slurm CLI-filter policy directory"
+    )
+    try:
+        with os.scandir(descriptors[-1]) as iterator:
+            entries = []
+            for entry in iterator:
+                entries.append((entry.name, entry.stat(follow_symlinks=False)))
+        require(
+            len({name for name, _info in entries}) == len(entries),
+            "Slurm CLI-filter policy directory has duplicate entries",
+        )
+        module_names = sorted(name for name, _info in entries)
+        require(
+            SCHEDULER_REQUIRED_POLICY_MODULES.issubset(module_names),
+            "Slurm CLI-filter policy modules are incomplete",
+        )
+        for name, info in entries:
+            require(
+                name not in ("", ".", "..")
+                and "/" not in name
+                and stat.S_ISREG(info.st_mode),
+                f"Slurm CLI-filter policy entry is unsafe: {name}",
+            )
+    except OSError as exc:
+        raise SubmissionError(f"Slurm CLI-filter policy cannot be enumerated: {exc}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+    files: dict[str, Any] = {}
+    for name in [*names, *(f"{SCHEDULER_POLICY_DIRECTORY}/{name}" for name in module_names)]:
+        _payload, observation = _root_owned_regular_observation(
+            policy_root / name, f"Slurm CLI-filter policy {name}"
+        )
+        files[name] = observation
+    rebound_descriptors, rebound_infos = _root_owned_directory_chain(
+        policy_directory, "Slurm CLI-filter policy directory revalidation"
+    )
+    try:
+        require(
+            [_external_stat_identity(value) for value in rebound_infos]
+            == [_external_stat_identity(value) for value in directory_infos],
+            "Slurm CLI-filter policy directory changed",
+        )
+        with os.scandir(rebound_descriptors[-1]) as iterator:
+            rebound_names = sorted(entry.name for entry in iterator)
+        require(rebound_names == module_names, "Slurm CLI-filter policy membership changed")
+    finally:
+        for descriptor in reversed(rebound_descriptors):
+            os.close(descriptor)
+    return {"files": files, "tree_sha256": stable_hash(files)}
+
+
+def _scheduler_control_plane_capture(
+    contract_value: object,
+) -> tuple[bytes, dict[str, Any]]:
+    contract = _scheduler_contract(contract_value)
+    config_path = Path(str(contract["slurm_conf"]))
+    payload_before, config_before = _root_owned_regular_observation(
+        config_path, "canonical Slurm config"
+    )
+    critical = _parse_slurm_config(payload_before, contract)
+    policy_before = _scheduler_policy_observation(config_path)
+    payload_after, config_after = _root_owned_regular_observation(
+        config_path, "canonical Slurm config revalidation"
+    )
+    policy_after = _scheduler_policy_observation(config_path)
+    require(
+        payload_after == payload_before
+        and config_after == config_before
+        and policy_after == policy_before,
+        "scheduler control plane changed while authenticating",
+    )
+    return payload_before, {
+        "schema_version": 1,
+        "trust_model": SCHEDULER_TRUST_MODEL,
+        "config": config_before,
+        "critical": critical,
+        "cli_filter_policy": policy_before,
+    }
+
+
+def _scheduler_control_plane_observation(contract_value: object) -> dict[str, Any]:
+    _payload, observation = _scheduler_control_plane_capture(contract_value)
+    return observation
+
+
+def _scheduler_fallback_config(contract_value: object) -> dict[str, Any]:
+    """Capture the authenticated original cluster config for accepted-job control.
+
+    The fallback never authorizes sbatch.  Its only consumers are exact-name squeue,
+    exact-ID scancel, and the sealed worker's exact array-element requeue.  Keeping
+    the preclaim bytes in the sealed submission contract prevents later critical
+    controller/config drift from redirecting or stranding an accepted job ID.
+    """
+
+    payload, observation = _scheduler_control_plane_capture(contract_value)
+    return {
+        "schema_version": 1,
+        "purpose": (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        ),
+        "encoding": "base64",
+        "payload_base64": base64.b64encode(payload).decode("ascii"),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+        "source_control_plane": observation,
+    }
+
+
+def _validated_scheduler_fallback(
+    value: object,
+    contract_value: object,
+    expected_source_observation: object | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    require(isinstance(value, Mapping), "scheduler fallback config is absent")
+    result = dict(value)
+    require(
+        set(result)
+        == {
+            "schema_version",
+            "purpose",
+            "encoding",
+            "payload_base64",
+            "sha256",
+            "size",
+            "source_control_plane",
+        },
+        "scheduler fallback config fields differ",
+    )
+    require(
+        result["schema_version"] == 1
+        and result["purpose"]
+        == (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        )
+        and result["encoding"] == "base64"
+        and isinstance(result["payload_base64"], str)
+        and SHA256.fullmatch(str(result["sha256"])) is not None
+        and isinstance(result["size"], int)
+        and 0 < result["size"] <= 16 * 1024 * 1024,
+        "scheduler fallback config metadata differs",
+    )
+    try:
+        payload = base64.b64decode(result["payload_base64"], validate=True)
+    except (ValueError, UnicodeError) as exc:
+        raise SubmissionError(f"scheduler fallback config encoding differs: {exc}") from exc
+    require(
+        len(payload) == result["size"]
+        and hashlib.sha256(payload).hexdigest() == result["sha256"],
+        "scheduler fallback config bytes differ",
+    )
+    critical = _parse_slurm_config(payload, _scheduler_contract(contract_value))
+    source = result["source_control_plane"]
+    require(
+        isinstance(source, Mapping)
+        and source.get("schema_version") == 1
+        and source.get("trust_model") == SCHEDULER_TRUST_MODEL
+        and source.get("critical") == critical
+        and isinstance(source.get("config"), Mapping)
+        and source["config"].get("sha256") == result["sha256"]
+        and isinstance(source["config"].get("identity"), Mapping)
+        and source["config"]["identity"].get("size") == result["size"],
+        "scheduler fallback source observation differs",
+    )
+    if expected_source_observation is not None:
+        require(
+            source == expected_source_observation,
+            "scheduler control plane changed after the exact preclaim",
+        )
+    return result, payload
+
+
+@contextlib.contextmanager
+def _scheduler_fallback_descriptor(payload: bytes):
+    """Expose immutable authenticated config bytes to one inherited Slurm client."""
+
+    require(hasattr(os, "memfd_create"), "scheduler fallback requires memfd_create")
+    descriptor = os.memfd_create(
+        "treewm-exp23-slurm-conf",
+        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            require(written > 0, "scheduler fallback config write was short")
+            view = view[written:]
+        os.fchmod(descriptor, 0o400)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        require(seals != 0, "scheduler fallback seals are unavailable")
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        require(
+            fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals == seals,
+            "scheduler fallback config is not immutable",
+        )
+        yield descriptor
+    except OSError as exc:
+        raise SubmissionError(f"scheduler fallback descriptor failed: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def _default_scheduler_runner(
-    command: Sequence[str], cwd: Path, environment: Mapping[str, str]
+    command: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str],
+    inherited_fds: Sequence[int] = (),
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
@@ -2406,16 +2935,110 @@ def _default_scheduler_runner(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        pass_fds=tuple(inherited_fds),
     )
 
 
-def _scheduler_environment() -> dict[str, str]:
-    # Absolute Slurm clients use their compiled control-plane configuration.  Never
-    # forward SLURM_CONF, library injection, Python, TreeWM, rank, or user payload.
+def _scheduler_environment(control_plane: object) -> dict[str, str]:
+    contract = _scheduler_contract(control_plane)
+    # Never forward library injection, Python, TreeWM, rank, or user payload.  The
+    # sole control-plane input is the exact manifest-bound root-admin configuration.
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C",
         "LC_ALL": "C",
+        "SLURM_CONF": str(contract["slurm_conf"]),
+    }
+
+
+def _scheduler_call(
+    command: Sequence[str],
+    cwd: Path,
+    control_plane: object,
+    runner: SchedulerRunner,
+    expected_observation: Mapping[str, Any] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Run one scheduler client while its root-admin inputs remain exact."""
+
+    try:
+        before = _scheduler_control_plane_observation(control_plane)
+    except BaseException as exc:
+        raise SchedulerBoundaryError(
+            f"scheduler control plane failed before client call: {exc}",
+            completed=None,
+            observation=None,
+        ) from exc
+    if expected_observation is not None and before != expected_observation:
+        raise SchedulerBoundaryError(
+            "scheduler control plane differs from the exact preclaim authorization",
+            completed=None,
+            observation=before,
+        )
+    completed: subprocess.CompletedProcess[str] | None = None
+    try:
+        completed = runner(
+            command,
+            cwd,
+            _scheduler_environment(control_plane),
+            (),
+        )
+    except BaseException as exc:
+        try:
+            after = _scheduler_control_plane_observation(control_plane)
+            require(after == before, "scheduler control plane changed during failed client call")
+        except BaseException as boundary_exc:
+            raise SchedulerBoundaryError(
+                f"scheduler client and post-call authentication both failed: {exc}; {boundary_exc}",
+                completed=None,
+                observation=before,
+            ) from exc
+        raise
+    try:
+        after = _scheduler_control_plane_observation(control_plane)
+    except BaseException as exc:
+        raise SchedulerBoundaryError(
+            f"scheduler control plane failed after client call: {exc}",
+            completed=completed,
+            observation=before,
+        ) from exc
+    if after != before:
+        raise SchedulerBoundaryError(
+            "scheduler control plane changed during client call",
+            completed=completed,
+            observation=before,
+        )
+    assert completed is not None
+    return completed, before
+
+
+def _fallback_scheduler_call(
+    command: Sequence[str],
+    cwd: Path,
+    control_plane: object,
+    fallback: object,
+    runner: SchedulerRunner,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Use sealed original config only for exact reconciliation/cancellation."""
+
+    binding, payload = _validated_scheduler_fallback(fallback, control_plane)
+    require(
+        Path(str(command[0])).name in {"squeue", "scancel"},
+        "scheduler fallback is restricted to squeue/scancel",
+    )
+    with _scheduler_fallback_descriptor(payload) as descriptor:
+        environment = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "SLURM_CONF": f"/proc/self/fd/{descriptor}",
+        }
+        completed = runner(command, cwd, environment, (descriptor,))
+    return completed, {
+        "schema_version": 1,
+        "mode": "sealed_original_config_fallback",
+        "sha256": binding["sha256"],
+        "size": binding["size"],
+        "critical": _parse_slurm_config(payload, control_plane),
     }
 
 
@@ -2425,12 +3048,37 @@ def _reconcile_job_ids(
     comment: str,
     cwd: Path,
     runner: SchedulerRunner,
+    control_plane: object,
+    *,
+    fallback: object | None = None,
+    expected_observation: Mapping[str, Any] | None = None,
+    observations: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    completed = runner(
-        [squeue, "--noheader", f"--name={job_name}", "--format=%A|%j|%u|%T|%k"],
-        cwd,
-        _scheduler_environment(),
-    )
+    command = [squeue, "--noheader", f"--name={job_name}", "--format=%A|%j|%u|%T|%k"]
+    boundary_error: str | None = None
+    try:
+        completed, observation = _scheduler_call(
+            command,
+            cwd,
+            control_plane,
+            runner,
+            expected_observation,
+        )
+    except SchedulerBoundaryError as exc:
+        if fallback is None:
+            raise
+        boundary_error = repr(exc)
+        completed, observation = _fallback_scheduler_call(
+            command, cwd, control_plane, fallback, runner
+        )
+    if observations is not None:
+        observations.append(
+            {
+                "command": command,
+                "control_plane": observation,
+                "canonical_boundary_error": boundary_error,
+            }
+        )
     require(completed.returncode == 0, f"cannot reconcile scheduler job {job_name}: {completed.stderr.strip()}")
     expected_user = pwd.getpwuid(os.getuid()).pw_name
     values: set[str] = set()
@@ -2455,9 +3103,23 @@ def _assert_job_absent(
     comment: str,
     cwd: Path,
     runner: SchedulerRunner,
+    control_plane: object,
+    fallback: object | None = None,
+    expected_observation: Mapping[str, Any] | None = None,
+    observations: list[dict[str, Any]] | None = None,
 ) -> None:
     require(
-        not _reconcile_job_ids(squeue, job_name, comment, cwd, runner),
+        not _reconcile_job_ids(
+            squeue,
+            job_name,
+            comment,
+            cwd,
+            runner,
+            control_plane,
+            fallback=fallback,
+            expected_observation=expected_observation,
+            observations=observations,
+        ),
         f"scheduler already contains transaction job {job_name}",
     )
 
@@ -2470,8 +3132,47 @@ def _submit_one(
     squeue: str,
     cwd: Path,
     runner: SchedulerRunner,
+    control_plane: object,
+    fallback: object,
+    expected_observation: Mapping[str, Any] | None = None,
+    observations: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    completed = runner(command, cwd, _scheduler_environment())
+    try:
+        completed, observation = _scheduler_call(
+            command, cwd, control_plane, runner, expected_observation
+        )
+    except SchedulerBoundaryError as exc:
+        completed = exc.completed
+        parsed: list[str] = []
+        if completed is not None:
+            match = SBATCH_JOB.fullmatch(completed.stdout.strip())
+            if match is not None:
+                parsed.append(match.group("job_id"))
+        reconciled: list[str] = []
+        reconciliation_error: str | None = None
+        try:
+            reconciled = _reconcile_job_ids(
+                squeue,
+                job_name,
+                comment,
+                cwd,
+                runner,
+                control_plane,
+                fallback=fallback,
+                expected_observation=expected_observation,
+                observations=observations,
+            )
+        except BaseException as reconcile_exc:
+            reconciliation_error = repr(reconcile_exc)
+        raise SchedulerSubmissionError(
+            f"scheduler boundary failed for {job_name}: {exc}; "
+            f"fallback reconciliation={reconciled}; error={reconciliation_error}",
+            sorted(set([*parsed, *reconciled]), key=int),
+        ) from exc
+    if observations is not None:
+        observations.append(
+            {"command": list(command), "control_plane": observation}
+        )
     response = completed.stdout.strip()
     match = SBATCH_JOB.fullmatch(response)
     reconciled: list[str] = []
@@ -2480,7 +3181,17 @@ def _submit_one(
         # DAG after an error response; the outer transaction reconciles and cancels.
         parsed = [match.group("job_id")] if match is not None else []
         try:
-            found = _reconcile_job_ids(squeue, job_name, comment, cwd, runner)
+            found = _reconcile_job_ids(
+                squeue,
+                job_name,
+                comment,
+                cwd,
+                runner,
+                control_plane,
+                fallback=fallback,
+                expected_observation=expected_observation,
+                observations=observations,
+            )
         except BaseException as exc:
             raise SchedulerSubmissionError(
                 f"sbatch failed for {job_name}; reconciliation failed: {exc}",
@@ -2491,7 +3202,17 @@ def _submit_one(
             sorted(set([*parsed, *found]), key=int),
         )
     if match is None:
-        reconciled = _reconcile_job_ids(squeue, job_name, comment, cwd, runner)
+        reconciled = _reconcile_job_ids(
+            squeue,
+            job_name,
+            comment,
+            cwd,
+            runner,
+            control_plane,
+            fallback=fallback,
+            expected_observation=expected_observation,
+            observations=observations,
+        )
         if len(reconciled) != 1:
             raise SchedulerSubmissionError(
                 f"sbatch response for {job_name} is ambiguous and reconciliation found {len(reconciled)} jobs: {response!r} {completed.stderr.strip()}",
@@ -2503,7 +3224,17 @@ def _submit_one(
         # A parseable response is still checked by exact unique name.  This catches
         # fake/stale stdout before the dependent job is created.
         try:
-            reconciled = _reconcile_job_ids(squeue, job_name, comment, cwd, runner)
+            reconciled = _reconcile_job_ids(
+                squeue,
+                job_name,
+                comment,
+                cwd,
+                runner,
+                control_plane,
+                fallback=fallback,
+                expected_observation=expected_observation,
+                observations=observations,
+            )
         except BaseException as exc:
             raise SchedulerSubmissionError(
                 f"scheduler could not reconcile exact submitted ID {job_id}: {exc}",
@@ -2520,6 +3251,7 @@ def _submit_one(
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "reconciled_job_ids": reconciled,
+        "scheduler_control_plane": observation,
     }
 
 
@@ -2528,13 +3260,552 @@ def _cancel_exact(
     job_ids: Sequence[str],
     cwd: Path,
     runner: SchedulerRunner,
+    control_plane: object,
+    fallback: object,
+    observations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     exact = sorted(set(job_ids), key=int)
     require(exact and all(JOB_ID.fullmatch(value) for value in exact), "refusing non-exact cancellation target")
     command = [scancel, *exact]
-    completed = runner(command, cwd, _scheduler_environment())
+    boundary_error: str | None = None
+    try:
+        completed, observation = _scheduler_call(command, cwd, control_plane, runner)
+    except SchedulerBoundaryError as exc:
+        boundary_error = repr(exc)
+        if exc.completed is not None and exc.completed.returncode == 0:
+            completed = exc.completed
+            observation = {
+                "schema_version": 1,
+                "mode": "authenticated_canonical_call_with_postcondition_failure",
+                "pre_call": exc.observation,
+            }
+        else:
+            completed, observation = _fallback_scheduler_call(
+                command, cwd, control_plane, fallback, runner
+            )
+    if observations is not None:
+        observations.append(
+            {
+                "command": command,
+                "control_plane": observation,
+                "canonical_boundary_error": boundary_error,
+            }
+        )
     require(completed.returncode == 0, f"partial-submission cancellation failed: {completed.stderr.strip()}")
-    return {"job_ids": exact, "command": command, "stdout": completed.stdout, "stderr": completed.stderr}
+    return {
+        "job_ids": exact,
+        "command": command,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "scheduler_control_plane": observation,
+        "canonical_boundary_error": boundary_error,
+    }
+
+
+def _parse_controller_configuration(
+    stdout: str, control_plane: object
+) -> dict[str, Any]:
+    contract = _scheduler_contract(control_plane)
+    values: dict[str, str] = {}
+    hosts: dict[int, str] = {}
+    for raw_line in stdout.splitlines():
+        match = re.match(r"^([^=]+?)\s*=\s*(.*?)\s*$", raw_line)
+        if match is None:
+            continue
+        key, value = match.groups()
+        key = key.strip()
+        host = re.fullmatch(r"SlurmctldHost\[([0-9]+)\]", key)
+        if host is not None:
+            index = int(host.group(1))
+            require(index not in hosts, "controller configuration duplicates a host index")
+            hosts[index] = value
+        elif key in {
+            "AuthType",
+            "CliFilterPlugins",
+            "ClusterName",
+            "GresTypes",
+            "JobSubmitPlugins",
+            "SlurmctldPort",
+        }:
+            require(key not in values, f"controller configuration duplicates {key}")
+            values[key] = value
+    require(
+        values
+        == {
+            "AuthType": contract["auth_type"],
+            "CliFilterPlugins": ",".join(contract["cli_filter_plugins"]),
+            "ClusterName": contract["cluster_name"],
+            "GresTypes": ",".join(contract["gres_types"]),
+            "JobSubmitPlugins": ",".join(contract["job_submit_plugins"]),
+            "SlurmctldPort": str(contract["slurmctld_port"]),
+        },
+        "controller scheduler configuration differs",
+    )
+    require(
+        hosts == dict(enumerate(contract["slurmctld_hosts"])),
+        "controller scheduler hosts differ",
+    )
+    return {
+        "cluster_name": values["ClusterName"],
+        "slurmctld_hosts": [hosts[index] for index in sorted(hosts)],
+        "slurmctld_port": int(values["SlurmctldPort"]),
+        "auth_type": values["AuthType"],
+        "gres_types": values["GresTypes"].split(","),
+        "cli_filter_plugins": values["CliFilterPlugins"].split(","),
+        "job_submit_plugins": values["JobSubmitPlugins"].split(","),
+    }
+
+
+def _parse_sbatch_test_only(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    role: str,
+    job_name: str,
+    comment: str,
+    output: str,
+    manifest: Mapping[str, Any],
+    dependency: str | None = None,
+) -> dict[str, Any]:
+    require(completed.returncode == 0, f"{role} sbatch --test-only failed: {completed.stderr.strip()}")
+    require(not completed.stdout, f"{role} sbatch --test-only unexpectedly wrote stdout")
+    lines = completed.stderr.splitlines()
+    try:
+        start = lines.index("sbatch: defined options")
+        end = lines.index("sbatch: end of defined options", start + 1)
+    except ValueError as exc:
+        raise SubmissionError(f"{role} sbatch --test-only omitted its defined options") from exc
+    options: dict[str, str] = {}
+    for line in lines[start + 1 : end]:
+        match = re.fullmatch(r"sbatch: ([a-z0-9-]+)\s+:\s+(.*)", line)
+        if match is None:
+            continue
+        key, value = match.groups()
+        require(key not in options, f"{role} sbatch --test-only duplicated option {key}")
+        options[key] = value
+    execution = manifest["execution"]
+    expected: dict[str, str] = {
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "cpus-per-task": str(execution["cpus_per_task"]),
+        "comment": comment,
+        "export": "NONE",
+        "job-name": job_name,
+        "mem": str(execution["memory_per_task"]),
+        "nodes": "1",
+        "ntasks-per-node": "1",
+        "open-mode": "a",
+        "output": output,
+        "parsable": "set",
+        "partition": (
+            str(execution["gpu_partitions"])
+            if role == "train"
+            else str(execution["cpu_partition"])
+        ),
+        "qos": "normal",
+        "test-only": "set",
+        "time": str(execution["walltime"]),
+        "verbose": "3",
+    }
+    if role == "train":
+        expected.update(
+            {
+                "array": "0-19%20",
+                "gpus-per-node": str(execution["gpus_per_task"]),
+                "requeue": "requeue",
+                "signal": f"B:USR1@{execution['signal_seconds_before_end']}",
+            }
+        )
+    if dependency is not None:
+        require(role == "report", "only report may carry a scheduler-test dependency")
+        expected.update(
+            {
+                "dependency": dependency,
+                "kill-on-invalid-dep": "yes",
+            }
+        )
+    require(options == expected, f"{role} sbatch --test-only options differ")
+    decisions = []
+    for line in lines:
+        match = re.fullmatch(
+            r"sbatch: Job ([0-9]+) to start at (\S+) using ([0-9]+) processors "
+            r"on nodes (\S+) in partition (\S+)",
+            line,
+        )
+        if match is not None:
+            decisions.append(match.groups())
+    require(len(decisions) == 1, f"{role} sbatch --test-only decision differs")
+    _synthetic_id, _start_time, processors, _nodes, partition = decisions[0]
+    require(
+        int(processors) == int(execution["cpus_per_task"]),
+        f"{role} scheduler-test processor decision differs",
+    )
+    if role == "train":
+        require(
+            partition in str(execution["gpu_partitions"]).split(","),
+            "train scheduler-test partition decision differs",
+        )
+    else:
+        require(partition == execution["cpu_partition"], "report scheduler-test partition differs")
+    warnings = [
+        line
+        for line in lines
+        if "warning" in line.lower() and not line.startswith("sbatch: debug")
+    ]
+    return {
+        "role": role,
+        "defined_options": options,
+        "decision": {"processors": int(processors), "partition": partition},
+        "warnings": warnings,
+    }
+
+
+def _scontrol_oneliner_field(stdout: str, name: str) -> str:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    require(len(lines) == 1, "scontrol returned an ambiguous job record")
+    prefix = f"{name}="
+    values = [
+        token[len(prefix):]
+        for token in lines[0].split()
+        if token.startswith(prefix)
+    ]
+    require(len(values) == 1 and values[0], f"scontrol job field differs: {name}")
+    return values[0]
+
+
+def _accepted_report_dependency_evidence(
+    *,
+    scontrol: str,
+    report_id: str,
+    train_id: str,
+    report_name: str,
+    comment: str,
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    command = [scontrol, "show", "job", report_id, "--oneliner"]
+    completed, observation = _scheduler_call(
+        command,
+        cwd,
+        control_plane,
+        runner,
+        expected_observation,
+    )
+    observations.append({"command": command, "control_plane": observation})
+    require(
+        completed.returncode == 0,
+        f"cannot verify accepted report dependency: {completed.stderr.strip()}",
+    )
+    require(
+        len(completed.stdout) <= 1024 * 1024
+        and len(completed.stderr) <= 1024 * 1024,
+        "accepted report dependency response is oversized",
+    )
+    require(
+        _scontrol_oneliner_field(completed.stdout, "JobId") == report_id
+        and _scontrol_oneliner_field(completed.stdout, "JobName") == report_name
+        and _scontrol_oneliner_field(completed.stdout, "Comment") == comment
+        and _scontrol_oneliner_field(completed.stdout, "JobState") == "PENDING",
+        "accepted report scheduler identity differs",
+    )
+    dependency = _scontrol_oneliner_field(completed.stdout, "Dependency")
+    require(
+        re.fullmatch(rf"afterok:{re.escape(train_id)}(?:\(unfulfilled\))?", dependency)
+        is not None,
+        "accepted report dependency differs",
+    )
+    return {
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "dependency": dependency,
+        "scheduler_control_plane": observation,
+    }
+
+
+def scheduler_preclaim_test(
+    repo_root: Path,
+    manifest: Mapping[str, Any],
+    *,
+    runner: SchedulerRunner = _default_scheduler_runner,
+) -> dict[str, Any]:
+    """Contact Slurm read-only and prove exact scripts survive current site policy."""
+
+    root = _directory_nonsymlink(repo_root, "scheduler-test repository root")
+    execution = manifest["execution"]
+    control_plane = _scheduler_contract(execution.get("scheduler_control_plane"))
+    clients = {
+        "sbatch": str(execution["sbatch"]),
+        "squeue": str(execution.get("squeue") or (Path(str(execution["sbatch"])).parent / "squeue")),
+        "scontrol": str(execution["scontrol"]),
+    }
+    for label, raw_path in clients.items():
+        path = Path(raw_path)
+        _regular_nonsymlink(path, f"scheduler-test {label}")
+        require(path.is_absolute() and os.access(path, os.X_OK), f"scheduler-test {label} is not executable")
+    scripts = {
+        "train": _contained_regular_no_symlinks(
+            root, PACKAGE_RELATIVE / "train.slurm", "scheduler-test training script"
+        ),
+        "report": _contained_regular_no_symlinks(
+            root, PACKAGE_RELATIVE / "report.slurm", "scheduler-test report script"
+        ),
+    }
+    job_names = {
+        "train": f"exp23-launch4-scheduler-test-train",
+        "report": f"exp23-launch4-scheduler-test-report",
+    }
+    observations: list[dict[str, Any]] = []
+    commands: list[list[str]] = []
+
+    def call(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        completed, observation = _scheduler_call(command, root, control_plane, runner)
+        observations.append(observation)
+        commands.append(list(command))
+        return completed
+
+    controller = call([clients["scontrol"], "show", "config"])
+    require(controller.returncode == 0, f"scontrol show config failed: {controller.stderr.strip()}")
+    controller_contract = _parse_controller_configuration(controller.stdout, control_plane)
+    expected_user = pwd.getpwuid(os.getuid()).pw_name
+    for role in ("train", "report"):
+        queried = call(
+            [
+                clients["squeue"],
+                "--noheader",
+                f"--name={job_names[role]}",
+                f"--user={expected_user}",
+                "--format=%A|%j|%u|%T|%k",
+            ]
+        )
+        require(queried.returncode == 0, f"scheduler-test {role} pre-query failed: {queried.stderr.strip()}")
+        require(not queried.stdout.strip(), f"scheduler-test name is already present: {job_names[role]}")
+
+    decisions: dict[str, Any] = {}
+    dummy_submission = root / "scheduler-test-never-executed"
+    dummy_logs = dummy_submission / "logs"
+    scheduler_comment = f"treewm-exp23:{'0' * 64}"
+    outputs = {
+        "train": str(dummy_logs / "train_%A_%a.out"),
+        "report": str(dummy_logs / "report_%j.out"),
+    }
+    for role in ("train", "report"):
+        command = [
+            clients["sbatch"],
+            "-vvv",
+            "--test-only",
+            "--parsable",
+            "--export=NONE",
+            f"--job-name={job_names[role]}",
+            f"--comment={scheduler_comment}",
+            f"--output={outputs[role]}",
+        ]
+        if role == "train":
+            command.append("--array=0-19%20")
+        command.extend(
+            [
+                str(scripts[role]),
+                str(root),
+                str(dummy_submission),
+                "0" * 64,
+            ]
+        )
+        decisions[role] = _parse_sbatch_test_only(
+            call(command),
+            role=role,
+            job_name=job_names[role],
+            comment=scheduler_comment,
+            output=outputs[role],
+            manifest=manifest,
+        )
+
+    for role in ("train", "report"):
+        queried = call(
+            [
+                clients["squeue"],
+                "--noheader",
+                f"--name={job_names[role]}",
+                f"--user={expected_user}",
+                "--format=%A|%j|%u|%T|%k",
+            ]
+        )
+        require(queried.returncode == 0, f"scheduler-test {role} post-query failed: {queried.stderr.strip()}")
+        require(not queried.stdout.strip(), f"sbatch --test-only created a scheduler job: {job_names[role]}")
+    require(observations and all(value == observations[0] for value in observations), "scheduler control plane changed during preclaim test")
+    return {
+        "schema_version": 1,
+        "status": "scheduler_preclaim_verified",
+        "campaign_id": manifest["campaign_id"],
+        "scheduler_control_plane": observations[0],
+        "controller_configuration": controller_contract,
+        "sbatch_test_only": decisions,
+        "report_dependency_test": REPORT_DEPENDENCY_TEST_REQUIREMENT,
+        "scheduler_probe_commands": commands,
+        "zero_job_proof": {
+            "job_names": job_names,
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "scheduler_calls": len(observations),
+        "scheduler_mutation_calls": 0,
+        "persistent_writes_performed": 0,
+    }
+
+
+def _validated_scheduler_preclaim(
+    value: object, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    require(isinstance(value, Mapping), "scheduler preclaim evidence is absent")
+    result = dict(value)
+    require(
+        set(result)
+        == {
+            "schema_version",
+            "status",
+            "campaign_id",
+            "scheduler_control_plane",
+            "controller_configuration",
+            "sbatch_test_only",
+            "report_dependency_test",
+            "scheduler_probe_commands",
+            "zero_job_proof",
+            "scheduler_calls",
+            "scheduler_mutation_calls",
+            "persistent_writes_performed",
+        },
+        "scheduler preclaim evidence fields differ",
+    )
+    require(
+        result["schema_version"] == 1
+        and result["status"] == "scheduler_preclaim_verified"
+        and result["campaign_id"] == manifest["campaign_id"]
+        and result["scheduler_calls"] == 7
+        and result["scheduler_mutation_calls"] == 0
+        and result["persistent_writes_performed"] == 0,
+        "scheduler preclaim status differs",
+    )
+    control = _scheduler_contract(manifest["execution"].get("scheduler_control_plane"))
+    observation = result["scheduler_control_plane"]
+    require(
+        isinstance(observation, Mapping)
+        and observation.get("schema_version") == 1
+        and observation.get("trust_model") == SCHEDULER_TRUST_MODEL
+        and observation.get("critical")
+        == {
+            key: control[key]
+            for key in (
+                "cluster_name",
+                "slurmctld_hosts",
+                "slurmctld_port",
+                "auth_type",
+                "gres_types",
+                "cli_filter_plugins",
+                "job_submit_plugins",
+            )
+        }
+        and isinstance(observation.get("config"), Mapping)
+        and observation["config"].get("path") == control["slurm_conf"]
+        and SHA256.fullmatch(str(observation["config"].get("sha256", ""))) is not None
+        and isinstance(observation.get("cli_filter_policy"), Mapping)
+        and SHA256.fullmatch(
+            str(observation["cli_filter_policy"].get("tree_sha256", ""))
+        )
+        is not None,
+        "scheduler preclaim control-plane observation differs",
+    )
+    require(
+        result["controller_configuration"] == observation["critical"],
+        "scheduler preclaim controller/config identity differs",
+    )
+    decisions = result["sbatch_test_only"]
+    require(
+        isinstance(decisions, Mapping)
+        and set(decisions) == {"train", "report"}
+        and all(
+            isinstance(decisions[role], Mapping)
+            and decisions[role].get("role") == role
+            and isinstance(decisions[role].get("defined_options"), Mapping)
+            and isinstance(decisions[role].get("decision"), Mapping)
+            and isinstance(decisions[role].get("warnings"), list)
+            for role in ("train", "report")
+        ),
+        "scheduler preclaim sbatch evidence differs",
+    )
+    require(
+        result["report_dependency_test"] == REPORT_DEPENDENCY_TEST_REQUIREMENT,
+        "scheduler preclaim report dependency-test requirement differs",
+    )
+    commands = result["scheduler_probe_commands"]
+    require(
+        isinstance(commands, list)
+        and len(commands) == 7
+        and all(
+            isinstance(command, list)
+            and command
+            and all(isinstance(item, str) for item in command)
+            for command in commands
+        )
+        and [Path(command[0]).name for command in commands]
+        == ["scontrol", "squeue", "squeue", "sbatch", "sbatch", "squeue", "squeue"]
+        and all(
+            Path(command[0]).name != "sbatch" or "--test-only" in command
+            for command in commands
+        ),
+        "scheduler preclaim command ledger differs",
+    )
+    sbatch_commands = [
+        command for command in commands if Path(command[0]).name == "sbatch"
+    ]
+    require(len(sbatch_commands) == 2, "scheduler preclaim sbatch command count differs")
+    expected_comment = f"--comment=treewm-exp23:{'0' * 64}"
+    for role, command in zip(("train", "report"), sbatch_commands, strict=True):
+        output_options = [item for item in command if item.startswith("--output=")]
+        require(
+            "-vvv" in command
+            and "--test-only" in command
+            and "--parsable" in command
+            and "--export=NONE" in command
+            and expected_comment in command
+            and len(output_options) == 1
+            and output_options[0].endswith(
+                "scheduler-test-never-executed/logs/"
+                + ("train_%A_%a.out" if role == "train" else "report_%j.out")
+            )
+            and decisions[role]["defined_options"].get("comment")
+            == expected_comment.split("=", 1)[1]
+            and decisions[role]["defined_options"].get("output")
+            == output_options[0].split("=", 1)[1]
+            and decisions[role]["defined_options"].get("parsable") == "set"
+            and decisions[role]["defined_options"].get("test-only") == "set"
+            and decisions[role]["defined_options"].get("export") == "NONE"
+            and decisions[role]["defined_options"].get("verbose") == "3",
+            f"scheduler preclaim {role} safe-option parity differs",
+        )
+    require(
+        "--array=0-19%20" in sbatch_commands[0]
+        and decisions["train"]["defined_options"].get("array") == "0-19%20"
+        and not any(item.startswith("--array=") for item in sbatch_commands[1]),
+        "scheduler preclaim train array parity differs",
+    )
+    require(
+        result["zero_job_proof"]
+        == {
+            "job_names": {
+                "train": "exp23-launch4-scheduler-test-train",
+                "report": "exp23-launch4-scheduler-test-report",
+            },
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "scheduler preclaim zero-job evidence differs",
+    )
+    return result
 
 
 def _assert_live_transaction(submission_root: Path, *, ready: bool = False) -> None:
@@ -2709,7 +3980,7 @@ def _restore_snapshot_test_permissions(task_root: Path) -> None:
     root = task_root.absolute()
     require(
         root.parent == temporary_parent
-        and root.name.startswith(f"treewm-exp23-launch3-snapshot-test-{os.getuid()}-"),
+        and root.name.startswith(f"treewm-exp23-launch4-snapshot-test-{os.getuid()}-"),
         "refusing to restore permissions outside a snapshot-test temporary tree",
     )
     if not _lexical_exists(root):
@@ -2763,7 +4034,7 @@ def snapshot_test(
     task_root: Path | None = None
     copied: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch3-snapshot-test-{os.getuid()}-",
+        prefix=f"treewm-exp23-launch4-snapshot-test-{os.getuid()}-",
         dir=temporary_parent,
     ) as raw_task_root:
         task_root = Path(raw_task_root)
@@ -2846,6 +4117,8 @@ def _submission_contract(
     compositions: Sequence[Mapping[str, Any]],
     snapshot_preflight: Mapping[str, Any],
     git: Mapping[str, Any],
+    scheduler_preclaim: Mapping[str, Any],
+    scheduler_fallback: Mapping[str, Any],
 ) -> dict[str, Any]:
     audit_bindings = {
         "weight_audit_artifact_sha256": manifest["weight_audit"]["artifact_sha256"],
@@ -2853,6 +4126,14 @@ def _submission_contract(
         "resolved_config_artifact_sha256": manifest["resolved_config_contract"]["artifact_sha256"],
         "causal_parity_artifact_sha256": manifest["causal_parity_contract"]["artifact_sha256"],
     }
+    verified_scheduler_preclaim = _validated_scheduler_preclaim(
+        scheduler_preclaim, manifest
+    )
+    verified_scheduler_fallback = _validated_scheduler_fallback(
+        scheduler_fallback,
+        manifest["execution"].get("scheduler_control_plane"),
+        verified_scheduler_preclaim["scheduler_control_plane"],
+    )[0]
     rows: list[dict[str, Any]] = []
     for index, (launch, launch_row) in enumerate(zip(preflight["launches"], launch_rows, strict=True)):
         require(index == launch["cell"]["index"], "launch order differs")
@@ -2880,6 +4161,11 @@ def _submission_contract(
         "trainer_code_fingerprint": source["source_sha256"],
         "runtime_sha256": source["runtime_sha256"],
         "orchestration_interpreter": dict(preflight["orchestration_interpreter"]),
+        "scheduler_control_plane_contract": dict(
+            _scheduler_contract(manifest["execution"].get("scheduler_control_plane"))
+        ),
+        "scheduler_preclaim": verified_scheduler_preclaim,
+        "scheduler_fallback_config": verified_scheduler_fallback,
         **audit_bindings,
         "snapshot_inventory": dict(inventory),
         "snapshot_inventory_sha256": stable_hash(inventory),
@@ -2976,6 +4262,10 @@ def _submit_campaign_impl(
     submission_root = submission_root.absolute()
     expected_submission_root = Path(str(manifest["paths"]["run_root"])) / "state" / "submission"
     require(submission_root == expected_submission_root.absolute(), "submission root differs from sealed run namespace")
+    scheduler_preclaim = _validated_scheduler_preclaim(
+        preflight.get("scheduler_preclaim"), manifest
+    )
+    require(_namespace_is_fresh(manifest, submission_root), "scheduler preclaim changed the submission namespace")
     _mkdir_chain_no_symlinks(submission_root)
     append_journal(
         submission_root,
@@ -3049,6 +4339,9 @@ def _submit_campaign_impl(
     logs = submission_root / "logs"
     logs.mkdir(mode=0o700)
     _fsync_directory(submission_root)
+    scheduler_fallback = _scheduler_fallback_config(
+        manifest["execution"].get("scheduler_control_plane")
+    )
     contract = _submission_contract(
         manifest=snapshot_manifest,
         protocol=protocol,
@@ -3061,6 +4354,8 @@ def _submit_campaign_impl(
         compositions=compositions,
         snapshot_preflight=snapshot_verification,
         git=git,
+        scheduler_preclaim=scheduler_preclaim,
+        scheduler_fallback=scheduler_fallback,
     )
     contract_path = submission_root / "SUBMISSION_CONTRACT.json"
     submission_sha256 = exclusive_json(contract_path, contract)
@@ -3075,15 +4370,28 @@ def _submit_campaign_impl(
     require(_scientific_output_fingerprint(manifest) == preflight["scientific_output_fingerprint_after"], "snapshot/preparation changed scientific outputs")
 
     execution = manifest["execution"]
+    control_plane = _scheduler_contract(execution.get("scheduler_control_plane"))
+    submission_authorization = scheduler_preclaim["scheduler_control_plane"]
+    scheduler_fallback = _validated_scheduler_fallback(
+        contract.get("scheduler_fallback_config"),
+        control_plane,
+        submission_authorization,
+    )[0]
     sbatch = str(execution["sbatch"])
     scancel = str(execution["scancel"])
+    scontrol = str(execution["scontrol"])
     squeue = str(execution.get("squeue") or (Path(sbatch).parent / "squeue"))
-    for path, label in ((sbatch, "sbatch"), (scancel, "scancel"), (squeue, "squeue")):
+    for path, label in (
+        (sbatch, "sbatch"),
+        (scancel, "scancel"),
+        (scontrol, "scontrol"),
+        (squeue, "squeue"),
+    ):
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch3-{token}-train"
-    report_name = f"exp23-launch3-{token}-report"
+    train_name = f"exp23-launch4-{token}-train"
+    report_name = f"exp23-launch4-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
@@ -3107,10 +4415,31 @@ def _submit_campaign_impl(
     active_role = "train"
     ready_to_commit = False
     records: dict[str, Any] = {}
+    scheduler_observations: list[dict[str, Any]] = []
     try:
         _assert_live_transaction(submission_root)
-        _assert_job_absent(squeue, train_name, scheduler_comment, snapshot_root, scheduler_runner)
-        _assert_job_absent(squeue, report_name, scheduler_comment, snapshot_root, scheduler_runner)
+        _assert_job_absent(
+            squeue,
+            train_name,
+            scheduler_comment,
+            snapshot_root,
+            scheduler_runner,
+            control_plane,
+            scheduler_fallback,
+            submission_authorization,
+            scheduler_observations,
+        )
+        _assert_job_absent(
+            squeue,
+            report_name,
+            scheduler_comment,
+            snapshot_root,
+            scheduler_runner,
+            control_plane,
+            scheduler_fallback,
+            submission_authorization,
+            scheduler_observations,
+        )
         train_id, train_record = _submit_one(
             train_command,
             job_name=train_name,
@@ -3118,6 +4447,10 @@ def _submit_campaign_impl(
             squeue=squeue,
             cwd=snapshot_root,
             runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
         )
         known_ids.append(train_id)
         known_ids_by_role["train"].append(train_id)
@@ -3139,6 +4472,64 @@ def _submit_campaign_impl(
             submission_sha256,
         ]
         active_role = "report"
+        report_test_command = [
+            sbatch,
+            "-vvv",
+            "--test-only",
+            "--parsable",
+            "--export=NONE",
+            f"--dependency=afterok:{train_id}",
+            "--kill-on-invalid-dep=yes",
+            f"--job-name={report_name}",
+            f"--comment={scheduler_comment}",
+            f"--output={logs / 'report_%j.out'}",
+            str(report_script),
+            str(snapshot_root),
+            str(submission_root),
+            submission_sha256,
+        ]
+        report_test_completed, report_test_observation = _scheduler_call(
+            report_test_command,
+            snapshot_root,
+            control_plane,
+            scheduler_runner,
+            submission_authorization,
+        )
+        scheduler_observations.append(
+            {
+                "command": report_test_command,
+                "control_plane": report_test_observation,
+            }
+        )
+        parsed_report_test = _parse_sbatch_test_only(
+            report_test_completed,
+            role="report",
+            job_name=report_name,
+            comment=scheduler_comment,
+            output=str(logs / "report_%j.out"),
+            manifest=manifest,
+            dependency=f"afterok:{train_id}",
+        )
+        _assert_job_absent(
+            squeue,
+            report_name,
+            scheduler_comment,
+            snapshot_root,
+            scheduler_runner,
+            control_plane,
+            scheduler_fallback,
+            submission_authorization,
+            scheduler_observations,
+        )
+        report_test_evidence = {
+            "command": report_test_command,
+            "returncode": report_test_completed.returncode,
+            "stdout": report_test_completed.stdout,
+            "stderr": report_test_completed.stderr,
+            "parsed": parsed_report_test,
+            "scheduler_control_plane": report_test_observation,
+            "zero_job_after_test": True,
+        }
         report_id, report_record = _submit_one(
             report_command,
             job_name=report_name,
@@ -3146,11 +4537,37 @@ def _submit_campaign_impl(
             squeue=squeue,
             cwd=snapshot_root,
             runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
         )
         known_ids.append(report_id)
         known_ids_by_role["report"].append(report_id)
+        dependency_evidence = _accepted_report_dependency_evidence(
+            scontrol=scontrol,
+            report_id=report_id,
+            train_id=train_id,
+            report_name=report_name,
+            comment=scheduler_comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
+        )
+        report_record = {
+            **report_record,
+            "exact_dependency_test_only": report_test_evidence,
+            "accepted_dependency": dependency_evidence,
+        }
         records["report"] = report_record
-        append_journal(submission_root, 4, "REPORT_SUBMITTED", {"job_id": report_id, **report_record})
+        append_journal(
+            submission_root,
+            4,
+            "REPORT_SUBMITTED",
+            {"job_id": report_id, **report_record},
+        )
         _assert_live_transaction(submission_root)
         receipt = {
             "schema_version": 1,
@@ -3170,7 +4587,12 @@ def _submit_campaign_impl(
         # The receipt is the transaction's final atomic commit point.  No fallible
         # journal write follows it.
         exclusive_json(submission_root / "SUBMISSION_RECEIPT.json", receipt)
-        return {**receipt, "scheduler_calls": 6, "snapshot_files": len(inventory)}
+        return {
+            **receipt,
+            "scheduler_calls": 9 + int(scheduler_preclaim["scheduler_calls"]),
+            "scheduler_mutation_calls": 2,
+            "snapshot_files": len(inventory),
+        }
     except BaseException as exc:
         if ready_to_commit:
             raise CommitRecoveryRequired(
@@ -3185,7 +4607,15 @@ def _submit_campaign_impl(
         for role, name in (("train", train_name), ("report", report_name)):
             try:
                 reconciled = _reconcile_job_ids(
-                    squeue, name, scheduler_comment, snapshot_root, scheduler_runner
+                    squeue,
+                    name,
+                    scheduler_comment,
+                    snapshot_root,
+                    scheduler_runner,
+                    control_plane,
+                    fallback=scheduler_fallback,
+                    expected_observation=submission_authorization,
+                    observations=scheduler_observations,
                 )
                 known_ids.extend(reconciled)
                 known_ids_by_role[role].extend(reconciled)
@@ -3196,7 +4626,13 @@ def _submit_campaign_impl(
         if known_ids:
             try:
                 cancellation = _cancel_exact(
-                    scancel, sorted(set(known_ids), key=int), snapshot_root, scheduler_runner
+                    scancel,
+                    sorted(set(known_ids), key=int),
+                    snapshot_root,
+                    scheduler_runner,
+                    control_plane,
+                    scheduler_fallback,
+                    scheduler_observations,
                 )
             except BaseException as cancel_exc:
                 cancellation_error = repr(cancel_exc)
@@ -3216,6 +4652,7 @@ def _submit_campaign_impl(
                     "reconciliation_errors": reconciliation_errors,
                     "cancellation": cancellation,
                     "cancellation_error": cancellation_error,
+                    "scheduler_control_plane_observations": scheduler_observations,
                 },
             )
         except BaseException:
@@ -3313,11 +4750,23 @@ def submit_campaign(
 ) -> dict[str, Any]:
     """Submit while holding the single crash-recovery linearization lock."""
 
+    manifest = preflight.get("manifest")
+    require(isinstance(manifest, Mapping), "submission preflight manifest is absent")
+    scheduler_preclaim = scheduler_preclaim_test(
+        repo_root,
+        manifest,
+        runner=scheduler_runner,
+    )
+    require(
+        _namespace_is_fresh(manifest, submission_root),
+        "scheduler preclaim changed the submission namespace",
+    )
+    verified_preflight = {**dict(preflight), "scheduler_preclaim": scheduler_preclaim}
     with _TransactionLock(submission_root):
         return _submit_campaign_locked(
             repo_root,
             submission_root,
-            preflight,
+            verified_preflight,
             audit_runner=audit_runner,
             scheduler_runner=scheduler_runner,
         )
@@ -3397,7 +4846,15 @@ def _validated_successful_cancellation(
     require(cancellation_error is None, "abort claims both cancellation success and failure")
     require(
         isinstance(cancellation, Mapping)
-        and set(cancellation) == {"job_ids", "command", "stdout", "stderr"},
+        and set(cancellation)
+        == {
+            "job_ids",
+            "command",
+            "stdout",
+            "stderr",
+            "scheduler_control_plane",
+            "canonical_boundary_error",
+        },
         "abort cancellation evidence schema differs",
     )
     raw_ids = cancellation["job_ids"]
@@ -3417,6 +4874,14 @@ def _validated_successful_cancellation(
     require(
         isinstance(cancellation["stdout"], str) and isinstance(cancellation["stderr"], str),
         "abort cancellation output types differ",
+    )
+    require(
+        isinstance(cancellation["scheduler_control_plane"], Mapping)
+        and (
+            cancellation["canonical_boundary_error"] is None
+            or isinstance(cancellation["canonical_boundary_error"], str)
+        ),
+        "abort cancellation scheduler evidence differs",
     )
     return set(ids)
 
@@ -3520,6 +4985,21 @@ def _recover_transaction_locked(
         all(contract.get(key) == value for key, value in audit_bindings.items()),
         "recovery audit bindings differ",
     )
+    control_plane = _scheduler_contract(
+        manifest["execution"].get("scheduler_control_plane")
+    )
+    require(
+        contract.get("scheduler_control_plane_contract") == control_plane,
+        "recovery scheduler control-plane contract differs",
+    )
+    verified_scheduler_preclaim = _validated_scheduler_preclaim(
+        contract.get("scheduler_preclaim"), manifest
+    )
+    scheduler_fallback = _validated_scheduler_fallback(
+        contract.get("scheduler_fallback_config"),
+        control_plane,
+        verified_scheduler_preclaim["scheduler_control_plane"],
+    )[0]
 
     receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
     if _lexical_exists(receipt_path):
@@ -3592,8 +5072,8 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch3-{token}-train"
-    report_name = f"exp23-launch3-{token}-report"
+    train_name = f"exp23-launch4-{token}-train"
+    report_name = f"exp23-launch4-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
     role_names = {"train": train_name, "report": report_name}
     journal_paths = {
@@ -3617,6 +5097,7 @@ def _recover_transaction_locked(
                 "reconciliation_errors",
                 "cancellation",
                 "cancellation_error",
+                "scheduler_control_plane_observations",
             }
             and aborted.get("schema_version") == 1
             and aborted.get("record") == "aborted"
@@ -3660,6 +5141,7 @@ def _recover_transaction_locked(
             )
     ids_by_role: dict[str, list[str]] = {}
     reconciliation_errors: dict[str, str] = {}
+    scheduler_observations: list[dict[str, Any]] = []
     for role, name in role_names.items():
         known: list[str] = list(aborted_ids_by_role[role])
         journal_path = journal_paths[role]
@@ -3671,7 +5153,19 @@ def _recover_transaction_locked(
             require(JOB_ID.fullmatch(journal_id) is not None, f"recovery {role} journal ID differs")
             known.append(journal_id)
         try:
-            known.extend(_reconcile_job_ids(squeue, name, comment, snapshot_root, scheduler_runner))
+            known.extend(
+                _reconcile_job_ids(
+                    squeue,
+                    name,
+                    comment,
+                    snapshot_root,
+                    scheduler_runner,
+                    control_plane,
+                    fallback=scheduler_fallback,
+                    expected_observation=None,
+                    observations=scheduler_observations,
+                )
+            )
         except BaseException as exc:
             reconciliation_errors[role] = repr(exc)
         ids_by_role[role] = sorted(set(known), key=int)
@@ -3699,7 +5193,15 @@ def _recover_transaction_locked(
     cancellation_error = None
     if ids_to_cancel:
         try:
-            cancellation = _cancel_exact(scancel, ids_to_cancel, snapshot_root, scheduler_runner)
+            cancellation = _cancel_exact(
+                scancel,
+                ids_to_cancel,
+                snapshot_root,
+                scheduler_runner,
+                control_plane,
+                scheduler_fallback,
+                scheduler_observations,
+            )
         except BaseException as exc:
             cancellation_error = repr(exc)
     recovery_record = {
@@ -3712,6 +5214,7 @@ def _recover_transaction_locked(
         "cancellation": cancellation,
         "cancellation_error": cancellation_error,
         "reconciliation_errors": reconciliation_errors,
+        "scheduler_control_plane_observations": scheduler_observations,
         "new_jobs_created": 0,
     }
     if reconciliation_errors or cancellation_error:
@@ -3778,6 +5281,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="seal and fully verify a temporary copied tree without contacting Slurm",
     )
+    actions.add_argument(
+        "--scheduler-test",
+        action="store_true",
+        help="run only authenticated read-only Slurm controller and sbatch --test-only probes",
+    )
     actions.add_argument("--submit", action="store_true", help="explicitly create the seal and submit two jobs")
     parser.add_argument("--repo-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument(
@@ -3840,6 +5348,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.submission_root is not None
             else Path(str(manifest["paths"]["run_root"])) / "state" / "submission"
         )
+        if args.scheduler_test:
+            require(
+                args.submission_root is None,
+                "--scheduler-test does not accept a submission root",
+            )
+            preflight = static_preflight(repo_root, submission_root)
+            verified = scheduler_preclaim_test(repo_root, preflight["manifest"])
+            print(json.dumps(verified, sort_keys=True, indent=2, allow_nan=False))
+            return 0
         if args.submit and _lexical_exists(submission_root):
             recovered = recover_transaction(repo_root, submission_root)
             print(json.dumps(recovered, sort_keys=True, indent=2, allow_nan=False))

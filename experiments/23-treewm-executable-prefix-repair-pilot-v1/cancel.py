@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,27 @@ RECEIPT_KEYS = frozenset(
         "dependency",
     }
 )
+SCHEDULER_CONTROL_PLANE = {
+    "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+    "cluster_name": "cs-oci-ord",
+    "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+    "slurmctld_port": 6817,
+    "auth_type": "auth/munge",
+    "gres_types": ["gpu"],
+    "cli_filter_plugins": ["lua"],
+    "job_submit_plugins": ["lua"],
+    "trust_model": (
+        "root-admin mutable scheduler control plane; config and Lua policy bytes are "
+        "observation-bound from preclaim through submission; root-owned Slurm clients, "
+        "plugin binaries, and shared libraries are trusted mutable external runtime"
+    ),
+}
+REPORT_DEPENDENCY_TEST_REQUIREMENT = {
+    "phase": "after_train_reconciliation_before_report_submission",
+    "dependency": "afterok:<accepted_train_array_job_id>",
+    "kill_on_invalid_dep": "yes",
+    "required": True,
+}
 
 
 class CancellationError(RuntimeError):
@@ -472,14 +494,132 @@ def reject_environment(environ: Mapping[str, str] | None = None) -> None:
     require(not failures, "forbidden inherited environment: " + ", ".join(failures))
 
 
-def scheduler_environment() -> dict[str, str]:
+def scheduler_environment(control_plane: object) -> dict[str, str]:
     """Exact local-cluster environment shared with submit/recovery."""
+
+    require(
+        isinstance(control_plane, Mapping)
+        and dict(control_plane) == SCHEDULER_CONTROL_PLANE,
+        "scheduler control-plane contract differs",
+    )
 
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C",
         "LC_ALL": "C",
+        "SLURM_CONF": SCHEDULER_CONTROL_PLANE["slurm_conf"],
     }
+
+
+def scheduler_control_plane_observation(
+    snapshot_root: Path, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Run the exact snapshot-bound root-admin scheduler authenticator."""
+
+    control_plane = manifest["execution"].get("scheduler_control_plane")
+    require(
+        isinstance(control_plane, Mapping)
+        and dict(control_plane) == SCHEDULER_CONTROL_PLANE,
+        "snapshot scheduler control-plane contract differs",
+    )
+    path = snapshot_root / PACKAGE_RELATIVE / "submit.py"
+    _regular(path, "snapshot scheduler verifier")
+    name = f"_treewm_exp23_cancel_scheduler_{os.getpid()}_{time.time_ns()}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, "cannot load snapshot scheduler verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        observe = getattr(module, "_scheduler_control_plane_observation", None)
+        require(callable(observe), "snapshot scheduler verifier API differs")
+        value = observe(control_plane)
+    finally:
+        sys.modules.pop(name, None)
+    require(
+        isinstance(value, Mapping)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("config"), Mapping)
+        and SHA256.fullmatch(str(value["config"].get("sha256", ""))) is not None,
+        "scheduler control-plane observation differs",
+    )
+    return dict(value)
+
+
+def scheduler_fallback_config(
+    snapshot_root: Path,
+    manifest: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    """Validate the sealed original config used only for exact-ID cleanup."""
+
+    control_plane = manifest["execution"].get("scheduler_control_plane")
+    require(
+        isinstance(control_plane, Mapping)
+        and dict(control_plane) == SCHEDULER_CONTROL_PLANE,
+        "snapshot scheduler control-plane contract differs",
+    )
+    path = snapshot_root / PACKAGE_RELATIVE / "submit.py"
+    _regular(path, "snapshot scheduler fallback verifier")
+    name = f"_treewm_exp23_cancel_fallback_{os.getpid()}_{time.time_ns()}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, "cannot load snapshot fallback verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        validate = getattr(module, "_validated_scheduler_fallback", None)
+        require(callable(validate), "snapshot scheduler fallback verifier API differs")
+        binding, payload = validate(
+            contract.get("scheduler_fallback_config"),
+            control_plane,
+            (contract.get("scheduler_preclaim") or {}).get(
+                "scheduler_control_plane"
+            ),
+        )
+    finally:
+        sys.modules.pop(name, None)
+    require(
+        isinstance(binding, Mapping)
+        and isinstance(payload, bytes)
+        and hashlib.sha256(payload).hexdigest() == binding.get("sha256"),
+        "scheduler fallback config differs",
+    )
+    return dict(binding), payload
+
+
+def _scheduler_fallback_descriptor(payload: bytes) -> int:
+    require(hasattr(os, "memfd_create"), "scheduler fallback requires memfd_create")
+    descriptor = os.memfd_create(
+        "treewm-exp23-slurm-conf",
+        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            require(written > 0, "scheduler fallback config write was short")
+            view = view[written:]
+        os.fchmod(descriptor, 0o400)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        require(seals != 0, "scheduler fallback seals are unavailable")
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        require(
+            fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals == seals,
+            "scheduler fallback config is not immutable",
+        )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -494,7 +634,7 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     receipt = read_json(receipt_path)
     require(set(receipt) == RECEIPT_KEYS, "submission receipt schema differs")
     require(receipt["schema_version"] == 1 and receipt["status"] == "submitted", "submission receipt is not committed")
-    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch3", "submission receipt campaign differs")
+    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch4", "submission receipt campaign differs")
     require(Path(str(receipt["submission_root"])) == submission_root.absolute(), "receipt submission root differs")
     require(Path(str(receipt["snapshot_root"])).is_absolute(), "receipt snapshot root is not absolute")
     claimed = str(receipt["submission_sha256"])
@@ -595,6 +735,41 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     require(normalized.get(str(PACKAGE_RELATIVE / "manifest.json")) == file_sha256(manifest_path), "snapshot manifest inventory binding differs")
     manifest = read_json(manifest_path)
     require(contract.get("manifest_sha256") == stable_hash(manifest), "snapshot manifest contract hash differs")
+    require(
+        manifest["execution"].get("scheduler_control_plane")
+        == SCHEDULER_CONTROL_PLANE
+        and contract.get("scheduler_control_plane_contract")
+        == SCHEDULER_CONTROL_PLANE,
+        "scheduler control-plane contract differs",
+    )
+    scheduler_preclaim = contract.get("scheduler_preclaim")
+    require(
+        isinstance(scheduler_preclaim, Mapping)
+        and scheduler_preclaim.get("schema_version") == 1
+        and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
+        and scheduler_preclaim.get("campaign_id") == receipt["campaign_id"]
+        and scheduler_preclaim.get("scheduler_calls") == 7
+        and scheduler_preclaim.get("scheduler_mutation_calls") == 0,
+        "scheduler preclaim contract differs",
+    )
+    require(
+        isinstance(scheduler_preclaim.get("scheduler_probe_commands"), list)
+        and len(scheduler_preclaim["scheduler_probe_commands"]) == 7
+        and scheduler_preclaim.get("report_dependency_test")
+        == REPORT_DEPENDENCY_TEST_REQUIREMENT
+        and scheduler_preclaim.get("zero_job_proof")
+        == {
+            "job_names": {
+                "train": "exp23-launch4-scheduler-test-train",
+                "report": "exp23-launch4-scheduler-test-report",
+            },
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "scheduler preclaim call ledger differs",
+    )
     protocol_path = snapshot / PACKAGE_RELATIVE / "protocol.sha256"
     protocol_payload, _protocol_digest = _authenticated_regular_bytes(
         protocol_path, "snapshot protocol lock"
@@ -606,6 +781,7 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     require(SHA256.fullmatch(protocol) is not None and protocol == contract.get("package_protocol_sha256"), "snapshot protocol contract differs")
     interpreter = activate_isolated_runtime(manifest)
     require(contract.get("orchestration_interpreter") == interpreter, "cancellation interpreter contract differs")
+    scheduler_fallback_config(snapshot, manifest, contract)
     return receipt, contract, manifest
 
 
@@ -651,7 +827,7 @@ def seal_latch(submission_root: Path, receipt: Mapping[str, Any]) -> dict[str, A
 
 def explicit_cancel(submission_root: Path) -> dict[str, Any]:
     reject_environment()
-    receipt, _contract, manifest = validate_receipt(submission_root)
+    receipt, contract, manifest = validate_receipt(submission_root)
     with _ReportCancelLock(submission_root):
         latch = seal_latch(submission_root, receipt)
     # Resolve the executable only after the durable latch exists.  A missing scheduler
@@ -662,29 +838,139 @@ def explicit_cancel(submission_root: Path) -> dict[str, Any]:
     require(os.access(scancel, os.X_OK), "scancel is not executable")
     ids = [str(receipt["train_array_job_id"]), str(receipt["report_job_id"])]
     require(all(JOB_ID.fullmatch(value) for value in ids), "refusing non-exact cancellation target")
-    environment = scheduler_environment()
+    control_plane = manifest["execution"].get("scheduler_control_plane")
+    fallback_binding, fallback_payload = scheduler_fallback_config(
+        snapshot_root, manifest, contract
+    )
+    canonical_boundary_error: str | None = None
+    try:
+        observation_before = scheduler_control_plane_observation(snapshot_root, manifest)
+        environment = scheduler_environment(control_plane)
+        inherited_fds: tuple[int, ...] = ()
+        scheduler_mode = "canonical_root_admin_config"
+    except BaseException as exc:
+        canonical_boundary_error = repr(exc)
+        scheduler_mode = "sealed_original_config_fallback"
+        observation_before = {
+            "schema_version": 1,
+            "mode": scheduler_mode,
+            "sha256": fallback_binding["sha256"],
+            "size": fallback_binding["size"],
+        }
+        environment = {}
+        inherited_fds = ()
     command = [str(scancel), *ids]
     token = f"{time.time_ns()}-{os.getpid()}"
-    intent = {
-        "schema_version": 1,
-        "status": "exact_cancel_call_intent",
-        "campaign_id": receipt["campaign_id"],
-        "submission_sha256": receipt["submission_sha256"],
-        "call_token": token,
-        "job_ids": ids,
-        "command": command,
-    }
     evidence_root = submission_root / "cancellation"
-    seal_json(evidence_root / f"CANCEL_CALL.{token}.json", intent)
-    completed = subprocess.run(
-        command,
-        cwd=snapshot_root,
-        env=environment,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    scheduler_attempts: list[dict[str, Any]] = []
+
+    def call_exact(
+        *,
+        call_token: str,
+        mode: str,
+        observation: Mapping[str, Any],
+        call_environment: Mapping[str, str],
+        pass_descriptors: Sequence[int],
+        boundary_error: str | None,
+    ) -> subprocess.CompletedProcess[str]:
+        intent = {
+            "schema_version": 1,
+            "status": "exact_cancel_call_intent",
+            "campaign_id": receipt["campaign_id"],
+            "submission_sha256": receipt["submission_sha256"],
+            "call_token": call_token,
+            "job_ids": ids,
+            "command": command,
+            "scheduler_control_plane": dict(observation),
+            "scheduler_mode": mode,
+            "canonical_boundary_error": boundary_error,
+        }
+        seal_json(evidence_root / f"CANCEL_CALL.{call_token}.json", intent)
+        value = subprocess.run(
+            command,
+            cwd=snapshot_root,
+            env=dict(call_environment),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=tuple(pass_descriptors),
+        )
+        scheduler_attempts.append(
+            {
+                "call_token": call_token,
+                "scheduler_mode": mode,
+                "returncode": value.returncode,
+                "stdout": value.stdout,
+                "stderr": value.stderr,
+                "scheduler_control_plane": dict(observation),
+                "canonical_boundary_error": boundary_error,
+            }
+        )
+        return value
+
+    if scheduler_mode == "canonical_root_admin_config":
+        completed = call_exact(
+            call_token=token,
+            mode=scheduler_mode,
+            observation=observation_before,
+            call_environment=environment,
+            pass_descriptors=inherited_fds,
+            boundary_error=canonical_boundary_error,
+        )
+    else:
+        fallback_descriptor = _scheduler_fallback_descriptor(fallback_payload)
+        try:
+            environment = {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "SLURM_CONF": f"/proc/self/fd/{fallback_descriptor}",
+            }
+            completed = call_exact(
+                call_token=token,
+                mode=scheduler_mode,
+                observation=observation_before,
+                call_environment=environment,
+                pass_descriptors=(fallback_descriptor,),
+                boundary_error=canonical_boundary_error,
+            )
+        finally:
+            os.close(fallback_descriptor)
+    if scheduler_mode == "canonical_root_admin_config":
+        try:
+            observation_after = scheduler_control_plane_observation(snapshot_root, manifest)
+            if observation_after != observation_before:
+                raise CancellationError("scheduler control plane changed during scancel")
+        except BaseException as exc:
+            canonical_boundary_error = repr(exc)
+            scheduler_attempts[-1]["canonical_boundary_error"] = canonical_boundary_error
+            if completed.returncode != 0:
+                fallback_descriptor = _scheduler_fallback_descriptor(fallback_payload)
+                try:
+                    scheduler_mode = "sealed_original_config_fallback_after_canonical_failure"
+                    observation_before = {
+                        "schema_version": 1,
+                        "mode": scheduler_mode,
+                        "sha256": fallback_binding["sha256"],
+                        "size": fallback_binding["size"],
+                    }
+                    environment = {
+                        "PATH": "/usr/local/bin:/usr/bin:/bin",
+                        "LANG": "C",
+                        "LC_ALL": "C",
+                        "SLURM_CONF": f"/proc/self/fd/{fallback_descriptor}",
+                    }
+                    completed = call_exact(
+                        call_token=f"{token}.fallback",
+                        mode=scheduler_mode,
+                        observation=observation_before,
+                        call_environment=environment,
+                        pass_descriptors=(fallback_descriptor,),
+                        boundary_error=canonical_boundary_error,
+                    )
+                finally:
+                    os.close(fallback_descriptor)
     result = {
         **latch,
         "status": (
@@ -698,7 +984,11 @@ def explicit_cancel(submission_root: Path) -> dict[str, Any]:
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
-        "scheduler_calls": 1,
+        "scheduler_control_plane": observation_before,
+        "scheduler_mode": scheduler_mode,
+        "canonical_boundary_error": canonical_boundary_error,
+        "scheduler_attempts": scheduler_attempts,
+        "scheduler_calls": len(scheduler_attempts),
     }
     result_path = evidence_root / f"CANCEL_RESULT.{token}.json"
     result_sha256 = seal_json(result_path, result)

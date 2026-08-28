@@ -1,25 +1,37 @@
-# Exp23 executable-prefix repair pilot v1 launch3
+# Exp23 executable-prefix repair pilot v1 launch4
 
-This is the sealed, launch-capable but unsubmitted launch3 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch4 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch3`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch3` namespace,
-`outputs/.exp23-6e55bb3083712144.transaction.lock`, and `exp23-launch3-*` run names.
-No launch3 submission, snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch4`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch4` namespace,
+`outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock`, and `exp23-launch4-*` run names.
+No launch4 submission, persistent submission snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
-verifying this package.
+verifying this package; the required private snapshot-test copy was removed on success.
 
-Launch1 and launch2 are permanently ordered negative provenance. Each preserved
-read-only source snapshot was independently byte-matched 137/137 to its recorded
-commit; neither journal itself claims git provenance. Launch1 aborted before the
-submission contract because its isolated audit inputs were unavailable. Launch2 also
-aborted before the contract: its causal replay incorrectly included the newly created
-controlled `state/submission` tree in an output fingerprint. Neither attempt produced a
-submission SHA, contract, job ID, receipt, scientific run, checkpoint, W&B run, or
-optimizer update. Their exact protocols, manifests, inventories, claims, fingerprints,
-and journals are sealed in order in `manifest.superseded_launches`; neither namespace,
-identity, snapshot, nor state may be reused or resumed by launch3.
+Launch1, launch2, and launch3 are permanently ordered negative provenance. Each
+preserved read-only source snapshot was independently byte-matched 137/137 to its
+recorded commit. Launch1 aborted before the submission contract because its isolated
+audit inputs were unavailable. Launch2 also aborted before the contract: its causal
+replay incorrectly included the newly created controlled `state/submission` tree in an
+output fingerprint. Neither attempt produced a submission SHA, contract, job ID,
+receipt, scientific run, checkpoint, W&B run, or optimizer update.
+
+Launch3 sealed its contract but failed safely in the first sanitized train-name
+`squeue` reconciliation, before either `sbatch` call. Its preserved tree has exactly
+163 regular files and no symlinks: 137 snapshot files, 20 launch records, one contract,
+and five journal records. The contract SHA is
+`0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2`.
+Both abort journals record empty train/report job-ID sets, no receipt exists, the
+committed source order places both absence checks before the first submission call,
+and independent exact-name `squeue` plus `sacct` observations found no matching jobs.
+Launch3 produced no scheduler job, run, checkpoint, W&B run, scientific result, or
+optimizer update. Exact protocols, manifests, inventories, claims, contracts,
+fingerprints, no-job evidence, and journals for all three attempts are sealed in order
+in `manifest.superseded_launches`; no superseded namespace, identity, snapshot, or
+state may be reused or resumed by launch4. Launch1–3 must never be retried, recovered
+into submission, or used as a recovery source.
 
 ## Scientific design
 
@@ -101,13 +113,22 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-Any launch3 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch4 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` is included as an exact supplemental import
 file with the empty-file SHA-256 recorded in `campaign.SNAPSHOT_IMPORT_FILES`.
 Static preflight freezes that exact inventory once; copying and the isolated snapshot
 bootstrap reopen and verify only the same mapping, so a later mutation or change to the
 campaign file list cannot redefine the sealed execution tree.
+
+Scheduler access is fail-closed. The package binds the canonical root-admin Slurm
+configuration and Lua policy bytes across preclaim, exact-name absence checks,
+`sbatch --test-only`, submission, reconciliation, cancellation, and requeue. The
+submission preclaim makes seven read-only scheduler calls, requires zero matching jobs
+before and after, and tests the exact whole-array `afterok` report dependency without
+creating a job. A sealed copy of the originally authenticated Slurm configuration may
+be used only for exact-ID reconciliation, cancellation, or requeue after a job is
+accepted; it is never authorized for submission.
 
 ## Commands
 
@@ -118,10 +139,14 @@ PY=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model
 PKG=experiments/23-treewm-executable-prefix-repair-pilot-v1
 
 "$PY" -I -S -B "$PKG/campaign.py" --verify
+"$PY" -I -S -B "$PKG/submit.py" --scheduler-test
 "$PY" -I -S -B "$PKG/submit.py" --test-only
 ```
 
-Both commands above are read-only. `submit.py` defaults to `--test-only`, replays
+All commands above are read-only. `--scheduler-test` performs only the authenticated
+Slurm control-plane observation, exact-name zero-job checks, and the two
+`sbatch --test-only` probes; it requires zero scheduler mutation calls and zero
+persistent writes. `submit.py` defaults to `--test-only`, replays
 the frozen audits through its hash-bound isolated runtime, recomposes all 20 direct
 Hydra configs, checks Bash/Slurm test-only surfaces, and creates no snapshot, output,
 or job. The worker remains isolated with `-I -S -B`; only the trainer entry uses

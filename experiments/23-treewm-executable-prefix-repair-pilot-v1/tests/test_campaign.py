@@ -39,18 +39,19 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch3-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch4-") for cell in cells)
 
 
-def test_launch3_namespace_and_ordered_superseded_precontract_aborts_are_exact():
+def test_launch4_namespace_and_ordered_superseded_aborts_are_exact():
     manifest, lock = contracts()
     superseded = manifest["superseded_launches"]
     assert superseded == campaign.SUPERSEDED_LAUNCHES
     assert [row["campaign_id"] for row in superseded] == [
         "treewm-executable-prefix-repair-pilot-v1",
         "treewm-executable-prefix-repair-pilot-v1-launch2",
+        "treewm-executable-prefix-repair-pilot-v1-launch3",
     ]
-    launch1, launch2 = superseded
+    launch1, launch2, launch3 = superseded
     assert launch1["source_commit_claimed_by_journal"] is False
     assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
@@ -82,9 +83,72 @@ def test_launch3_namespace_and_ordered_superseded_precontract_aborts_are_exact()
         "0001_SNAPSHOT_SEALED.json": "be9a29c112f56dc0ace53847b99e3892ab964ee410ca2ecfc2a0fd9d39179bdc",
         "9998_OUTER_ABORTED.json": "48eed85ce12306a35927e3ac8b539be28dc52e107465fac9f5546c378c99cb99",
     }
-    for row in superseded:
+    assert launch3["status"] == "aborted_after_contract_before_scheduler_submission"
+    assert launch3["source_commit"] == "ca979a2b0329d6775793cd8ce51d57a9200e6b8a"
+    assert launch3["source_commit_claimed_by_contract"] is True
+    assert launch3["source_commit_claimed_by_journal"] is False
+    assert launch3["package_protocol_sha256"] == (
+        "6178ed54273d13c88fce750414131c98d002b394231618f11f6d8d6a1a3fb49a"
+    )
+    assert launch3["manifest_raw_sha256"] == (
+        "92a9e17b78075805503907e4d9b71b732b54f5127da981ca17524feba650f74a"
+    )
+    assert launch3["manifest_canonical_sha256"] == (
+        "7259a76924ac6f4566541a00f74923c67151619b36411048dd82ee20747a8d09"
+    )
+    assert launch3["snapshot"] == {
+        "inventory_sha256": "7e237d31f9d49e3b55d0e0598c299b6064ab16b9caa77b62329c9bb8a2839eae",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    }
+    assert launch3["preserved_tree"] == {
+        "regular_file_count": 163,
+        "symlink_count": 0,
+        "snapshot_file_count": 137,
+        "launch_file_count": 20,
+        "contract_file_count": 1,
+        "journal_file_count": 5,
+    }
+    assert launch3["claim_token"] == (
+        "2741418c7e528a0b64b8115cafa46cfac391abd53312cf29b0ffc8a4e1afca4d"
+    )
+    assert launch3["contract_sha256"] == launch3["submission_sha256"] == (
+        "0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2"
+    )
+    assert launch3["journal_sha256"] == {
+        "0000_CLAIMED.json": "25d607cef5aaf49e932e86a56c2272d37be6936010f089f8e7230bb44166be28",
+        "0001_SNAPSHOT_SEALED.json": "d4acf9fb3fa6af98adedf45abd0269d1e491abd48b3cb992509b7641ad05b4c6",
+        "0002_CONTRACT_SEALED.json": "3936a8717d096a93cf7d0eb3dea5293e32c14cdd0b986dd7a738f9501a92a044",
+        "9999_ABORTED.json": "915dd5a3869a6784f3eb9d8e0d564a16b96fb17689c3d31f5a2e21431365199a",
+        "9998_OUTER_ABORTED.json": "e65e9b39d268c2497e98e1d66b0cadd7f80b0f53c98a243057cc03ca399b47b0",
+    }
+    assert launch3["failure_phase"] == "first_sanitized_squeue_before_any_sbatch"
+    assert launch3["actual_sbatch_calls"] == 0
+    assert launch3["known_job_ids"] == []
+    assert launch3["job_ids_by_role"] == {"train": [], "report": []}
+    assert launch3["submission_contract_committed"] is True
+    assert launch3["no_job_proof"]["source_order_at_commit"] == {
+        "contract_sealed_first": True,
+        "train_absence_check_line": 3112,
+        "report_absence_check_line": 3113,
+        "first_sbatch_call_line": 3114,
+        "recorded_failure": "first_train_absence_check",
+    }
+    observation = launch3["no_job_proof"]["current_scheduler_observation"]
+    assert observation["environment"] == {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+    }
+    assert observation["history_start_utc"] == "2026-08-01"
+    assert observation["squeue_matching_rows"] == 0
+    assert observation["sacct_matching_rows"] == 0
+    for row in superseded[:2]:
         assert row["submission_sha256"] is None
         assert row["known_job_ids"] == []
+    for row in superseded:
         for key in (
             "submission_receipt_committed",
             "scientific_run_started",
@@ -94,19 +158,21 @@ def test_launch3_namespace_and_ordered_superseded_precontract_aborts_are_exact()
             "checkpoints_consumed",
             "reuse_allowed",
             "resume_allowed",
+            "retry_allowed",
+            "recovery_allowed",
         ):
             assert row[key] is False
         assert row["optimizer_updates"] == 0
     assert launch2["submission_contract_committed"] is False
     assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
     )
     assert manifest["paths"]["transaction_lock"] == (
-        "outputs/.exp23-6e55bb3083712144.transaction.lock"
+        "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock"
     )
     assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
-    assert manifest["logging"]["wandb_project"].endswith("-launch3")
-    assert manifest["logging"]["wandb_group"].endswith("-launch3")
+    assert manifest["logging"]["wandb_project"].endswith("-launch4")
+    assert manifest["logging"]["wandb_group"].endswith("-launch4")
 
     tampered = copy.deepcopy(manifest)
     tampered["paths"]["run_root"] = launch2["run_root"]

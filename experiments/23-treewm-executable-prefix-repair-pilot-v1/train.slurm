@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch3
+#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch4
 #SBATCH --partition=polar4,polar3,polar,grizzly
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal
@@ -19,7 +19,6 @@ set -Eeuo pipefail
 umask 077
 
 PYTHON_EXECUTABLE=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python
-SCONTROL_EXECUTABLE=/usr/local/bin/scontrol
 export PATH=/usr/bin:/bin
 
 if [[ "$#" -ne 3 ]]; then
@@ -38,8 +37,8 @@ case "$SUBMISSION_ROOT" in /*) ;; *) echo "submission root must be absolute" >&2
     echo "submission contract is unavailable or symlinked" >&2
     exit 2
 }
-[[ -x "$PYTHON_EXECUTABLE" && -x "$SCONTROL_EXECUTABLE" ]] || {
-    echo "pinned Python/Slurm control executable is unavailable" >&2
+[[ -x "$PYTHON_EXECUTABLE" ]] || {
+    echo "pinned Python executable is unavailable" >&2
     exit 2
 }
 [[ -z "${TREEWM_STOP_AFTER_UPDATE+x}" ]] || {
@@ -70,8 +69,6 @@ REQUEUE_CALLING="$GENERATION_ROOT/REQUEUE_CALLING.json"
 TASK_COMPLETE="$TASK_ROOT/WORKER_COMPLETE.json"
 TASK_CANCEL="$TASK_ROOT/CANCEL_REQUESTED.json"
 GLOBAL_CANCEL="$SUBMISSION_ROOT/CANCEL_REQUESTED.json"
-REQUEUE_TARGET="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
-
 COMMON_ARGS=(
     --submission-root "$SUBMISSION_ROOT"
     --submission-sha256 "$SUBMISSION_SHA256"
@@ -181,28 +178,5 @@ if cancel_is_latched; then
     exit 76
 fi
 
-job_record=$(
-    "$SCONTROL_EXECUTABLE" show job "$REQUEUE_TARGET" --oneliner
-) || { echo "cannot read exact Slurm array element" >&2; exit 2; }
-[[ "$job_record" =~ (^|[[:space:]])ArrayJobId=${SLURM_ARRAY_JOB_ID}([[:space:]]|$) ]] || {
-    echo "Slurm ArrayJobId differs" >&2
-    exit 2
-}
-[[ "$job_record" =~ (^|[[:space:]])ArrayTaskId=${SLURM_ARRAY_TASK_ID}([[:space:]]|$) ]] || {
-    echo "Slurm ArrayTaskId differs" >&2
-    exit 2
-}
-[[ "$job_record" =~ (^|[[:space:]])JobState=RUNNING([[:space:]]|$) ]] || {
-    echo "array element is not RUNNING at requeue linearization" >&2
-    exit 2
-}
-cancel_is_latched && { echo "cancellation raced before CALLING" >&2; exit 76; }
-
-"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" mark-requeue-calling "${COMMON_ARGS[@]}"
-cancel_is_latched && { echo "cancellation raced after CALLING" >&2; exit 76; }
-
-if ! "$SCONTROL_EXECUTABLE" requeue "$REQUEUE_TARGET"; then
-    echo "Slurm requeue call failed after immutable CALLING" >&2
-    exit 2
-fi
+"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" requeue "${COMMON_ARGS[@]}"
 exit 0

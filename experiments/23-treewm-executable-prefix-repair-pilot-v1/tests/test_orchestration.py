@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import hashlib
 import inspect
@@ -66,6 +67,67 @@ def causal_parity_audit():
 @pytest.fixture(scope="module")
 def worker():
     return load("worker")
+
+
+def scheduler_contract() -> dict:
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    return manifest["execution"]["scheduler_control_plane"]
+
+
+def scheduler_config_bytes() -> bytes:
+    return (
+        "ClusterName=cs-oci-ord\n"
+        "SlurmctldHost=cs-oci-ord-a\n"
+        "SlurmctldHost=cs-oci-ord-b\n"
+        "SlurmctldPort=6817\n"
+        "AuthType=auth/munge\n"
+        "GresTypes=gpu\n"
+        "CliFilterPlugins=lua\n"
+        "JobSubmitPlugins=lua\n"
+        "CommunicationParameters=NoAddrCache\n"
+    ).encode("utf-8")
+
+
+def scheduler_observation(submit) -> dict:
+    payload = scheduler_config_bytes()
+    return {
+        "schema_version": 1,
+        "trust_model": submit.SCHEDULER_TRUST_MODEL,
+        "config": {
+            "path": scheduler_contract()["slurm_conf"],
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "identity": {"size": len(payload)},
+        },
+        "critical": {
+            key: scheduler_contract()[key]
+            for key in (
+                "cluster_name",
+                "slurmctld_hosts",
+                "slurmctld_port",
+                "auth_type",
+                "gres_types",
+                "cli_filter_plugins",
+                "job_submit_plugins",
+            )
+        },
+        "cli_filter_policy": {"files": {}, "tree_sha256": "a" * 64},
+    }
+
+
+def scheduler_fallback(submit) -> dict:
+    payload = scheduler_config_bytes()
+    return {
+        "schema_version": 1,
+        "purpose": (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        ),
+        "encoding": "base64",
+        "payload_base64": submit.base64.b64encode(payload).decode("ascii"),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+        "source_control_plane": scheduler_observation(submit),
+    }
 
 
 def bind_causal_execution_context(
@@ -143,13 +205,13 @@ def interpreter_identity(submit):
     }
 
 
-def test_launch3_transaction_lock_path_is_exact(submit):
+def test_launch4_transaction_lock_path_is_exact(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     run_root = Path(manifest["paths"]["run_root"])
     submission_root = run_root / "state" / "submission"
     expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
     assert submit._transaction_lock_path(submission_root) == expected
-    assert expected.name == ".exp23-6e55bb3083712144.transaction.lock"
+    assert expected.name == ".exp23-d3765ecc9f5b5f7a.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -1000,6 +1062,19 @@ def test_submit_implementation_uses_only_preflight_inventory(submit):
     assert "_validated_preflight_inventory(preflight)" in source
     assert "snapshot_inventory(" not in source
     assert "load_campaign(" not in source
+
+
+def test_late_report_parity_and_accepted_dependency_precede_ready(submit):
+    source = inspect.getsource(submit._submit_campaign_impl)
+    late = source.index("report_test_completed, report_test_observation")
+    zero_query = source.index("_assert_job_absent(", late)
+    zero_job = source.index("zero_job_after_test")
+    real_report = source.index("report_id, report_record = _submit_one")
+    accepted = source.index("dependency_evidence = _accepted_report_dependency_evidence")
+    journal = source.index('"REPORT_SUBMITTED"')
+    ready = source.index('"READY_TO_COMMIT"')
+    cancellation = source.index("cancellation = _cancel_exact")
+    assert late < zero_query < zero_job < real_report < accepted < journal < ready < cancellation
 
 
 def test_snapshot_verifier_rejects_extra_directory_and_writable_root(submit, tmp_path):
@@ -2178,11 +2253,16 @@ def test_git_commands_use_pinned_binary_and_read_only_sanitized_env(submit, monk
     }
 
 
-def test_nonzero_sbatch_preserves_parseable_exact_id(submit, tmp_path):
+def test_nonzero_sbatch_preserves_parseable_exact_id(submit, tmp_path, monkeypatch):
     calls = 0
 
-    def runner(command, cwd, environment):
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: scheduler_observation(submit)
+    )
+
+    def runner(command, cwd, environment, inherited_fds):
         nonlocal calls
+        assert inherited_fds == ()
         calls += 1
         if calls == 1:
             return subprocess.CompletedProcess(command, 1, stdout="4312\n", stderr="lost response")
@@ -2191,12 +2271,16 @@ def test_nonzero_sbatch_preserves_parseable_exact_id(submit, tmp_path):
     with pytest.raises(submit.SchedulerSubmissionError) as caught:
         submit._submit_one(
             ["sbatch"], job_name="exact", comment="token", squeue="squeue",
-            cwd=tmp_path, runner=runner,
+            cwd=tmp_path, runner=runner, control_plane=scheduler_contract(),
+            fallback=scheduler_fallback(submit),
         )
     assert caught.value.job_ids == ("4312",)
 
 
-def test_federated_sbatch_suffix_is_rejected(submit, tmp_path):
+def test_federated_sbatch_suffix_is_rejected(submit, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: scheduler_observation(submit)
+    )
     responses = iter(
         [
             subprocess.CompletedProcess([], 0, stdout="4312;foreign\n", stderr=""),
@@ -2207,7 +2291,632 @@ def test_federated_sbatch_suffix_is_rejected(submit, tmp_path):
         submit._submit_one(
             ["sbatch"], job_name="exact", comment="token", squeue="squeue",
             cwd=tmp_path, runner=lambda *_args: next(responses),
+            control_plane=scheduler_contract(), fallback=scheduler_fallback(submit),
         )
+
+
+def test_scheduler_config_parser_rejects_include_duplicate_and_missing_policy(submit):
+    contract = scheduler_contract()
+    valid = scheduler_config_bytes()
+    assert submit._parse_slurm_config(valid, contract)["cluster_name"] == "cs-oci-ord"
+    for payload, pattern in (
+        (b"Include=/tmp/hostile.conf\n" + valid, "include"),
+        (valid + b"ClusterName=cs-oci-ord\n", "ClusterName"),
+        (valid.replace(b"CliFilterPlugins=lua\n", b""), "CliFilterPlugins"),
+        (valid.replace(b"JobSubmitPlugins=lua\n", b""), "JobSubmitPlugins"),
+        (valid.replace(b"AuthType=auth/munge\n", b"AuthType=auth/none\n"), "AuthType"),
+    ):
+        with pytest.raises(submit.SubmissionError, match=pattern):
+            submit._parse_slurm_config(payload, contract)
+
+
+def test_scheduler_authenticator_rejects_symlink_and_wrong_mode_files(submit):
+    root = Path(scheduler_contract()["slurm_conf"]).parent
+    with pytest.raises(submit.SubmissionError, match="symlink|regular mode"):
+        submit._root_owned_regular_observation(
+            root / "slurmdbd.conf", "known canonical-tree symlink adversary"
+        )
+    with pytest.raises(submit.SubmissionError, match="regular mode 0644"):
+        submit._root_owned_regular_observation(
+            root / "job_submit.lua_01_04_25", "known wrong-mode policy adversary"
+        )
+
+
+def test_scheduler_policy_missing_module_and_special_entry_rejected(
+    submit, tmp_path, monkeypatch
+):
+    policy = tmp_path / "cli_filters"
+    policy.mkdir()
+    (policy / "util.lua").write_text("return {}\n", encoding="utf-8")
+
+    def opened(_path, _label):
+        descriptor = os.open(policy, os.O_RDONLY | os.O_DIRECTORY)
+        return [descriptor], [os.fstat(descriptor)]
+
+    monkeypatch.setattr(submit, "_root_owned_directory_chain", opened)
+    with pytest.raises(submit.SubmissionError, match="incomplete"):
+        submit._scheduler_policy_observation(tmp_path / "slurm.conf")
+
+    for name in submit.SCHEDULER_REQUIRED_POLICY_MODULES:
+        (policy / name).write_text("return {}\n", encoding="utf-8")
+    (policy / "hostile").symlink_to(tmp_path)
+    with pytest.raises(submit.SubmissionError, match="unsafe"):
+        submit._scheduler_policy_observation(tmp_path / "slurm.conf")
+
+
+def test_scheduler_environment_replaces_hostile_inheritance(submit, monkeypatch):
+    monkeypatch.setenv("SLURM_CONF", "/tmp/hostile.conf")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/hostile.so")
+    assert submit._scheduler_environment(scheduler_contract()) == {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SLURM_CONF": scheduler_contract()["slurm_conf"],
+    }
+
+
+def test_live_canonical_scheduler_control_plane_authenticates_read_only(submit):
+    observation = submit._scheduler_control_plane_observation(scheduler_contract())
+    assert observation["critical"]["cluster_name"] == "cs-oci-ord"
+    assert observation["config"]["path"] == scheduler_contract()["slurm_conf"]
+    assert len(observation["cli_filter_policy"]["files"]) >= 7
+
+
+def test_live_fallback_roundtrip_and_memfd_squeue_are_read_only(submit):
+    control_plane = scheduler_contract()
+    fallback = submit._scheduler_fallback_config(control_plane)
+    binding, payload = submit._validated_scheduler_fallback(
+        fallback, control_plane, fallback["source_control_plane"]
+    )
+    assert len(payload) == binding["size"] and binding["size"] > 0
+    assert hashlib.sha256(payload).hexdigest() == binding["sha256"]
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    completed, observation = submit._fallback_scheduler_call(
+        [
+            "/usr/local/bin/squeue",
+            "--noheader",
+            "--name=treewm-exp23-never-created-fallback-regression",
+            f"--user={user}",
+            "--format=%A",
+        ],
+        REPO,
+        control_plane,
+        fallback,
+        submit._default_scheduler_runner,
+    )
+    assert completed.returncode == 0 and not completed.stdout.strip()
+    assert observation["mode"] == "sealed_original_config_fallback"
+
+
+def test_live_fd_pinned_scontrol_and_preclaim_memfd_can_show_config_read_only(
+    submit, worker
+):
+    control_plane = scheduler_contract()
+    fallback = submit._scheduler_fallback_config(control_plane)
+    binding, payload = submit._validated_scheduler_fallback(
+        fallback, control_plane, fallback["source_control_plane"]
+    )
+    directory_fd = executable_fd = config_fd = None
+    try:
+        directory_fd, executable_fd, _info, executable_sha256 = (
+            worker._open_root_owned_scheduler_executable(
+                Path("/usr/local/bin/scontrol")
+            )
+        )
+        assert len(executable_sha256) == 64
+        config_fd = worker._sealed_scheduler_config_descriptor(payload)
+        environment = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "SLURM_CONF": f"/proc/self/fd/{config_fd}",
+        }
+        completed = worker._default_scheduler_runner(
+            [f"/proc/self/fd/{executable_fd}", "show", "config"],
+            REPO,
+            environment,
+            (config_fd, executable_fd),
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "ClusterName" in completed.stdout and "cs-oci-ord" in completed.stdout
+        assert hashlib.sha256(payload).hexdigest() == binding["sha256"]
+    finally:
+        for descriptor in (config_fd, executable_fd, directory_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
+    submit, monkeypatch
+):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    stable = scheduler_observation(submit)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: stable
+    )
+
+    def runner(command, _cwd, environment, inherited_fds):
+        values = list(command)
+        commands.append(values)
+        assert environment == submit._scheduler_environment(scheduler_contract())
+        assert inherited_fds == ()
+        executable = Path(values[0]).name
+        if executable == "scontrol":
+            return subprocess.CompletedProcess(
+                values,
+                0,
+                stdout=(
+                    "ClusterName = cs-oci-ord\n"
+                    "SlurmctldHost[0] = cs-oci-ord-a\n"
+                    "SlurmctldHost[1] = cs-oci-ord-b\n"
+                    "SlurmctldPort = 6817\n"
+                    "AuthType = auth/munge\n"
+                    "GresTypes = gpu\n"
+                    "CliFilterPlugins = lua\n"
+                    "JobSubmitPlugins = lua\n"
+                ),
+                stderr="",
+            )
+        if executable == "squeue":
+            return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+        assert executable == "sbatch" and "--test-only" in values
+        role = "train" if any(str(value).endswith("train.slurm") for value in values) else "report"
+        execution = manifest["execution"]
+        job_name = next(value.split("=", 1)[1] for value in values if value.startswith("--job-name="))
+        comment = next(value.split("=", 1)[1] for value in values if value.startswith("--comment="))
+        output = next(value.split("=", 1)[1] for value in values if value.startswith("--output="))
+        options = {
+            "account": "edgeai_tao-ptm_image-foundation-model-clip",
+            "cpus-per-task": str(execution["cpus_per_task"]),
+            "comment": comment,
+            "export": "NONE",
+            "job-name": job_name,
+            "mem": str(execution["memory_per_task"]),
+            "nodes": "1",
+            "ntasks-per-node": "1",
+            "open-mode": "a",
+            "output": output,
+            "parsable": "set",
+            "partition": (
+                str(execution["gpu_partitions"])
+                if role == "train"
+                else str(execution["cpu_partition"])
+            ),
+            "qos": "normal",
+            "test-only": "set",
+            "time": str(execution["walltime"]),
+            "verbose": "3",
+        }
+        if role == "train":
+            options.update(
+                {
+                    "array": "0-19%20",
+                    "gpus-per-node": str(execution["gpus_per_task"]),
+                    "requeue": "requeue",
+                    "signal": f"B:USR1@{execution['signal_seconds_before_end']}",
+                }
+            )
+        partition = (
+            str(execution["gpu_partitions"]).split(",")[0]
+            if role == "train"
+            else str(execution["cpu_partition"])
+        )
+        stderr = "\n".join(
+            [
+                "sbatch: defined options",
+                *(f"sbatch: {key} : {value}" for key, value in options.items()),
+                "sbatch: end of defined options",
+                f"sbatch: Job 999 to start at now using {execution['cpus_per_task']} processors on nodes node in partition {partition}",
+            ]
+        )
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr=stderr + "\n")
+
+    result = submit.scheduler_preclaim_test(REPO, manifest, runner=runner)
+    assert result["scheduler_calls"] == 7
+    assert result["scheduler_mutation_calls"] == 0
+    assert len(commands) == 7
+    assert [Path(command[0]).name for command in commands].count("sbatch") == 2
+    assert all(
+        Path(command[0]).name in {"scontrol", "squeue", "sbatch"}
+        for command in commands
+    )
+    assert all(
+        Path(command[0]).name != "sbatch" or "--test-only" in command
+        for command in commands
+    )
+    train_sbatch, report_sbatch = [
+        command for command in commands if Path(command[0]).name == "sbatch"
+    ]
+    assert "--array=0-19%20" in train_sbatch
+    assert not any(value.startswith("--array=") for value in report_sbatch)
+    assert all(any(value.startswith("--comment=") for value in command) for command in (train_sbatch, report_sbatch))
+    assert all(any(value.startswith("--output=") for value in command) for command in (train_sbatch, report_sbatch))
+    assert all("--parsable" in command for command in (train_sbatch, report_sbatch))
+    assert result["report_dependency_test"] == submit.REPORT_DEPENDENCY_TEST_REQUIREMENT
+
+
+def test_late_report_test_only_requires_exact_dependency_and_kill_policy(submit):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    execution = manifest["execution"]
+    comment = "treewm-exp23:" + "c" * 64
+    output = "/sealed/submission/logs/report_%j.out"
+    dependency = "afterok:7000"
+    options = {
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "cpus-per-task": str(execution["cpus_per_task"]),
+        "comment": comment,
+        "dependency": dependency,
+        "export": "NONE",
+        "job-name": "exact-report",
+        "kill-on-invalid-dep": "yes",
+        "mem": str(execution["memory_per_task"]),
+        "nodes": "1",
+        "ntasks-per-node": "1",
+        "open-mode": "a",
+        "output": output,
+        "parsable": "set",
+        "partition": str(execution["cpu_partition"]),
+        "qos": "normal",
+        "test-only": "set",
+        "time": str(execution["walltime"]),
+        "verbose": "3",
+    }
+
+    def completed(values):
+        stderr = "\n".join(
+            [
+                "sbatch: defined options",
+                *(f"sbatch: {key} : {value}" for key, value in values.items()),
+                "sbatch: end of defined options",
+                (
+                    "sbatch: Job 999 to start at now using "
+                    f"{execution['cpus_per_task']} processors on nodes node in partition cpu"
+                ),
+            ]
+        )
+        return subprocess.CompletedProcess(["sbatch"], 0, stdout="", stderr=stderr + "\n")
+
+    parsed = submit._parse_sbatch_test_only(
+        completed(options),
+        role="report",
+        job_name="exact-report",
+        comment=comment,
+        output=output,
+        manifest=manifest,
+        dependency=dependency,
+    )
+    assert parsed["defined_options"]["dependency"] == dependency
+    assert parsed["defined_options"]["kill-on-invalid-dep"] == "yes"
+    missing_kill = dict(options)
+    del missing_kill["kill-on-invalid-dep"]
+    with pytest.raises(submit.SubmissionError, match="options differ"):
+        submit._parse_sbatch_test_only(
+            completed(missing_kill),
+            role="report",
+            job_name="exact-report",
+            comment=comment,
+            output=output,
+            manifest=manifest,
+            dependency=dependency,
+        )
+
+
+def test_accepted_report_dependency_is_verified_before_ready(
+    submit, tmp_path, monkeypatch
+):
+    stable = scheduler_observation(submit)
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: stable
+    )
+    observations: list[dict] = []
+
+    def runner(command, _cwd, environment, inherited_fds):
+        values = list(command)
+        assert values == ["scontrol", "show", "job", "7001", "--oneliner"]
+        assert environment == submit._scheduler_environment(scheduler_contract())
+        assert inherited_fds == ()
+        return subprocess.CompletedProcess(
+            values,
+            0,
+            stdout=(
+                "JobId=7001 JobName=exact-report JobState=PENDING "
+                "Dependency=afterok:7000(unfulfilled) "
+                f"Comment=treewm-exp23:{'c' * 64}\n"
+            ),
+            stderr="",
+        )
+
+    evidence = submit._accepted_report_dependency_evidence(
+        scontrol="scontrol",
+        report_id="7001",
+        train_id="7000",
+        report_name="exact-report",
+        comment="treewm-exp23:" + "c" * 64,
+        cwd=tmp_path,
+        runner=runner,
+        control_plane=scheduler_contract(),
+        expected_observation=stable,
+        observations=observations,
+    )
+    assert evidence["dependency"] == "afterok:7000(unfulfilled)"
+    assert len(observations) == 1
+    with pytest.raises(submit.SubmissionError, match="Dependency"):
+        submit._scontrol_oneliner_field(
+            "Dependency=afterok:7000 Dependency=afterany:7000\n", "Dependency"
+        )
+
+
+def test_scheduler_trust_model_explicitly_bounds_mutable_external_runtime(submit):
+    trust = scheduler_contract()["trust_model"]
+    assert trust == submit.SCHEDULER_TRUST_MODEL
+    assert "config and Lua policy bytes are observation-bound" in trust
+    assert "clients, plugin binaries, and shared libraries are trusted mutable" in trust
+
+
+def test_accepted_id_is_exactly_cancelled_with_retained_config_after_critical_drift(
+    submit, tmp_path, monkeypatch
+):
+    stable = scheduler_observation(submit)
+    observed = 0
+    calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+
+    def observe(_control):
+        nonlocal observed
+        observed += 1
+        if observed == 1:
+            return stable
+        raise submit.SubmissionError("injected critical controller drift")
+
+    def runner(command, _cwd, environment, inherited_fds):
+        values = list(command)
+        fds = tuple(inherited_fds)
+        calls.append((values, dict(environment), fds))
+        if Path(values[0]).name == "sbatch":
+            assert environment["SLURM_CONF"] == scheduler_contract()["slurm_conf"]
+            assert not fds
+            return subprocess.CompletedProcess(values, 0, stdout="4312\n", stderr="")
+        assert environment["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(fds) == 1
+        assert os.pread(fds[0], len(scheduler_config_bytes()), 0) == scheduler_config_bytes()
+        if Path(values[0]).name == "squeue":
+            return subprocess.CompletedProcess(
+                values,
+                0,
+                stdout=f"4312|exact|{expected_user}|PENDING|token\n",
+                stderr="",
+            )
+        assert values == ["scancel", "4312"]
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(submit, "_scheduler_control_plane_observation", observe)
+    fallback = scheduler_fallback(submit)
+    with pytest.raises(submit.SchedulerSubmissionError) as caught:
+        submit._submit_one(
+            ["sbatch"],
+            job_name="exact",
+            comment="token",
+            squeue="squeue",
+            cwd=tmp_path,
+            runner=runner,
+            control_plane=scheduler_contract(),
+            fallback=fallback,
+        )
+    assert caught.value.job_ids == ("4312",)
+    cancellation = submit._cancel_exact(
+        "scancel",
+        caught.value.job_ids,
+        tmp_path,
+        runner,
+        scheduler_contract(),
+        fallback,
+    )
+    assert cancellation["job_ids"] == ["4312"]
+    assert [Path(command[0]).name for command, _env, _fds in calls] == [
+        "sbatch",
+        "squeue",
+        "scancel",
+    ]
+    assert all(
+        "--test-only" not in command or Path(command[0]).name == "sbatch"
+        for command, _env, _fds in calls
+    )
+
+
+def test_retained_scheduler_config_can_never_authorize_sbatch(
+    submit, tmp_path
+):
+    with pytest.raises(submit.SubmissionError, match="restricted"):
+        submit._fallback_scheduler_call(
+            ["sbatch", "--test-only"],
+            tmp_path,
+            scheduler_contract(),
+            scheduler_fallback(submit),
+            lambda *_args: pytest.fail("forbidden fallback sbatch reached runner"),
+        )
+
+
+def test_submission_authorization_binds_preclaim_fallback_and_every_real_call(
+    submit, tmp_path, monkeypatch
+):
+    authorized = scheduler_observation(submit)
+    drifted = json.loads(json.dumps(authorized))
+    drifted["cli_filter_policy"]["tree_sha256"] = "b" * 64
+    fallback = scheduler_fallback(submit)
+    fallback["source_control_plane"] = drifted
+    with pytest.raises(submit.SubmissionError, match="changed after the exact preclaim"):
+        submit._validated_scheduler_fallback(
+            fallback, scheduler_contract(), authorized
+        )
+
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: drifted
+    )
+    with pytest.raises(submit.SchedulerBoundaryError, match="preclaim authorization") as caught:
+        submit._scheduler_call(
+            ["sbatch"],
+            tmp_path,
+            scheduler_contract(),
+            lambda *_args: pytest.fail("drifted policy reached real sbatch"),
+            authorized,
+        )
+    assert caught.value.completed is None
+
+
+def test_policy_drift_before_report_never_calls_report_and_cancels_train_exactly(
+    submit, tmp_path, monkeypatch
+):
+    authorized = scheduler_observation(submit)
+    fallback = scheduler_fallback(submit)
+    drifted = False
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls: list[list[str]] = []
+
+    def observe(_value):
+        if drifted:
+            changed = json.loads(json.dumps(authorized))
+            changed["cli_filter_policy"]["tree_sha256"] = "c" * 64
+            return changed
+        return authorized
+
+    def runner(command, _cwd, environment, inherited_fds):
+        values = list(command)
+        calls.append(values)
+        executable = Path(values[0]).name
+        if executable == "sbatch":
+            assert any(str(value).endswith("train.slurm") for value in values)
+            return subprocess.CompletedProcess(values, 0, stdout="5100\n", stderr="")
+        if executable == "squeue":
+            if environment["SLURM_CONF"].startswith("/proc/self/fd/"):
+                name = next(value.split("=", 1)[1] for value in values if value.startswith("--name="))
+                stdout = (
+                    f"5100|{name}|{expected_user}|PENDING|train-token\n"
+                    if name == "train"
+                    else ""
+                )
+                return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(
+                values,
+                0,
+                stdout=f"5100|train|{expected_user}|PENDING|train-token\n",
+                stderr="",
+            )
+        assert executable == "scancel" and values == ["scancel", "5100"]
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(submit, "_scheduler_control_plane_observation", observe)
+    train_id, _record = submit._submit_one(
+        ["sbatch", "train.slurm"],
+        job_name="train",
+        comment="train-token",
+        squeue="squeue",
+        cwd=tmp_path,
+        runner=runner,
+        control_plane=scheduler_contract(),
+        fallback=fallback,
+        expected_observation=authorized,
+    )
+    assert train_id == "5100"
+    drifted = True
+    with pytest.raises(submit.SchedulerSubmissionError) as caught:
+        submit._submit_one(
+            ["sbatch", "report.slurm"],
+            job_name="report",
+            comment="report-token",
+            squeue="squeue",
+            cwd=tmp_path,
+            runner=runner,
+            control_plane=scheduler_contract(),
+            fallback=fallback,
+            expected_observation=authorized,
+        )
+    assert caught.value.job_ids == ()
+    cancellation = submit._cancel_exact(
+        "scancel",
+        [train_id],
+        tmp_path,
+        runner,
+        scheduler_contract(),
+        fallback,
+    )
+    assert cancellation["job_ids"] == ["5100"]
+    assert not any(
+        Path(command[0]).name == "sbatch"
+        and any(str(value).endswith("report.slurm") for value in command)
+        for command in calls
+    )
+
+
+def test_recovery_reconciliation_and_cancel_survive_critical_canonical_drift(
+    submit, tmp_path, monkeypatch
+):
+    fallback = scheduler_fallback(submit)
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        submit,
+        "_scheduler_control_plane_observation",
+        lambda _value: (_ for _ in ()).throw(
+            submit.SubmissionError("injected recovery controller drift")
+        ),
+    )
+
+    def runner(command, _cwd, environment, inherited_fds):
+        values = list(command)
+        calls.append(values)
+        assert environment["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(inherited_fds) == 1
+        if Path(values[0]).name == "squeue":
+            return subprocess.CompletedProcess(
+                values,
+                0,
+                stdout=f"6100|train|{expected_user}|PENDING|token\n",
+                stderr="",
+            )
+        assert values == ["scancel", "6100"]
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    recovered = submit._reconcile_job_ids(
+        "squeue",
+        "train",
+        "token",
+        tmp_path,
+        runner,
+        scheduler_contract(),
+        fallback=fallback,
+    )
+    assert recovered == ["6100"]
+    cancellation = submit._cancel_exact(
+        "scancel",
+        recovered,
+        tmp_path,
+        runner,
+        scheduler_contract(),
+        fallback,
+    )
+    assert cancellation["job_ids"] == ["6100"]
+    assert [Path(command[0]).name for command in calls] == ["squeue", "scancel"]
+
+
+def test_recovery_reconciliation_binds_optional_arguments_by_keyword(submit):
+    tree = ast.parse(inspect.getsource(submit._recover_transaction_locked))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_reconcile_job_ids"
+    ]
+    assert len(calls) == 1 and len(calls[0].args) == 6
+    keywords = {item.arg: item.value for item in calls[0].keywords}
+    assert set(keywords) == {"fallback", "expected_observation", "observations"}
+    assert isinstance(keywords["fallback"], ast.Name)
+    assert keywords["fallback"].id == "scheduler_fallback"
+    assert isinstance(keywords["expected_observation"], ast.Constant)
+    assert keywords["expected_observation"].value is None
+    assert isinstance(keywords["observations"], ast.Name)
+    assert keywords["observations"].id == "scheduler_observations"
 
 
 def test_paused_submitter_excludes_recovery_until_owner_exits(submit, tmp_path):
@@ -2244,10 +2953,12 @@ def test_successful_abort_cancellation_is_idempotent_recovery_evidence(submit):
     aborted = {
         "cancellation": {
             "job_ids": ids,
-            "command": ["/usr/bin/scancel", *ids],
-            "stdout": "",
-            "stderr": "",
-        },
+                "command": ["/usr/bin/scancel", *ids],
+                "stdout": "",
+                "stderr": "",
+                "scheduler_control_plane": {"schema_version": 1},
+                "canonical_boundary_error": None,
+            },
         "cancellation_error": None,
     }
     assert submit._validated_successful_cancellation(
@@ -2488,14 +3199,28 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch3",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
         "snapshot_root": str(snapshot),
     }
-    manifest = {"execution": {"scancel": str(scancel)}}
-    monkeypatch.setattr(cancel, "validate_receipt", lambda _root: (receipt, {}, manifest))
+    control_plane = scheduler_contract()
+    manifest = {
+        "execution": {"scancel": str(scancel), "scheduler_control_plane": control_plane}
+    }
+    contract = {"scheduler_fallback_config": scheduler_fallback(submit)}
+    monkeypatch.setattr(cancel, "validate_receipt", lambda _root: (receipt, contract, manifest))
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_fallback_config",
+        lambda *_args: (scheduler_fallback(submit), scheduler_config_bytes()),
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_control_plane_observation",
+        lambda *_args: scheduler_observation(submit),
+    )
     monkeypatch.setenv("SLURM_CONF", "/tmp/hostile-slurm.conf")
     monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/hostile-libraries")
 
@@ -2504,9 +3229,11 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
         assert list((tmp_path / "cancellation").glob("CANCEL_CALL.*.json"))
         assert kwargs["env"] == {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "LANG": "C",
-            "LC_ALL": "C",
-        }
+                "LANG": "C",
+                "LC_ALL": "C",
+                "SLURM_CONF": control_plane["slurm_conf"],
+            }
+        assert kwargs["pass_fds"] == ()
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(cancel.subprocess, "run", run)
@@ -2516,4 +3243,124 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     assert len(result_files) == 1
     sealed = json.loads(result_files[0].read_text())
     assert sealed["returncode"] == 0 and sealed["command"][-2:] == ["100", "101"]
-    assert cancel.scheduler_environment() == submit._scheduler_environment()
+    assert cancel.scheduler_environment(control_plane) == submit._scheduler_environment(
+        control_plane
+    )
+
+
+def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
+    submit, cancel, tmp_path, monkeypatch
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    scancel = tmp_path / "scancel"
+    scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    scancel.chmod(0o755)
+    receipt = {
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "submission_sha256": "c" * 64,
+        "train_array_job_id": "100",
+        "report_job_id": "101",
+        "snapshot_root": str(snapshot),
+    }
+    manifest = {
+        "execution": {
+            "scancel": str(scancel),
+            "scheduler_control_plane": scheduler_contract(),
+        }
+    }
+    fallback = scheduler_fallback(submit)
+    monkeypatch.setattr(
+        cancel, "validate_receipt", lambda _root: (receipt, {"scheduler_fallback_config": fallback}, manifest)
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_fallback_config",
+        lambda *_args: (fallback, scheduler_config_bytes()),
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_control_plane_observation",
+        lambda *_args: (_ for _ in ()).throw(cancel.CancellationError("critical drift")),
+    )
+
+    def run(command, **kwargs):
+        assert list(command)[-2:] == ["100", "101"]
+        assert kwargs["env"]["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(kwargs["pass_fds"]) == 1
+        descriptor = kwargs["pass_fds"][0]
+        assert os.pread(descriptor, len(scheduler_config_bytes()), 0) == scheduler_config_bytes()
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(cancel.subprocess, "run", run)
+    result = cancel.explicit_cancel(tmp_path)
+    assert result["scheduler_mode"] == "sealed_original_config_fallback"
+    assert "critical drift" in result["canonical_boundary_error"]
+    assert result["job_ids"] == ["100", "101"]
+
+
+def test_explicit_cancel_retries_exact_ids_when_canonical_failure_closes_on_drift(
+    submit, cancel, tmp_path, monkeypatch
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    scancel = tmp_path / "scancel"
+    scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    scancel.chmod(0o755)
+    receipt = {
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "submission_sha256": "d" * 64,
+        "train_array_job_id": "200",
+        "report_job_id": "201",
+        "snapshot_root": str(snapshot),
+    }
+    manifest = {
+        "execution": {
+            "scancel": str(scancel),
+            "scheduler_control_plane": scheduler_contract(),
+        }
+    }
+    fallback = scheduler_fallback(submit)
+    monkeypatch.setattr(
+        cancel, "validate_receipt", lambda _root: (receipt, {"scheduler_fallback_config": fallback}, manifest)
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_fallback_config",
+        lambda *_args: (fallback, scheduler_config_bytes()),
+    )
+    observations = iter(
+        [
+            scheduler_observation(submit),
+            cancel.CancellationError("critical drift after canonical scancel"),
+        ]
+    )
+
+    def observe(*_args):
+        value = next(observations)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    calls = 0
+
+    def run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert list(command)[-2:] == ["200", "201"]
+        if calls == 1:
+            assert kwargs["env"]["SLURM_CONF"] == scheduler_contract()["slurm_conf"]
+            assert kwargs["pass_fds"] == ()
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="config raced")
+        assert kwargs["env"]["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(kwargs["pass_fds"]) == 1
+        return subprocess.CompletedProcess(command, 0, stdout="cancelled\n", stderr="")
+
+    monkeypatch.setattr(cancel, "scheduler_control_plane_observation", observe)
+    monkeypatch.setattr(cancel.subprocess, "run", run)
+    result = cancel.explicit_cancel(tmp_path)
+    assert result["scheduler_calls"] == 2
+    assert result["scheduler_mode"] == "sealed_original_config_fallback_after_canonical_failure"
+    assert result["returncode"] == 0
+    assert len(result["scheduler_attempts"]) == 2
+    assert len(list((tmp_path / "cancellation").glob("CANCEL_CALL.*.json"))) == 2

@@ -11,6 +11,7 @@ once.  It does not instrument or repeat the first forward pass.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -49,12 +50,35 @@ PINNED_SITE_DIRECTORIES = (
     ),
 )
 SHA256_CHARS = frozenset("0123456789abcdef")
+SCHEDULER_CONTROL_PLANE = {
+    "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+    "cluster_name": "cs-oci-ord",
+    "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+    "slurmctld_port": 6817,
+    "auth_type": "auth/munge",
+    "gres_types": ["gpu"],
+    "cli_filter_plugins": ["lua"],
+    "job_submit_plugins": ["lua"],
+    "trust_model": (
+        "root-admin mutable scheduler control plane; config and Lua policy bytes are "
+        "observation-bound from preclaim through submission; root-owned Slurm clients, "
+        "plugin binaries, and shared libraries are trusted mutable external runtime"
+    ),
+}
+REPORT_DEPENDENCY_TEST_REQUIREMENT = {
+    "phase": "after_train_reconciliation_before_report_submission",
+    "dependency": "afterok:<accepted_train_array_job_id>",
+    "kill_on_invalid_dep": "yes",
+    "required": True,
+}
 SUBMISSION_CONTRACT_FIELDS = frozenset(
     {
         "schema_version", "status", "campaign_id", "formal_validation",
         "submission_root", "snapshot_root", "package_protocol_sha256",
         "manifest_sha256", "trainer_code_fingerprint", "runtime_sha256",
-        "orchestration_interpreter", "weight_audit_artifact_sha256",
+        "orchestration_interpreter", "scheduler_control_plane_contract",
+        "scheduler_preclaim", "scheduler_fallback_config",
+        "weight_audit_artifact_sha256",
         "prefix_target_artifact_sha256", "resolved_config_artifact_sha256",
         "causal_parity_artifact_sha256", "snapshot_inventory",
         "snapshot_inventory_sha256", "live_audit_replays", "snapshot_audit_replays",
@@ -493,9 +517,73 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch3", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch4", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
+    _require(
+        contract.get("scheduler_control_plane_contract") == SCHEDULER_CONTROL_PLANE,
+        "scheduler control-plane contract differs",
+    )
+    scheduler_preclaim = contract.get("scheduler_preclaim")
+    _require(
+        isinstance(scheduler_preclaim, Mapping)
+        and scheduler_preclaim.get("schema_version") == 1
+        and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
+        and scheduler_preclaim.get("campaign_id")
+        == "treewm-executable-prefix-repair-pilot-v1-launch4"
+        and scheduler_preclaim.get("scheduler_calls") == 7
+        and scheduler_preclaim.get("scheduler_mutation_calls") == 0
+        and scheduler_preclaim.get("persistent_writes_performed") == 0,
+        "scheduler preclaim differs",
+    )
+    _require(
+        isinstance(scheduler_preclaim.get("scheduler_probe_commands"), list)
+        and len(scheduler_preclaim["scheduler_probe_commands"]) == 7
+        and scheduler_preclaim.get("report_dependency_test")
+        == REPORT_DEPENDENCY_TEST_REQUIREMENT
+        and scheduler_preclaim.get("zero_job_proof")
+        == {
+            "job_names": {
+                "train": "exp23-launch4-scheduler-test-train",
+                "report": "exp23-launch4-scheduler-test-report",
+            },
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "scheduler preclaim call ledger differs",
+    )
+    scheduler_fallback = contract.get("scheduler_fallback_config")
+    _require(
+        isinstance(scheduler_fallback, Mapping)
+        and scheduler_fallback.get("schema_version") == 1
+        and scheduler_fallback.get("purpose")
+        == (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        )
+        and scheduler_fallback.get("encoding") == "base64"
+        and isinstance(scheduler_fallback.get("payload_base64"), str)
+        and _sha256_string(str(scheduler_fallback.get("sha256", "")))
+        and isinstance(scheduler_fallback.get("size"), int)
+        and 0 < scheduler_fallback["size"] <= 16 * 1024 * 1024,
+        "scheduler fallback metadata differs",
+    )
+    try:
+        scheduler_fallback_bytes = base64.b64decode(
+            scheduler_fallback["payload_base64"], validate=True
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise EntryContractError(f"scheduler fallback encoding differs: {exc}") from exc
+    _require(
+        len(scheduler_fallback_bytes) == scheduler_fallback["size"]
+        and hashlib.sha256(scheduler_fallback_bytes).hexdigest()
+        == scheduler_fallback["sha256"]
+        and scheduler_fallback.get("source_control_plane")
+        == scheduler_preclaim.get("scheduler_control_plane"),
+        "scheduler fallback bytes differ",
+    )
     _require(contract.get("submission_root") == str(submission), "submission root binding differs")
     snapshot = _absolute(str(contract.get("snapshot_root", "")), "snapshot root")
     _require(snapshot == REPOSITORY_ROOT, "entry snapshot root binding differs")

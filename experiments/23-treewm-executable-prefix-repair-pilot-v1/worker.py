@@ -10,7 +10,9 @@ evaluation is pending.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -23,12 +25,13 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 from types import ModuleType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch4"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",
@@ -56,6 +59,27 @@ PINNED_SITE_DIRECTORIES = (
         "lib/python3.11/site-packages"
     ),
 )
+SCHEDULER_CONTROL_PLANE = {
+    "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+    "cluster_name": "cs-oci-ord",
+    "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+    "slurmctld_port": 6817,
+    "auth_type": "auth/munge",
+    "gres_types": ["gpu"],
+    "cli_filter_plugins": ["lua"],
+    "job_submit_plugins": ["lua"],
+    "trust_model": (
+        "root-admin mutable scheduler control plane; config and Lua policy bytes are "
+        "observation-bound from preclaim through submission; root-owned Slurm clients, "
+        "plugin binaries, and shared libraries are trusted mutable external runtime"
+    ),
+}
+REPORT_DEPENDENCY_TEST_REQUIREMENT = {
+    "phase": "after_train_reconciliation_before_report_submission",
+    "dependency": "afterok:<accepted_train_array_job_id>",
+    "kill_on_invalid_dep": "yes",
+    "required": True,
+}
 
 SUBMISSION_CONTRACT_NAME = "SUBMISSION_CONTRACT.json"
 GLOBAL_CANCEL_NAME = "CANCEL_REQUESTED.json"
@@ -87,6 +111,9 @@ SUBMISSION_CONTRACT_FIELDS = frozenset(
         "trainer_code_fingerprint",
         "runtime_sha256",
         "orchestration_interpreter",
+        "scheduler_control_plane_contract",
+        "scheduler_preclaim",
+        "scheduler_fallback_config",
         "weight_audit_artifact_sha256",
         "prefix_target_artifact_sha256",
         "resolved_config_artifact_sha256",
@@ -155,6 +182,13 @@ REQUEUE_CALLING_FIELDS = ARTIFACT_BASE_FIELDS | frozenset(
         "requeue_ready_sha256",
         "checkpoint_sha256",
         "checkpoint_file_identity",
+        "scheduler_control_plane",
+        "scheduler_config_sha256",
+        "scheduler_config_size",
+        "scontrol_executable_sha256",
+        "scontrol_show_command",
+        "scontrol_show_stdout_sha256",
+        "scontrol_requeue_command",
     }
 )
 SIGNAL_REQUEST_FIELDS = frozenset(
@@ -502,6 +536,148 @@ def _stat_identity(info: os.stat_result) -> dict[str, int]:
         "mtime_ns": int(info.st_mtime_ns),
         "ctime_ns": int(info.st_ctime_ns),
     }
+
+
+def _full_stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_uid),
+        int(info.st_gid),
+        int(info.st_nlink),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
+SchedulerRunner = Callable[
+    [Sequence[str], Path, Mapping[str, str], Sequence[int]],
+    subprocess.CompletedProcess[str],
+]
+
+
+def _default_scheduler_runner(
+    command: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str],
+    inherited_fds: Sequence[int],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        cwd=cwd,
+        env=dict(environment),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=tuple(inherited_fds),
+    )
+
+
+def _open_root_owned_scheduler_executable(
+    path: Path,
+) -> tuple[int, int, os.stat_result, str]:
+    """Pin the exact root-owned scheduler client used by this lifecycle call."""
+
+    absolute = _absolute_path(path, "scheduler control executable")
+    require(
+        absolute == Path("/usr/local/bin/scontrol"),
+        "scheduler control executable path differs",
+    )
+    directory_fd = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        root_info = os.fstat(directory_fd)
+        require(
+            stat.S_ISDIR(root_info.st_mode)
+            and root_info.st_uid == 0
+            and not stat.S_IMODE(root_info.st_mode) & 0o022,
+            "scheduler executable root is not root-controlled",
+        )
+        for component in absolute.parent.parts[1:]:
+            child_fd: int | None = None
+            try:
+                child_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
+                child_info = os.fstat(child_fd)
+                require(
+                    stat.S_ISDIR(child_info.st_mode)
+                    and child_info.st_uid == 0
+                    and not stat.S_IMODE(child_info.st_mode) & 0o022,
+                    f"scheduler executable directory is not root-controlled: {component}",
+                )
+            except OSError as exc:
+                if child_fd is not None:
+                    os.close(child_fd)
+                raise LifecycleError(
+                    f"scheduler executable directory cannot be authenticated: {exc}"
+                ) from exc
+            except BaseException:
+                if child_fd is not None:
+                    os.close(child_fd)
+                raise
+            os.close(directory_fd)
+            directory_fd = child_fd
+        executable_fd: int | None = None
+        try:
+            executable_fd = os.open(absolute.name, _FILE_FLAGS, dir_fd=directory_fd)
+            opened = os.fstat(executable_fd)
+            named = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+            require(
+                stat.S_ISREG(opened.st_mode)
+                and opened.st_uid == 0
+                and opened.st_nlink == 1
+                and stat.S_IMODE(opened.st_mode) == 0o755
+                and _full_stat_identity(opened) == _full_stat_identity(named),
+                "scheduler control executable is not the exact root-owned 0755 file",
+            )
+            digest, hashed = _hash_fd_stable(
+                executable_fd, "scheduler control executable"
+            )
+            require(
+                _full_stat_identity(hashed) == _full_stat_identity(opened),
+                "scheduler control executable changed while hashing",
+            )
+            return directory_fd, executable_fd, opened, digest
+        except BaseException:
+            if executable_fd is not None:
+                os.close(executable_fd)
+            raise
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _sealed_scheduler_config_descriptor(payload: bytes) -> int:
+    require(hasattr(os, "memfd_create"), "scheduler requeue requires memfd_create")
+    descriptor = os.memfd_create(
+        "treewm-exp23-requeue-slurm-conf",
+        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            require(written > 0, "scheduler requeue config write was short")
+            view = view[written:]
+        os.fchmod(descriptor, 0o400)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        seals = (
+            getattr(fcntl, "F_SEAL_SEAL", 0)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0)
+            | getattr(fcntl, "F_SEAL_GROW", 0)
+            | getattr(fcntl, "F_SEAL_WRITE", 0)
+        )
+        require(seals != 0, "scheduler requeue config seals are unavailable")
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        require(
+            fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals == seals,
+            "scheduler requeue config is not immutable",
+        )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def validate_file_identity(value: object, label: str) -> dict[str, int]:
@@ -908,6 +1084,105 @@ def bootstrap_submission(
     require(contract.get("formal_validation") is False, "submission formal-validation label differs")
     require(contract.get("array") == "0-19%20", "submission array differs")
     require(contract.get("fresh_start") is True, "submission is not fresh-start")
+    require(
+        contract.get("scheduler_control_plane_contract") == SCHEDULER_CONTROL_PLANE,
+        "submission scheduler control-plane contract differs",
+    )
+    scheduler_preclaim = contract.get("scheduler_preclaim")
+    require(
+        isinstance(scheduler_preclaim, Mapping)
+        and scheduler_preclaim.get("schema_version") == 1
+        and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
+        and scheduler_preclaim.get("campaign_id") == CAMPAIGN_ID
+        and scheduler_preclaim.get("scheduler_calls") == 7
+        and scheduler_preclaim.get("scheduler_mutation_calls") == 0
+        and scheduler_preclaim.get("persistent_writes_performed") == 0,
+        "submission scheduler preclaim differs",
+    )
+    require(
+        isinstance(scheduler_preclaim.get("scheduler_probe_commands"), list)
+        and len(scheduler_preclaim["scheduler_probe_commands"]) == 7
+        and scheduler_preclaim.get("report_dependency_test")
+        == REPORT_DEPENDENCY_TEST_REQUIREMENT
+        and scheduler_preclaim.get("zero_job_proof")
+        == {
+            "job_names": {
+                "train": "exp23-launch4-scheduler-test-train",
+                "report": "exp23-launch4-scheduler-test-report",
+            },
+            "pre_queries": 2,
+            "post_queries": 2,
+            "matching_jobs_before": 0,
+            "matching_jobs_after": 0,
+        },
+        "submission scheduler preclaim call ledger differs",
+    )
+    preclaim_observation = scheduler_preclaim.get("scheduler_control_plane")
+    expected_critical = {
+        key: SCHEDULER_CONTROL_PLANE[key]
+        for key in (
+            "cluster_name",
+            "slurmctld_hosts",
+            "slurmctld_port",
+            "auth_type",
+            "gres_types",
+            "cli_filter_plugins",
+            "job_submit_plugins",
+        )
+    }
+    require(
+        isinstance(preclaim_observation, Mapping)
+        and preclaim_observation.get("critical") == expected_critical
+        and scheduler_preclaim.get("controller_configuration") == expected_critical,
+        "submission scheduler preclaim identity differs",
+    )
+    scheduler_fallback = contract.get("scheduler_fallback_config")
+    require(
+        isinstance(scheduler_fallback, Mapping)
+        and set(scheduler_fallback)
+        == {
+            "schema_version",
+            "purpose",
+            "encoding",
+            "payload_base64",
+            "sha256",
+            "size",
+            "source_control_plane",
+        }
+        and scheduler_fallback.get("schema_version") == 1
+        and scheduler_fallback.get("purpose")
+        == (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        )
+        and scheduler_fallback.get("encoding") == "base64"
+        and isinstance(scheduler_fallback.get("payload_base64"), str)
+        and sha256_string(str(scheduler_fallback.get("sha256", "")))
+        and isinstance(scheduler_fallback.get("size"), int)
+        and 0 < scheduler_fallback["size"] <= 16 * 1024 * 1024,
+        "submission scheduler fallback metadata differs",
+    )
+    try:
+        scheduler_fallback_bytes = base64.b64decode(
+            scheduler_fallback["payload_base64"], validate=True
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise LifecycleError(f"submission scheduler fallback encoding differs: {exc}") from exc
+    require(
+        len(scheduler_fallback_bytes) == scheduler_fallback["size"]
+        and hashlib.sha256(scheduler_fallback_bytes).hexdigest()
+        == scheduler_fallback["sha256"]
+        and isinstance(scheduler_fallback.get("source_control_plane"), Mapping)
+        and scheduler_fallback["source_control_plane"] == preclaim_observation
+        and scheduler_fallback["source_control_plane"].get("critical")
+        == expected_critical
+        and isinstance(
+            scheduler_fallback["source_control_plane"].get("config"), Mapping
+        )
+        and scheduler_fallback["source_control_plane"]["config"].get("sha256")
+        == scheduler_fallback["sha256"],
+        "submission scheduler fallback bytes differ",
+    )
     require(contract.get("submission_root") == str(submission), "submission root binding differs")
     interpreter = contract.get("orchestration_interpreter")
     require(isinstance(interpreter, Mapping), "submission interpreter contract is absent")
@@ -1248,6 +1523,42 @@ def load_launch_context(
         "run_relative": run_relative,
         "source_contract": source_contract,
     }
+
+
+def scheduler_control_plane_observation(
+    context: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Reuse the snapshot-bound submit verifier for root-admin Slurm inputs."""
+
+    snapshot_root = context["snapshot_root"]
+    submission_root = context["submission_root"]
+    contract = context["submission_contract"]
+    _revalidate_snapshot_before_import(snapshot_root, submission_root, contract)
+    path = context["package"] / "submit.py"
+    require_regular_nonsymlink(path, "snapshot scheduler verifier")
+    name = f"_treewm_exp23_scheduler_verifier_{os.getpid()}_{time.time_ns()}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, "cannot load snapshot scheduler verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        observe = getattr(module, "_scheduler_control_plane_observation", None)
+        require(callable(observe), "snapshot scheduler verifier API differs")
+        value = observe(context["manifest"]["execution"].get("scheduler_control_plane"))
+    finally:
+        sys.modules.pop(name, None)
+    require(
+        isinstance(value, Mapping)
+        and value.get("schema_version") == 1
+        and isinstance(value.get("config"), Mapping)
+        and sha256_string(value["config"].get("sha256"))
+        and isinstance(value.get("cli_filter_policy"), Mapping)
+        and sha256_string(value["cli_filter_policy"].get("tree_sha256")),
+        "scheduler control-plane observation differs",
+    )
+    return dict(value)
 
 
 def _finite_mapping(value: object, label: str) -> dict[str, float]:
@@ -2249,6 +2560,22 @@ def _verify_previous_lineage(
         calling.get("requeue_target") == f"{args.array_job_id}_{args.array_task_id}",
         "previous requeue target differs",
     )
+    scheduler_binding, _scheduler_payload = _validated_requeue_scheduler_config(context)
+    scontrol = str(context["manifest"]["execution"].get("scontrol", ""))
+    target = f"{args.array_job_id}_{args.array_task_id}"
+    require(
+        calling.get("scheduler_control_plane")
+        == scheduler_binding["source_control_plane"]
+        and calling.get("scheduler_config_sha256") == scheduler_binding["sha256"]
+        and calling.get("scheduler_config_size") == scheduler_binding["size"]
+        and sha256_string(calling.get("scontrol_executable_sha256"))
+        and calling.get("scontrol_show_command")
+        == [scontrol, "show", "job", target, "--oneliner"]
+        and sha256_string(calling.get("scontrol_show_stdout_sha256"))
+        and calling.get("scontrol_requeue_command")
+        == [scontrol, "requeue", target],
+        "previous requeue scheduler binding differs",
+    )
     require(calling.get("requeue_ready_sha256") == ready_sha256, "previous CALLING/READY differ")
     require(
         calling.get("checkpoint_sha256") == ready.get("checkpoint_sha256")
@@ -2490,6 +2817,7 @@ def _execute_generation(
     submission = context["submission_root"]
     require(args.array_task_id == args.cell_index, "Slurm array task/cell mapping differs")
     base = _artifact_base(args, context)
+    scheduler_observation = scheduler_control_plane_observation(context)
     seal_json(
         task_root / TASK_LAUNCH_NAME,
         {
@@ -2524,6 +2852,7 @@ def _execute_generation(
             "status": "generation_started",
             "input_kind": input_state["kind"],
             "input_checkpoint_sha256": input_state.get("checkpoint_sha256"),
+            "scheduler_control_plane": scheduler_observation,
         },
     )
     if input_state["kind"] == "complete":
@@ -2651,11 +2980,99 @@ def run_worker(args: argparse.Namespace) -> int:
         raise
 
 
-def mark_requeue_calling(args: argparse.Namespace) -> int:
+def _validated_requeue_scheduler_config(
+    context: Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    contract = context["submission_contract"]
+    preclaim = contract.get("scheduler_preclaim")
+    fallback = contract.get("scheduler_fallback_config")
+    require(
+        isinstance(preclaim, Mapping)
+        and isinstance(preclaim.get("scheduler_control_plane"), Mapping)
+        and isinstance(fallback, Mapping),
+        "requeue scheduler binding is absent",
+    )
+    expected_fields = {
+        "schema_version",
+        "purpose",
+        "encoding",
+        "payload_base64",
+        "sha256",
+        "size",
+        "source_control_plane",
+    }
+    require(
+        set(fallback) == expected_fields
+        and fallback.get("schema_version") == 1
+        and fallback.get("purpose")
+        == (
+            "accepted-job exact reconciliation, cancellation, and requeue only; "
+            "never submission"
+        )
+        and fallback.get("encoding") == "base64"
+        and isinstance(fallback.get("payload_base64"), str)
+        and sha256_string(fallback.get("sha256"))
+        and type(fallback.get("size")) is int
+        and 0 < int(fallback["size"]) <= 16 * 1024 * 1024
+        and fallback.get("source_control_plane")
+        == preclaim["scheduler_control_plane"],
+        "requeue scheduler binding differs from the exact preclaim",
+    )
+    try:
+        payload = base64.b64decode(str(fallback["payload_base64"]), validate=True)
+    except (ValueError, UnicodeError) as exc:
+        raise LifecycleError(f"requeue scheduler config encoding differs: {exc}") from exc
+    require(
+        len(payload) == fallback["size"]
+        and hashlib.sha256(payload).hexdigest() == fallback["sha256"]
+        and isinstance(fallback["source_control_plane"].get("config"), Mapping)
+        and fallback["source_control_plane"]["config"].get("sha256")
+        == fallback["sha256"]
+        and isinstance(
+            fallback["source_control_plane"]["config"].get("identity"), Mapping
+        )
+        and fallback["source_control_plane"]["config"]["identity"].get("size")
+        == fallback["size"]
+        and fallback["source_control_plane"].get("critical")
+        == {
+            key: SCHEDULER_CONTROL_PLANE[key]
+            for key in (
+                "cluster_name",
+                "slurmctld_hosts",
+                "slurmctld_port",
+                "auth_type",
+                "gres_types",
+                "cli_filter_plugins",
+                "job_submit_plugins",
+            )
+        },
+        "requeue scheduler config bytes differ",
+    )
+    return dict(fallback), payload
+
+
+def _scontrol_field(stdout: str, name: str) -> str:
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    require(len(lines) == 1, "scontrol show returned an ambiguous job record")
+    prefix = f"{name}="
+    values = [token[len(prefix):] for token in lines[0].split() if token.startswith(prefix)]
+    require(len(values) == 1 and values[0], f"scontrol show {name} differs")
+    return values[0]
+
+
+def authenticated_requeue(
+    args: argparse.Namespace,
+    scheduler_runner: SchedulerRunner = _default_scheduler_runner,
+) -> int:
+    """Show and requeue one exact array element through preclaim-pinned bytes."""
+
     submission = ensure_directory(args.submission_root, "submission root")
     bootstrap_contract = getattr(args, "_bootstrap_contract", None)
     snapshot = getattr(args, "_bootstrap_snapshot_root", None)
-    require(isinstance(bootstrap_contract, Mapping) and isinstance(snapshot, Path), "CALLING lacks verified bootstrap")
+    require(
+        isinstance(bootstrap_contract, Mapping) and isinstance(snapshot, Path),
+        "requeue lacks verified bootstrap",
+    )
     context = load_launch_context(
         snapshot_root=snapshot,
         submission_root=submission,
@@ -2702,22 +3119,123 @@ def mark_requeue_calling(args: argparse.Namespace) -> int:
         and current["checkpoint_file_identity"] == ready_identity,
         "checkpoint advanced/swapped before scontrol requeue",
     )
-    require(not cancellation_requested(submission, task_root), "cancellation raced before CALLING")
     target = f"{args.array_job_id}_{args.array_task_id}"
-    calling = {
-        **expected_common,
-        "status": "scontrol_requeue_calling",
-        "requeue_target": target,
-        "requeue_ready_sha256": ready_sha256,
-        "checkpoint_sha256": ready["checkpoint_sha256"],
-        "checkpoint_file_identity": ready_identity,
-    }
-    require(set(calling) == REQUEUE_CALLING_FIELDS, "requeue CALLING fields differ")
-    seal_json(
-        generation / REQUEUE_CALLING_NAME,
-        calling,
-    )
-    return 0
+    scheduler_binding, scheduler_payload = _validated_requeue_scheduler_config(context)
+    scontrol = Path(str(context["manifest"]["execution"].get("scontrol", "")))
+    directory_fd: int | None = None
+    executable_fd: int | None = None
+    config_fd: int | None = None
+    try:
+        directory_fd, executable_fd, executable_info, executable_sha256 = (
+            _open_root_owned_scheduler_executable(scontrol)
+        )
+        config_fd = _sealed_scheduler_config_descriptor(scheduler_payload)
+        scheduler_environment = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "SLURM_CONF": f"/proc/self/fd/{config_fd}",
+        }
+        show_command = [str(scontrol), "show", "job", target, "--oneliner"]
+        requeue_command = [str(scontrol), "requeue", target]
+        show_actual = [f"/proc/self/fd/{executable_fd}", *show_command[1:]]
+        inherited_fds = (config_fd, executable_fd)
+        shown = scheduler_runner(
+            show_actual,
+            snapshot,
+            scheduler_environment,
+            inherited_fds,
+        )
+        require(
+            len(shown.stdout) <= 1024 * 1024 and len(shown.stderr) <= 1024 * 1024,
+            "scontrol show response is oversized",
+        )
+        executable_mid_sha256, executable_mid = _hash_fd_stable(
+            executable_fd, "scheduler control executable after show"
+        )
+        require(
+            _full_stat_identity(executable_mid) == _full_stat_identity(executable_info)
+            and executable_mid_sha256 == executable_sha256,
+            "scheduler control executable changed across scontrol show",
+        )
+        require(
+            shown.returncode == 0,
+            f"cannot read exact Slurm array element: {shown.stderr.strip()}",
+        )
+        require(_scontrol_field(shown.stdout, "JobId") == target, "Slurm JobId differs")
+        require(
+            _scontrol_field(shown.stdout, "ArrayJobId") == str(args.array_job_id),
+            "Slurm ArrayJobId differs",
+        )
+        require(
+            _scontrol_field(shown.stdout, "ArrayTaskId") == str(args.array_task_id),
+            "Slurm ArrayTaskId differs",
+        )
+        require(
+            _scontrol_field(shown.stdout, "JobState") == "RUNNING",
+            "array element is not RUNNING at requeue linearization",
+        )
+        require(
+            not cancellation_requested(submission, task_root),
+            "cancellation raced before CALLING",
+        )
+        calling = {
+            **expected_common,
+            "status": "scontrol_requeue_calling",
+            "requeue_target": target,
+            "requeue_ready_sha256": ready_sha256,
+            "checkpoint_sha256": ready["checkpoint_sha256"],
+            "checkpoint_file_identity": ready_identity,
+            "scheduler_control_plane": scheduler_binding["source_control_plane"],
+            "scheduler_config_sha256": scheduler_binding["sha256"],
+            "scheduler_config_size": scheduler_binding["size"],
+            "scontrol_executable_sha256": executable_sha256,
+            "scontrol_show_command": show_command,
+            "scontrol_show_stdout_sha256": hashlib.sha256(
+                shown.stdout.encode("utf-8")
+            ).hexdigest(),
+            "scontrol_requeue_command": requeue_command,
+        }
+        require(set(calling) == REQUEUE_CALLING_FIELDS, "requeue CALLING fields differ")
+        seal_json(generation / REQUEUE_CALLING_NAME, calling)
+        require(
+            not cancellation_requested(submission, task_root),
+            "cancellation raced after CALLING",
+        )
+        requeued = scheduler_runner(
+            [f"/proc/self/fd/{executable_fd}", *requeue_command[1:]],
+            snapshot,
+            scheduler_environment,
+            inherited_fds,
+        )
+        require(
+            len(requeued.stdout) <= 1024 * 1024
+            and len(requeued.stderr) <= 1024 * 1024,
+            "scontrol requeue response is oversized",
+        )
+        executable_after_sha256, executable_after = _hash_fd_stable(
+            executable_fd, "scheduler control executable after requeue"
+        )
+        named_after = os.stat(
+            scontrol.name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        require(
+            _full_stat_identity(executable_after) == _full_stat_identity(executable_info)
+            and _full_stat_identity(named_after) == _full_stat_identity(executable_info)
+            and executable_after_sha256 == executable_sha256,
+            "scheduler control executable changed across scontrol requeue",
+        )
+        require(
+            requeued.returncode == 0,
+            f"Slurm requeue call failed after immutable CALLING: {requeued.stderr.strip()}",
+        )
+        return 0
+    except OSError as exc:
+        raise LifecycleError(f"authenticated scheduler requeue failed: {exc}") from exc
+    finally:
+        for descriptor in (config_fd, executable_fd, directory_fd):
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _common_parser(parser: argparse.ArgumentParser) -> None:
@@ -2738,8 +3256,8 @@ def _parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record-signal")
     _common_parser(record)
     record.add_argument("--signal", choices=("USR1", "TERM"), required=True)
-    calling = sub.add_parser("mark-requeue-calling")
-    _common_parser(calling)
+    requeue = sub.add_parser("requeue")
+    _common_parser(requeue)
     return parser
 
 
@@ -2786,8 +3304,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             bootstrap_contract=bootstrap_contract,
         )
         return 0
-    if args.command == "mark-requeue-calling":
-        return mark_requeue_calling(args)
+    if args.command == "requeue":
+        return authenticated_requeue(args)
     return run_worker(args)
 
 

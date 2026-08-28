@@ -82,7 +82,7 @@ SNAPSHOT_IMPORT_FILES = {
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch3"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch4"
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -139,6 +139,8 @@ SUPERSEDED_LAUNCHES = [{
     "checkpoints_consumed": False,
     "reuse_allowed": False,
     "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
 }, {
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch2",
     "run_root": (
@@ -197,6 +199,122 @@ SUPERSEDED_LAUNCHES = [{
     "checkpoints_consumed": False,
     "reuse_allowed": False,
     "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
+}, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "run_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+    ),
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3/state/submission"
+    ),
+    "snapshot_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3/state/"
+        "submission/source-snapshot/repo"
+    ),
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch3",
+    "status": "aborted_after_contract_before_scheduler_submission",
+    "source_commit": "ca979a2b0329d6775793cd8ce51d57a9200e6b8a",
+    "source_commit_claimed_by_contract": True,
+    "source_commit_claimed_by_journal": False,
+    "source_commit_evidence": "contract_clean_head_origin_and_independent_137_of_137_snapshot_file_byte_match",
+    "proof_scope": (
+        "The sealed contract records clean HEAD and origin/main at commit "
+        "ca979a2b0329d6775793cd8ce51d57a9200e6b8a, and all 137 snapshot files "
+        "were independently byte-matched to that commit. The source order at that "
+        "commit and the preserved abort journals prove failure in the first sanitized "
+        "train-name squeue reconciliation before either sbatch call. Current exact-name "
+        "squeue and sacct emptiness corroborates absence but is not used alone as a "
+        "historical proof."
+    ),
+    "package_protocol_sha256": "6178ed54273d13c88fce750414131c98d002b394231618f11f6d8d6a1a3fb49a",
+    "manifest_canonical_sha256": "7259a76924ac6f4566541a00f74923c67151619b36411048dd82ee20747a8d09",
+    "manifest_raw_sha256": "92a9e17b78075805503907e4d9b71b732b54f5127da981ca17524feba650f74a",
+    "snapshot": {
+        "inventory_sha256": "7e237d31f9d49e3b55d0e0598c299b6064ab16b9caa77b62329c9bb8a2839eae",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    },
+    "preserved_tree": {
+        "regular_file_count": 163,
+        "symlink_count": 0,
+        "snapshot_file_count": 137,
+        "launch_file_count": 20,
+        "contract_file_count": 1,
+        "journal_file_count": 5,
+    },
+    "claim_token": "2741418c7e528a0b64b8115cafa46cfac391abd53312cf29b0ffc8a4e1afca4d",
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "contract_sha256": "0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2",
+    "submission_sha256": "0cd594c8a49499b5e3d10a09ddbf3b89f981264be67bb603dc64836568a1b4c2",
+    "journal_sha256": {
+        "0000_CLAIMED.json": "25d607cef5aaf49e932e86a56c2272d37be6936010f089f8e7230bb44166be28",
+        "0001_SNAPSHOT_SEALED.json": "d4acf9fb3fa6af98adedf45abd0269d1e491abd48b3cb992509b7641ad05b4c6",
+        "0002_CONTRACT_SEALED.json": "3936a8717d096a93cf7d0eb3dea5293e32c14cdd0b986dd7a738f9501a92a044",
+        "9999_ABORTED.json": "915dd5a3869a6784f3eb9d8e0d564a16b96fb17689c3d31f5a2e21431365199a",
+        "9998_OUTER_ABORTED.json": "e65e9b39d268c2497e98e1d66b0cadd7f80b0f53c98a243057cc03ca399b47b0",
+    },
+    "failure_phase": "first_sanitized_squeue_before_any_sbatch",
+    "no_job_proof": {
+        "scheduler_job_names": {
+            "train": "exp23-launch3-0cd594c8a49499b5-train",
+            "report": "exp23-launch3-0cd594c8a49499b5-report",
+        },
+        "source_order_at_commit": {
+            "contract_sealed_first": True,
+            "train_absence_check_line": 3112,
+            "report_absence_check_line": 3113,
+            "first_sbatch_call_line": 3114,
+            "recorded_failure": "first_train_absence_check",
+        },
+        "preserved_journal_known_job_ids": [],
+        "preserved_journal_job_ids_by_role": {"train": [], "report": []},
+        "current_scheduler_observation": {
+            "environment": {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+            },
+            "history_start_utc": "2026-08-01",
+            "squeue_command": [
+                "/usr/local/bin/squeue", "-h", "-n",
+                "exp23-launch3-0cd594c8a49499b5-train,exp23-launch3-0cd594c8a49499b5-report",
+                "-o", "%i|%j|%T|%k",
+            ],
+            "squeue_matching_rows": 0,
+            "sacct_command": [
+                "/usr/local/bin/sacct", "-X", "-n", "-S", "2026-08-01",
+                "--name",
+                "exp23-launch3-0cd594c8a49499b5-train,exp23-launch3-0cd594c8a49499b5-report",
+                "-o", "JobIDRaw,JobName,State,Comment",
+            ],
+            "sacct_matching_rows": 0,
+        },
+    },
+    "actual_sbatch_calls": 0,
+    "known_job_ids": [],
+    "job_ids_by_role": {"train": [], "report": []},
+    "submission_contract_committed": True,
+    "submission_receipt_committed": False,
+    "scientific_run_started": False,
+    "checkpoint_created": False,
+    "wandb_run_created": False,
+    "optimizer_updates": 0,
+    "results_consumed": False,
+    "checkpoints_consumed": False,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
 }]
 
 
@@ -417,7 +535,7 @@ def expand_matrix(manifest: Mapping[str, Any]) -> list[Cell]:
                         env_config=str(setting["env_config"]),
                         arm=arm,
                         seed=seed,
-                        run_name=f"exp23-launch3-{setting['id']}-arm{arm.lower()}-seed{seed}",
+                        run_name=f"exp23-launch4-{setting['id']}-arm{arm.lower()}-seed{seed}",
                     )
                 )
     return result
@@ -972,6 +1090,16 @@ def validate_manifest(
     )
     require(
         all(
+            prior["reuse_allowed"] is False
+            and prior["resume_allowed"] is False
+            and prior["retry_allowed"] is False
+            and prior["recovery_allowed"] is False
+            for prior in SUPERSEDED_LAUNCHES
+        ),
+        "superseded launch reuse/retry/recovery policy differs",
+    )
+    require(
+        all(
             manifest["paths"]["run_root"] != prior["run_root"]
             and manifest["paths"]["wandb_project"] != prior["wandb_project"]
             for prior in SUPERSEDED_LAUNCHES
@@ -980,22 +1108,22 @@ def validate_manifest(
     )
     require(
         manifest["paths"]["prospective_run_root"]
-        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
         and manifest["paths"]["transaction_lock"]
-        == "outputs/.exp23-6e55bb3083712144.transaction.lock"
+        == "outputs/.exp23-d3765ecc9f5b5f7a.transaction.lock"
         and manifest["paths"]["run_root"]
         == (
             "/lustre/fs11/portfolios/edgeai/projects/"
             "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
-            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch3"
+            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch4"
         ),
-        "launch3 run/transaction namespace differs",
+        "launch4 run/transaction namespace differs",
     )
     require(
         manifest["paths"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_group"] == CAMPAIGN_ID,
-        "launch3 W&B namespace differs",
+        "launch4 W&B namespace differs",
     )
     require(
         manifest["design"]["fresh_start_policy"].endswith(
@@ -1024,8 +1152,8 @@ def validate_manifest(
     cells = expand_matrix(manifest)
     require(len(cells) == 20, "matrix expansion differs")
     require(
-        all(cell.run_name.startswith("exp23-launch3-") for cell in cells),
-        "launch3 run-name namespace differs",
+        all(cell.run_name.startswith("exp23-launch4-") for cell in cells),
+        "launch4 run-name namespace differs",
     )
     launch = manifest["launch_contract"]
     require(launch["array"] == "0-19%20" and launch["array_cells"] == 20, "launch array differs")
@@ -1037,6 +1165,26 @@ def validate_manifest(
     execution = manifest["execution"]
     require("srun" not in execution, "srun execution path reintroduced")
     require(execution["scontrol"] == "/usr/local/bin/scontrol", "scontrol path differs")
+    require(
+        execution["scheduler_control_plane"]
+        == {
+            "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+            "cluster_name": "cs-oci-ord",
+            "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+            "slurmctld_port": 6817,
+            "auth_type": "auth/munge",
+            "gres_types": ["gpu"],
+            "cli_filter_plugins": ["lua"],
+            "job_submit_plugins": ["lua"],
+            "trust_model": (
+                "root-admin mutable scheduler control plane; config and Lua policy bytes "
+                "are observation-bound from preclaim through submission; root-owned Slurm "
+                "clients, plugin binaries, and shared libraries are trusted mutable "
+                "external runtime"
+            ),
+        },
+        "scheduler control-plane contract differs",
+    )
     require(execution["control_python_flags"] == ["-I", "-S", "-B"], "control Python flags differ")
     require(execution["trainer_python_flags"] == ["-P", "-S", "-B"], "trainer Python flags differ")
     require(
