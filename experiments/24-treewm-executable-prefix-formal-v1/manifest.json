@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
   "campaign_id": "treewm-executable-prefix-formal-v1-launch1",
-  "package_phase": "geometry_and_global_recipe_locked_execution_blocked",
+  "package_phase": "m1_hardened_runtime_scaffold_execution_blocked",
   "classification": "fresh_formal_selected_gsep_only",
   "scientific_protocol_sealed": false,
   "per_setting_contract_state": "unbound_pending_all_ten_audits",
-  "claim_policy": "No formal claim or execution authority exists until Exp23 Launch7 is accepted, all ten formal settings are outcome-blind audited, the hardened runtime is ported and protocol-sealed, and the fresh 40-run staged campaign plus 200-cell held-out evaluation complete.",
+  "submission_authority_policy": "Submission authority requires authenticated Exp23 Launch7 acceptance, all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, and verified training/evaluation/requeue feasibility.",
+  "scientific_claim_policy": "No formal scientific conclusion or promotion claim exists until all four staged all-40 gates pass, all exact 200 held-out cells complete both paired rails, the seed-level aggregate completes, and the immutable formal report commits.",
   "design": {
     "selected_arm": "GSEP",
     "candidate_or_control_arms": [],
@@ -141,6 +142,19 @@
     "dependency_type": "afterok",
     "post_100k_policy": "integrity_and_numerical_health_only",
     "resume_scope": "same_exp24_run_only",
+    "cross_stage_lineage": {
+      "stage_2000_source": "generation_zero_scratch_initialization_for_all_40_cells",
+      "later_stage_source": "exact_same_cell_checkpoint_accepted_by_immediately_prior_all_40_gate",
+      "promotions": [
+        {"from": 2000, "to": 25000, "required_gate": "gate_2000"},
+        {"from": 25000, "to": 100000, "required_gate": "gate_25000"},
+        {"from": 100000, "to": 1000000, "required_gate": "gate_100000"}
+      ],
+      "invariant_identity_fields": ["campaign_id", "setting_id", "env_config", "arm", "seed", "run_name", "wandb_id", "resolved_config_sha256", "source_sha256", "runtime_sha256", "protocol_sha256", "formal_contract_sha256"],
+      "within_stage_requeue": "same_slurm_array_element_same_run_exact_durable_checkpoint_without_gate_promotion",
+      "cross_stage_promotion": "new_afterok_stage_job_authorized_only_by_immediately_prior_all_40_gate_receipt",
+      "exp23_checkpoint_or_output_path_allowed": false
+    },
     "dag": "40x2k -> all-40 gate -> 40x25k -> all-40 gate -> 40x100k -> all-40 gate -> 40x1M -> all-40 gate -> 200 held-out cells -> seed-level aggregate -> immutable report"
   },
   "stage_acceptance": {
@@ -449,7 +463,9 @@
   "required_exp23_hardening_port": {
     "source_package": "experiments/23-treewm-executable-prefix-repair-pilot-v1",
     "port_only_after_upstream_freeze": true,
-    "runtime_files_present": false,
+    "runtime_files_present": true,
+    "runtime_execution_ready": false,
+    "runtime_scope": "m1_hardened_control_plane_scaffold_with_execution_adapters_fail_closed",
     "protocol_lock_present": false,
     "required_patterns": [
       "immutable_nonsymlink_source_snapshot",
@@ -490,6 +506,11 @@
     "memory_per_task": "64G",
     "walltime": "04:00:00",
     "signal_seconds_before_end": 420,
+    "queued_receipt_barrier_timeout_seconds": 900,
+    "queued_receipt_barrier_poll_seconds": 0.25,
+    "scheduler_client_timeout_seconds": 30,
+    "pre_receipt_transaction_budget_seconds": 600,
+    "receipt_barrier_safety_margin_seconds": 300,
     "requeue_required": true,
     "feasibility_status": "unverified_blocker",
     "requires_measured_updates_per_hour_for_all_ten_settings": true,
@@ -497,12 +518,27 @@
     "requires_measured_heldout_runtime_for_every_setting_task_and_rail": true,
     "requires_episode_level_requeue_and_paired_order_probe": true,
     "requires_final_array_aggregate_report_walltime_check": true,
+    "requires_clean_committed_source_snapshot": true,
+    "requires_held_root_post_receipt_activation_handshake": true,
+    "requires_pinned_interpreter_environment_provenance": true,
     "control_python_flags": ["-I", "-S", "-B"],
     "trainer_python_flags": ["-P", "-S", "-B"],
     "process_topology": "Slurm batch shell -> worker.py -> train_entry.py -> in-process scripts.train; no srun",
     "sbatch": "/usr/local/bin/sbatch",
+    "squeue": "/usr/local/bin/squeue",
     "scancel": "/usr/local/bin/scancel",
     "scontrol": "/usr/local/bin/scontrol",
+    "scheduler_control_plane": {
+      "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+      "cluster_name": "cs-oci-ord",
+      "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+      "slurmctld_port": 6817,
+      "auth_type": "auth/munge",
+      "gres_types": ["gpu"],
+      "cli_filter_plugins": ["lua"],
+      "job_submit_plugins": ["lua"],
+      "trust_model": "root-admin mutable scheduler control plane; config and Lua policy bytes are observation-bound from preclaim through submission; root-owned Slurm clients, plugin binaries, and shared libraries are trusted mutable external runtime"
+    },
     "feasibility_policy": "Before protocol seal, conservatively derive per-stage runtime and maximum requeue count from authenticated scratch throughput for every setting; measure every setting/task/rail held-out episode runtime at node budget 64 and bound 100 episodes per cell; probe durable episode-level resume and paired order; verify training, final-array, aggregate, and report walltimes plus scheduler requeue/job limits and the 420-second checkpoint window; reject launch if any path lacks margin."
   },
   "milestones": [

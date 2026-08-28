@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -40,6 +41,9 @@ def test_exact_selected_prefix_weights_and_distinct_formal_identity() -> None:
     assert manifest["objective"]["objective_version"] != "treewm_v2_grounded_executable_prefix_pilot_v1"
     assert manifest["campaign_id"] != campaign.UPSTREAM_CAMPAIGN_ID
     assert campaign.UPSTREAM_CAMPAIGN_ID not in manifest["paths"]["run_root"]
+    assert "claim_policy" not in manifest
+    assert "Submission authority requires" in manifest["submission_authority_policy"]
+    assert "all four staged all-40 gates" in manifest["scientific_claim_policy"]
 
 
 def test_all_40_staged_afterok_dag_is_exact() -> None:
@@ -176,7 +180,8 @@ def test_hardening_port_contract_closes_known_exp22_gaps() -> None:
         "hardened_launch7_report_quartet_binder",
         "execution_ready_manifest_exact_schema_no_unvalidated_fields",
     } <= patterns
-    assert manifest["required_exp23_hardening_port"]["runtime_files_present"] is False
+    assert manifest["required_exp23_hardening_port"]["runtime_files_present"] is True
+    assert manifest["required_exp23_hardening_port"]["runtime_execution_ready"] is False
     assert manifest["required_exp23_hardening_port"]["protocol_lock_present"] is False
 
 
@@ -192,7 +197,7 @@ def test_manifest_mutations_fail_closed() -> None:
         lambda value: value["final_evaluation"].update(episodes_per_cell_per_rail=5),
         lambda value: value["final_evaluation"]["primary_inference"].update(unit="episode"),
         lambda value: value["launch_dependency"].update(formal_submission_allowed=True),
-        lambda value: value["required_exp23_hardening_port"].update(runtime_files_present=True),
+        lambda value: value["required_exp23_hardening_port"].update(runtime_execution_ready=True),
     )
     for mutate in mutations:
         changed = copy.deepcopy(manifest)
@@ -207,7 +212,7 @@ def test_submit_test_only_is_read_only_and_submit_fails_closed(tmp_path: Path) -
     command = [sys.executable, "-I", "-S", "-B", str(package / "submit.py"), "--test-only"]
     result = subprocess.run(command, cwd=tmp_path, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     report = json.loads(result.stdout)
-    assert report["status"] == "geometry_and_global_recipe_locked_execution_blocked"
+    assert report["status"] == "m1_hardened_runtime_scaffold_execution_blocked"
     assert report["submitted"] is False
     assert report["persistent_writes_performed"] is False
     assert report["scheduler_calls"] == []
@@ -228,3 +233,32 @@ def test_submit_test_only_is_read_only_and_submit_fails_closed(tmp_path: Path) -
     assert rejected.returncode == 2
     assert "EXP24_BLOCKED" in rejected.stderr
     assert not list(tmp_path.iterdir())
+
+    unisolated = subprocess.run(
+        [sys.executable, str(package / "submit.py"), "--submit"],
+        cwd=tmp_path,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert unisolated.returncode == 2
+    assert "exact pinned Python 3.11 with -I -S -B" in unisolated.stderr
+    assert not list(tmp_path.iterdir())
+
+    without_bytecode_flag_environment = {
+        key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"
+    }
+    for mode in ("--snapshot-test", "--submit"):
+        missing_b = subprocess.run(
+            [sys.executable, "-I", "-S", str(package / "submit.py"), mode],
+            cwd=tmp_path,
+            env=without_bytecode_flag_environment,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert missing_b.returncode == 2
+        assert "exact pinned Python 3.11 with -I -S -B" in missing_b.stderr
+        assert not list(tmp_path.iterdir())

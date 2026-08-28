@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "status": "documented_not_applied_execution_blocker",
+  "objective_version": "treewm_v2_grounded_executable_prefix_formal_v1",
+  "shared_files_modified": [],
+  "trainer_delta": {
+    "scripts/train.py": {
+      "add_to_sets": [
+        "TREEWM_V2_OBJECTIVES",
+        "LATENT_GAUGE_OBJECTIVES",
+        "EXECUTABLE_PREFIX_OBJECTIVES",
+        "GROUNDED_FORMAL_OBJECTIVES",
+        "STRICT_GROUNDED_EXECUTION_FORMAL_OBJECTIVES"
+      ],
+      "add_to_maps": {
+        "FORMAL_RECIPE_AUTHORIZATION_LABELS": "Exp24 executable-prefix formal"
+      },
+      "must_not_add_to_maps": [
+        "BOUNDED_PILOT_OBJECTIVES"
+      ],
+      "stage_contract": {
+        "total_steps_exact": 1000000,
+        "allowed_stop_after_updates": [2000, 25000, 100000, 1000000]
+      },
+      "authorization_refactor": {
+        "replace_single_package_special_case": "EXP22_CAMPAIGN_DIRECTORY_and__load_exp22_campaign_authority",
+        "with_exact_objective_to_package_authority_map": {
+          "treewm_v2_grounded_gauge_formal_v1": "experiments/22-treewm-grounded-gauge-formal-v1",
+          "treewm_v2_grounded_executable_prefix_formal_v1": "experiments/24-treewm-executable-prefix-formal-v1"
+        },
+        "required_order": "validate_package_authorization_before_dataset_or_model_construction",
+        "exp24_authority_contract": "rederive_the_exact_run_and_environment_from_the_sealed_Exp24_snapshot_manifest_per_setting_contract_and_submission_contract;_bind_protocol_source_runtime_input_future_prefix_safety_seed_and_Launch7_report_commit_hashes",
+        "no_exp22_behavior_change": true
+      }
+    }
+  },
+  "config_delta": {
+    "path": "configs/experiment/treewm_v2_grounded_executable_prefix_formal_v1.yaml",
+    "base": "fresh_file_not_a_pilot_override",
+    "exact_overrides": {
+      "objective_version": "treewm_v2_grounded_executable_prefix_formal_v1",
+      "train.steps": 1000000,
+      "train.scheduler_total_steps": 1000000,
+      "train.ckpt_every": 1000,
+      "train.log_every": 50,
+      "train.val_every": 2000,
+      "train.diag_every": 2000,
+      "train.eval_every": 25000,
+      "train.viz_every": 25000,
+      "train.viz_every_early": 2000,
+      "train.viz_early_until": 25000,
+      "train.validation_sample_seed": 1701,
+      "train.num_workers": 10,
+      "train.gradient_checkpointing": true,
+      "train.lr": 0.00003,
+      "train.weight_decay": 0.001,
+      "train.gain_lr": 0.0003,
+      "train.gain_weight_decay": 0.0,
+      "train.gain_loss_every": 1,
+      "train.gain_training_scorers": ["learned", "novelty_q"],
+      "train.separate_gain_grad_clip": true,
+      "train.separate_branch_transformer_grad_clip": true,
+      "losses.weights.multistep": 1.0,
+      "losses.weights.latent_gauge": 1.0,
+      "losses.weights.executable_prefix_action": 0.033368419,
+      "losses.weights.executable_prefix_latent": 0.027645085,
+      "losses.weights.executable_prefix_endpoint": 0.011350645,
+      "losses.enabled.executable_prefix_action": true,
+      "losses.enabled.executable_prefix_latent": true,
+      "losses.enabled.executable_prefix_endpoint": true,
+      "future_sets.executable_prefix_steps": 4,
+      "future_sets.recipe_anchor_policy": "published_union",
+      "future_sets.cache": false,
+      "future_sets.shared_cache": true,
+      "model.max_depth": 3,
+      "tree.max_depth": 3,
+      "tree.node_budget": 64,
+      "tree.scorer": "learned",
+      "planner.score_space": "decoded",
+      "planner.decoded_metric": "domain_raw",
+      "planner.execute_mode": "clipped",
+      "planner.execute_steps": 4,
+      "planner.require_first_edge_improvement": true,
+      "planner.min_first_edge_improvement": 0.0,
+      "eval.task_split": "standard",
+      "eval.episodes_per_task": 1,
+      "eval.final_episodes_per_task": 50
+    },
+    "remaining_exact_recipe_source": "manifest.objective.frozen_base_recipe"
+  },
+  "required_tests": [
+    "new_objective_is_accepted_at_exactly_1m_and_rejected_at_every_other_total",
+    "new_objective_is_not_pilot_capped",
+    "only_2k_25k_100k_1m_stage_limits_are_accepted",
+    "latent_gauge_and_all_three_executable_prefix_terms_are_required",
+    "strict_sequence_and_grounded_execution_v2_contract_is_required",
+    "Exp24_package_authorization_runs_before_dataset_or_model_construction",
+    "direct_Hydra_composition_without_Exp24_receipt_is_rejected",
+    "canonical_Exp24_argv_environment_and_hashes_are_rederived",
+    "Exp22_authorization_tests_remain_unchanged_and_pass",
+    "pilot_objective_remains_hard_capped_at_25k"
+  ]
+}

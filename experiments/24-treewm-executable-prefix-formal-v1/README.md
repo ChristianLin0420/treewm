@@ -72,15 +72,36 @@ antmaze-giant, humanoidmaze-medium, and humanoidmaze-large need new outcome-blin
 formal audit rows. Pilot evidence selects the method and weights; it is not a
 substitute for per-setting launch provenance.
 
-## Runtime hardening to port after Launch7 freezes
+## M1 hardened runtime scaffold
 
-The runtime port must start from the final accepted Launch7 bytes, not an in-flight
-working tree. It must retain the hardened immutable snapshot and isolated `-I -S -B`
-bootstrap, exact inventory and identity checks, exclusive submission claim and
-append-only journals, scheduler control-plane observations, exact-ID reconciliation,
-rollback and cancellation, whole-array dependency validation, durable signal/requeue
-intent, strict scalar identity handling, authenticated W&B leaf-link inspection,
-and immutable report publication.
+Exp24 now contains its own M1 control-plane scaffold. It defines the exact 11-node,
+10-edge DAG; a private atomic transaction claim; no-replace immutable records;
+append-only journals; an exact source snapshot; isolated queued bootstrap; scheduler
+control-plane capture; zero-job `sbatch --test-only` validation; parent-aware Slurm
+array reconciliation; accepted-job normalization; all-node precommit re-observation;
+exact-ID reverse-DAG rollback/cancellation; crash recovery; and a receipt barrier.
+The 600-second pre-READY transaction budget and 30-second scheduler-client timeout
+bound scheduler-side progress relative to the 900-second queued barrier. They do
+not bound filesystem publication latency after durable READY.
+
+This is still not an execution-ready runtime. The formal trainer objective is only
+documented in `formal_objective_delta.json`, scientific adapters and durable
+training/held-out resume handling are absent, the strict scalar/report evidence
+schemas are not sealed, and report publication is deliberately disabled. Launch7
+acceptance, all-ten contracts/audits, clean committed snapshot provenance, and
+training/evaluation/requeue feasibility remain hard blockers. A held `train_2000`
+root with a durable receipt-before-release, exact release/observation, activation
+record, and recovery for both release crash ordinals is also required before this
+can execute; a finite worker wait alone is not launch authority. `--submit` checks
+those blockers before creating a claim, snapshot, output, or scheduler process.
+The bootstrap currently requires the exact configured executable, Python 3.11.15,
+and real `-I -S -B` flags; binary/environment provenance must still be protocol-sealed.
+
+Emergency cancel/recovery uses a stable v1 contract envelope and a minimal sealed
+snapshot capsule (`cancel.py`, `runtime.py`, `campaign.py`, and `manifest.json`). It
+does not depend on an unrelated training source file surviving an incident. A
+committed cancellation still authenticates the exact receipt, canonical DAG, full
+committed journal ledger, and exact parent job IDs before `scancel --quiet`.
 
 Exp22's submit transaction and scalar parser are not reusable as-is. Exp24 must not
 strand accepted ancestors after a partial `sbatch` failure, and it must not choose a
@@ -93,18 +114,42 @@ registered in the trainer's V2, latent-gauge, executable-prefix, formal, staged,
 authorization sets. Reusing the pilot objective is forbidden because that identity
 is hard-capped at 25k.
 
-## Current read-only checks
+## Current checks and emergency commands
 
 From the repository root:
 
 ```bash
-python -B -m pytest -q experiments/24-treewm-executable-prefix-formal-v1/tests
-python -I -S -B experiments/24-treewm-executable-prefix-formal-v1/submit.py --test-only
+FORMAL_PYTHON=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -B -m pytest -q -p no:cacheprovider experiments/24-treewm-executable-prefix-formal-v1/tests
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -I -S -B experiments/24-treewm-executable-prefix-formal-v1/submit.py --test-only
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -I -S -B experiments/24-treewm-executable-prefix-formal-v1/submit.py --snapshot-test
 ```
 
-The second command prints the exact 40-run/200-cell DAG and current blockers. It is
+The `--test-only` command prints the exact 40-run/200-cell DAG and current blockers. It is
 required to report `persistent_writes_performed: false`, an empty scheduler-call
 list, and `snapshot_created: false`.
+
+Mutation and recovery reject every interpreter other than that exact Python with
+`-I -S -B`. For a real transaction root, the live command authenticates the stable
+dispatch envelope and `execve`s the sealed snapshot implementation before importing
+the mutable worktree package:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -I -S -B experiments/24-treewm-executable-prefix-formal-v1/cancel.py --cancel --submission-root /absolute/submission-root
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -I -S -B experiments/24-treewm-executable-prefix-formal-v1/cancel.py --recover --submission-root /absolute/submission-root
+```
+
+The equivalent direct snapshot-resident form, useful when the later live worktree
+is unavailable, is:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 "$FORMAL_PYTHON" -I -S -B /absolute/submission-root/source-snapshot/repo/experiments/24-treewm-executable-prefix-formal-v1/cancel.py --snapshot-resident --cancel --submission-root /absolute/submission-root
+```
+
+No command above authorizes Exp24 execution in M1. `--snapshot-test` writes only a
+private temporary tree and removes it; it does not create the Exp24 output namespace
+or contact Slurm. A live scheduler preclaim, when separately invoked for audit,
+uses only controller reads and `sbatch --test-only` and must prove zero matching jobs.
 
 ## Remaining milestones
 
@@ -112,7 +157,8 @@ list, and `snapshot_created: false`.
 2. Seal all-ten input/future/prefix/resolved/causal/fixed-weight-safety audits,
    complete per-setting contracts, and build a held-out seed table disjoint from
    formal monitors, Launch7, and authenticated prior consumed evaluation seeds.
-3. Port and adapt the final hardened runtime, including the distinct 1M objective.
+3. Finish the scientific adapters, strict telemetry/report layer, and distinct 1M
+   objective on top of the present M1 control-plane scaffold.
 4. Prove all-ten training throughput/requeue feasibility and every held-out
    setting/task/rail episode-runtime, durable-resume, paired-order, array, aggregate,
    and report walltime bound.

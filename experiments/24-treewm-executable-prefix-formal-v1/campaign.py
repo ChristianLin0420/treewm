@@ -30,7 +30,7 @@ UPSTREAM_BINDING_PATH = PACKAGE_DIR / "launch7_acceptance.binding.json"
 
 CAMPAIGN_ID = "treewm-executable-prefix-formal-v1-launch1"
 UPSTREAM_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
-PACKAGE_PHASE = "geometry_and_global_recipe_locked_execution_blocked"
+PACKAGE_PHASE = "m1_hardened_runtime_scaffold_execution_blocked"
 SELECTED_ARM = "GSEP"
 SEEDS = (240, 241, 242, 243)
 TASK_IDS = (1, 2, 3, 4, 5)
@@ -162,15 +162,40 @@ def _file_identity(value: os.stat_result) -> tuple[int, ...]:
 def authenticated_regular_json(path: str | Path) -> tuple[dict[str, Any], str]:
     """Read a stable nonsymlink regular file without following the final entry."""
 
-    source = Path(path)
+    source = Path(path).absolute()
+    require(
+        source.is_absolute()
+        and all(part not in ("", ".", "..") for part in source.parts[1:]),
+        f"artifact path is not absolute/normalized: {source}",
+    )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    parent_descriptor = os.open(source.anchor, directory_flags)
+    try:
+        for component in source.parts[1:-1]:
+            child = os.open(component, directory_flags, dir_fd=parent_descriptor)
+            os.close(parent_descriptor)
+            parent_descriptor = child
+    except BaseException:
+        os.close(parent_descriptor)
+        raise
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
-        descriptor = os.open(source, flags)
+        listed = os.stat(source.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        descriptor = os.open(source.name, flags, dir_fd=parent_descriptor)
     except OSError as exc:
+        os.close(parent_descriptor)
         raise ContractError(f"cannot authenticate {source}: {exc}") from exc
     try:
         before = os.fstat(descriptor)
-        require(stat.S_ISREG(before.st_mode), f"artifact is not a regular file: {source}")
+        require(
+            stat.S_ISREG(before.st_mode) and _file_identity(before) == _file_identity(listed),
+            f"artifact is not a stable regular file: {source}",
+        )
         require(before.st_nlink == 1, f"artifact has an unsafe hard-link count: {source}")
         chunks: list[bytes] = []
         digest = hashlib.sha256()
@@ -181,9 +206,14 @@ def authenticated_regular_json(path: str | Path) -> tuple[dict[str, Any], str]:
             digest.update(block)
             chunks.append(block)
         after = os.fstat(descriptor)
-        require(_file_identity(before) == _file_identity(after), f"artifact changed while reading: {source}")
+        listed_after = os.stat(source.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        require(
+            _file_identity(before) == _file_identity(after) == _file_identity(listed_after),
+            f"artifact changed while reading: {source}",
+        )
     finally:
         os.close(descriptor)
+        os.close(parent_descriptor)
     try:
         value = json.loads(
             b"".join(chunks).decode("utf-8"),
@@ -197,7 +227,7 @@ def authenticated_regular_json(path: str | Path) -> tuple[dict[str, Any], str]:
 
 
 def load_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
-    manifest = read_json(path)
+    manifest, _digest = authenticated_regular_json(path)
     validate_manifest(manifest)
     return manifest
 
@@ -213,6 +243,17 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
 
     require(manifest.get("schema_version") == 1, "manifest schema differs")
     require(manifest.get("campaign_id") == CAMPAIGN_ID, "campaign ID differs")
+    require(
+        manifest.get("submission_authority_policy")
+        == "Submission authority requires authenticated Exp23 Launch7 acceptance, all-ten outcome-blind audits and per-setting contracts, a sealed hardened runtime and scientific protocol, and verified training/evaluation/requeue feasibility.",
+        "submission authority policy differs",
+    )
+    require(
+        manifest.get("scientific_claim_policy")
+        == "No formal scientific conclusion or promotion claim exists until all four staged all-40 gates pass, all exact 200 held-out cells complete both paired rails, the seed-level aggregate completes, and the immutable formal report commits.",
+        "scientific claim policy differs",
+    )
+    require("claim_policy" not in manifest, "legacy circular claim policy remains")
     require(manifest.get("package_phase") == PACKAGE_PHASE, "package phase differs")
     require(
         manifest.get("classification") == "fresh_formal_selected_gsep_only",
@@ -366,6 +407,32 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(lifecycle.get("dependency_type") == "afterok", "stage dependency is not afterok")
     require(lifecycle.get("post_100k_policy") == "integrity_and_numerical_health_only", "late outcomes can select/stop recipe")
     require(lifecycle.get("resume_scope") == "same_exp24_run_only", "resume scope is not same-run only")
+    require(lifecycle.get("cross_stage_lineage") == {
+        "stage_2000_source": "generation_zero_scratch_initialization_for_all_40_cells",
+        "later_stage_source": "exact_same_cell_checkpoint_accepted_by_immediately_prior_all_40_gate",
+        "promotions": [
+            {"from": 2_000, "to": 25_000, "required_gate": "gate_2000"},
+            {"from": 25_000, "to": 100_000, "required_gate": "gate_25000"},
+            {"from": 100_000, "to": 1_000_000, "required_gate": "gate_100000"},
+        ],
+        "invariant_identity_fields": [
+            "campaign_id",
+            "setting_id",
+            "env_config",
+            "arm",
+            "seed",
+            "run_name",
+            "wandb_id",
+            "resolved_config_sha256",
+            "source_sha256",
+            "runtime_sha256",
+            "protocol_sha256",
+            "formal_contract_sha256",
+        ],
+        "within_stage_requeue": "same_slurm_array_element_same_run_exact_durable_checkpoint_without_gate_promotion",
+        "cross_stage_promotion": "new_afterok_stage_job_authorized_only_by_immediately_prior_all_40_gate_receipt",
+        "exp23_checkpoint_or_output_path_allowed": False,
+    }, "cross-stage lineage contract differs")
 
     stages = manifest.get("stage_acceptance") or {}
     require(set(stages) == {
@@ -737,7 +804,13 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "execution_ready_manifest_exact_schema_no_unvalidated_fields",
     }
     _exact_set(hardening.get("required_patterns"), required_patterns, "required hardening pattern set")
-    require(hardening.get("runtime_files_present") is False, "design package falsely claims runtime port completion")
+    require(hardening.get("runtime_files_present") is True, "M1 hardened runtime files are absent")
+    require(hardening.get("runtime_execution_ready") is False, "M1 runtime is prematurely execution-ready")
+    require(
+        hardening.get("runtime_scope")
+        == "m1_hardened_control_plane_scaffold_with_execution_adapters_fail_closed",
+        "M1 runtime scope differs",
+    )
     require(hardening.get("protocol_lock_present") is False, "design package falsely claims a protocol lock")
 
     execution = manifest.get("execution") or {}
@@ -747,6 +820,19 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(execution.get("memory_per_task") == "64G", "task memory differs")
     require(execution.get("walltime") == "04:00:00", "task walltime differs")
     require(execution.get("signal_seconds_before_end") == 420, "preemption signal window differs")
+    require(execution.get("queued_receipt_barrier_timeout_seconds") == 900, "queued receipt barrier timeout differs")
+    require(execution.get("queued_receipt_barrier_poll_seconds") == 0.25, "queued receipt barrier polling differs")
+    require(execution.get("scheduler_client_timeout_seconds") == 30, "scheduler client timeout differs")
+    require(execution.get("pre_receipt_transaction_budget_seconds") == 600, "pre-receipt transaction budget differs")
+    require(execution.get("receipt_barrier_safety_margin_seconds") == 300, "receipt barrier margin differs")
+    require(
+        execution["pre_receipt_transaction_budget_seconds"]
+        + execution["receipt_barrier_safety_margin_seconds"]
+        == execution["queued_receipt_barrier_timeout_seconds"]
+        and execution["receipt_barrier_safety_margin_seconds"]
+        >= 2 * execution["scheduler_client_timeout_seconds"],
+        "queued receipt barrier has insufficient scheduler timeout margin",
+    )
     require(execution.get("requeue_required") is True, "formal jobs are not requeueable")
     require(execution.get("feasibility_status") == "unverified_blocker", "resource feasibility is prematurely accepted")
     require(execution.get("requires_measured_updates_per_hour_for_all_ten_settings") is True, "formal feasibility lacks throughput evidence")
@@ -754,12 +840,37 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(execution.get("requires_measured_heldout_runtime_for_every_setting_task_and_rail") is True, "held-out runtime feasibility is absent")
     require(execution.get("requires_episode_level_requeue_and_paired_order_probe") is True, "held-out requeue integrity is unproven")
     require(execution.get("requires_final_array_aggregate_report_walltime_check") is True, "terminal DAG feasibility is unproven")
+    require(execution.get("requires_clean_committed_source_snapshot") is True, "clean committed source proof is not required")
+    require(
+        execution.get("requires_held_root_post_receipt_activation_handshake") is True,
+        "held-root post-receipt activation handshake is not required",
+    )
+    require(
+        execution.get("requires_pinned_interpreter_environment_provenance") is True,
+        "pinned interpreter/environment provenance is not required",
+    )
     require(execution.get("control_python_flags") == ["-I", "-S", "-B"], "control Python isolation differs")
     require(execution.get("trainer_python_flags") == ["-P", "-S", "-B"], "trainer Python isolation differs")
     require(execution.get("process_topology") == "Slurm batch shell -> worker.py -> train_entry.py -> in-process scripts.train; no srun", "process topology differs")
     require(execution.get("sbatch") == "/usr/local/bin/sbatch", "sbatch path differs")
+    require(execution.get("squeue") == "/usr/local/bin/squeue", "squeue path differs")
     require(execution.get("scancel") == "/usr/local/bin/scancel", "scancel path differs")
     require(execution.get("scontrol") == "/usr/local/bin/scontrol", "scontrol path differs")
+    require(execution.get("scheduler_control_plane") == {
+        "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+        "cluster_name": "cs-oci-ord",
+        "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
+        "slurmctld_port": 6817,
+        "auth_type": "auth/munge",
+        "gres_types": ["gpu"],
+        "cli_filter_plugins": ["lua"],
+        "job_submit_plugins": ["lua"],
+        "trust_model": (
+            "root-admin mutable scheduler control plane; config and Lua policy bytes are "
+            "observation-bound from preclaim through submission; root-owned Slurm clients, "
+            "plugin binaries, and shared libraries are trusted mutable external runtime"
+        ),
+    }, "scheduler control-plane contract differs")
 
     paths = manifest.get("paths") or {}
     require(
@@ -940,7 +1051,7 @@ def preflight_report(manifest: Mapping[str, Any]) -> dict[str, Any]:
     blockers = [
         "Launch7 accepted_engineering_pilot binding is absent",
         "outcome-blind input/future/prefix/resolved/causal/fixed-weight-safety audits are not sealed for all ten settings",
-        "Exp23 hardened snapshot/bootstrap/scheduler/cancel/report runtime is not yet ported",
+        "M1 control-plane runtime is present but scientific worker/gate/eval/report adapters remain fail-closed",
         "new 1M formal objective/config and trainer authorization sets are not yet registered",
         "formal evaluation seed table and protocol lock are not yet sealed",
         "held-out seeds lack authenticated prior-consumption/disjointness evidence",
