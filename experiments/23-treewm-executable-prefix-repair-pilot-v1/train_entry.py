@@ -50,6 +50,22 @@ PINNED_SITE_DIRECTORIES = (
     ),
 )
 SHA256_CHARS = frozenset("0123456789abcdef")
+SNAPSHOT_IMPORT_FILES = {
+    "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+}
+TRAINER_BOOTSTRAP_SMOKE_FIELDS = frozenset(
+    {
+        "schema_version", "status", "cell_index", "python_flags",
+        "entry_relative_path", "config_package_relative_path",
+        "config_package_sha256", "snapshot_inventory_sha256", "launch_sha256",
+        "resolved_config_sha256", "stdout_sha256", "stdout_bytes",
+        "cuda_visible_devices", "full_output_fingerprint_before",
+        "full_output_fingerprint_after", "scientific_output_fingerprint_before",
+        "scientific_output_fingerprint_after", "persistent_writes_performed",
+        "scheduler_calls",
+    }
+)
 SCHEDULER_CONTROL_PLANE = {
     "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
     "cluster_name": "cs-oci-ord",
@@ -82,7 +98,8 @@ SUBMISSION_CONTRACT_FIELDS = frozenset(
         "prefix_target_artifact_sha256", "resolved_config_artifact_sha256",
         "causal_parity_artifact_sha256", "snapshot_inventory",
         "snapshot_inventory_sha256", "live_audit_replays", "snapshot_audit_replays",
-        "direct_hydra_compositions", "scientific_output_fingerprint_before",
+        "direct_hydra_compositions", "trainer_bootstrap_smoke",
+        "scientific_output_fingerprint_before",
         "scientific_output_fingerprint_after", "full_output_fingerprint_before",
         "full_output_fingerprint_after", "snapshot_full_output_fingerprint_before",
         "snapshot_full_output_fingerprint_after",
@@ -361,10 +378,14 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
         str(PACKAGE_RELATIVE / "worker.py"),
         str(PACKAGE_RELATIVE / "train_entry.py"),
         str(PACKAGE_RELATIVE / "train.slurm"),
-        "scripts/__init__.py",
         "scripts/train.py",
     ):
         _require(required in expected, f"snapshot inventory omits lifecycle source: {required}")
+    for required, digest in SNAPSHOT_IMPORT_FILES.items():
+        _require(
+            expected.get(required) == digest,
+            f"snapshot inventory omits/replaces exact import marker: {required}",
+        )
 
     root_fd = _open_directory(snapshot_root, "snapshot root")
     actual: dict[str, str] = {}
@@ -517,7 +538,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch5", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch6", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(
@@ -530,7 +551,7 @@ def bootstrap_submission(
         and scheduler_preclaim.get("schema_version") == 1
         and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
         and scheduler_preclaim.get("campaign_id")
-        == "treewm-executable-prefix-repair-pilot-v1-launch5"
+        == "treewm-executable-prefix-repair-pilot-v1-launch6"
         and scheduler_preclaim.get("scheduler_calls") == 7
         and scheduler_preclaim.get("scheduler_mutation_calls") == 0
         and scheduler_preclaim.get("persistent_writes_performed") == 0,
@@ -544,8 +565,8 @@ def bootstrap_submission(
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch5-scheduler-test-train",
-                "report": "exp23-launch5-scheduler-test-report",
+                "train": "exp23-launch6-scheduler-test-train",
+                "report": "exp23-launch6-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -602,6 +623,55 @@ def bootstrap_submission(
     inventory = contract.get("snapshot_inventory")
     _require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
     _require(_stable_hash(inventory) == contract.get("snapshot_inventory_sha256"), "snapshot inventory hash differs")
+    smoke = contract.get("trainer_bootstrap_smoke")
+    compositions = contract.get("direct_hydra_compositions")
+    launches = contract.get("launches")
+    _require(
+        isinstance(smoke, Mapping) and set(smoke) == TRAINER_BOOTSTRAP_SMOKE_FIELDS,
+        "trainer bootstrap smoke fields differ",
+    )
+    _require(
+        smoke.get("schema_version") == 1
+        and smoke.get("status") == "sealed_trainer_hydra_composition_verified"
+        and smoke.get("cell_index") == 0
+        and smoke.get("python_flags") == ["-P", "-S", "-B"]
+        and smoke.get("entry_relative_path") == str(PACKAGE_RELATIVE / "train_entry.py")
+        and smoke.get("config_package_relative_path") == "configs/__init__.py"
+        and smoke.get("config_package_sha256") == SNAPSHOT_IMPORT_FILES["configs/__init__.py"]
+        and smoke.get("snapshot_inventory_sha256") == contract.get("snapshot_inventory_sha256")
+        and smoke.get("cuda_visible_devices") == ""
+        and smoke.get("persistent_writes_performed") == 0
+        and smoke.get("scheduler_calls") == 0,
+        "trainer bootstrap smoke contract differs",
+    )
+    _require(
+        isinstance(compositions, list) and len(compositions) == 20
+        and isinstance(launches, list) and len(launches) == 20
+        and smoke.get("launch_sha256") == launches[0].get("launch_sha256")
+        and smoke.get("resolved_config_sha256")
+        == compositions[0].get("resolved_config_sha256"),
+        "trainer bootstrap smoke launch/config binding differs",
+    )
+    _require(
+        _sha256_string(smoke.get("stdout_sha256"))
+        and type(smoke.get("stdout_bytes")) is int
+        and smoke["stdout_bytes"] > 0,
+        "trainer bootstrap smoke stdout evidence differs",
+    )
+    for flavor in ("full_output", "scientific_output"):
+        _require(
+            _sha256_string(smoke.get(f"{flavor}_fingerprint_before"))
+            and _sha256_string(smoke.get(f"{flavor}_fingerprint_after"))
+            and smoke.get(f"{flavor}_fingerprint_before")
+            == smoke.get(f"{flavor}_fingerprint_after"),
+            f"trainer bootstrap smoke {flavor} drifted",
+        )
+        _require(
+            smoke.get(f"{flavor}_fingerprint_before")
+            == contract.get(f"snapshot_{flavor}_fingerprint_before")
+            == contract.get(f"snapshot_{flavor}_fingerprint_after"),
+            f"trainer bootstrap smoke {flavor} evidence is detached",
+        )
     _verify_snapshot_location(snapshot, submission)
     _verify_snapshot_tree(snapshot, inventory)
     configure_verified_import_paths(snapshot)
@@ -833,6 +903,133 @@ def _register_and_import_trainer() -> ModuleType:
     return train
 
 
+def _decode_smoke_object(raw: str, label: str) -> dict[str, Any]:
+    try:
+        payload = raw.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise EntryContractError(f"{label} is not canonical ASCII JSON") from exc
+    value = _decode_json(payload, Path(f"<{label}>"))
+    _require(
+        _canonical_json(value) == raw,
+        f"{label} is not canonical JSON",
+    )
+    return value
+
+
+def _verify_imported_module(module_name: str, expected_path: Path) -> None:
+    module = sys.modules.get(module_name)
+    _require(module is not None, f"{module_name} was not imported")
+    path = Path(os.path.abspath(str(getattr(module, "__file__", ""))))
+    _require(path == expected_path, f"{module_name} imported from an unexpected path")
+    _regular_nonsymlink(path, f"{module_name} imported module")
+
+
+def hydra_composition_smoke(argv: Sequence[str] | None = None) -> int:
+    """Compose one exact sealed launch through the production module-import bridge."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--_hydra-composition-smoke", action="store_true", required=True)
+    parser.add_argument("--snapshot-root", type=Path, required=True)
+    parser.add_argument("--snapshot-inventory-sha256", required=True)
+    parser.add_argument("--snapshot-inventory-json", required=True)
+    parser.add_argument("--launch-json", required=True)
+    args = parser.parse_args(argv)
+
+    assert_isolated_runtime()
+    _require(_EARLY_SIGNAL is None, "signal state exists before composition smoke")
+    _require(
+        os.environ.get("CUDA_VISIBLE_DEVICES") == "",
+        "composition smoke must hide every CUDA device",
+    )
+    snapshot = _absolute(args.snapshot_root, "smoke snapshot root")
+    _require(snapshot == REPOSITORY_ROOT, "smoke snapshot root differs from entry root")
+    _require(
+        ENTRY_PATH == snapshot / PACKAGE_RELATIVE / "train_entry.py",
+        "composition smoke entry path differs",
+    )
+    inventory = _decode_smoke_object(
+        args.snapshot_inventory_json, "snapshot inventory JSON"
+    )
+    _require(
+        _sha256_string(args.snapshot_inventory_sha256)
+        and _stable_hash(inventory) == args.snapshot_inventory_sha256,
+        "composition smoke snapshot inventory hash differs",
+    )
+    launch = _decode_smoke_object(args.launch_json, "launch JSON")
+    launch_body = dict(launch)
+    launch_sha256 = launch_body.pop("launch_sha256", None)
+    _require(
+        _sha256_string(launch_sha256)
+        and launch_sha256 == _stable_hash(launch_body),
+        "composition smoke launch self hash differs",
+    )
+    _require(
+        launch.get("schema_version") == 1
+        and launch.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "composition smoke launch identity differs",
+    )
+    cell = launch.get("cell")
+    _require(isinstance(cell, Mapping), "composition smoke cell is absent")
+    seed = cell.get("seed")
+    _require(type(seed) is int, "composition smoke seed is invalid")
+    _require(
+        os.environ.get("PYTHONHASHSEED") == str(seed),
+        "composition smoke Python hash seed differs",
+    )
+    launch_environment = launch.get("environment")
+    _require(isinstance(launch_environment, Mapping), "composition smoke environment is absent")
+    validate_headless_runtime_environment(launch_environment, os.environ)
+    reject_forbidden_environment(launch_environment, os.environ)
+    for key, value in launch_environment.items():
+        _require(
+            os.environ.get(str(key)) == str(value),
+            f"composition smoke environment differs: {key}",
+        )
+    launch_argv = launch.get("argv")
+    _require(
+        isinstance(launch_argv, list) and len(launch_argv) >= 3,
+        "composition smoke trainer argv is invalid",
+    )
+    _require(
+        launch_argv[0] == str(PINNED_PYTHON)
+        and Path(str(launch_argv[1])) == snapshot / "scripts/train.py",
+        "composition smoke trainer executable differs",
+    )
+    trainer_args = [str(value) for value in launch_argv[2:]]
+    _require(
+        "resume=auto" in trainer_args and "train.steps=25000" in trainer_args,
+        "composition smoke trainer lifecycle differs",
+    )
+    _require(
+        not any(
+            value == "--resolve"
+            or value.startswith("--resolve=")
+            or value == "--cfg"
+            or value.startswith("--cfg=")
+            for value in trainer_args
+        ),
+        "composition smoke launch contains unsealed Hydra control flags",
+    )
+
+    _verify_snapshot_tree(snapshot, inventory)
+    configure_verified_import_paths(snapshot)
+    train = _register_and_import_trainer()
+    for module_name, expected_path in (
+        ("treewm", snapshot / "treewm/__init__.py"),
+        ("treewm.utils.checkpoint", snapshot / "treewm/utils/checkpoint.py"),
+        ("scripts.train", snapshot / "scripts/train.py"),
+    ):
+        _verify_imported_module(module_name, expected_path)
+
+    # ``--cfg job --resolve`` returns before the decorated application function is
+    # entered, so this exercises Hydra's real module-relative package lookup without
+    # constructing a model, opening a run directory, or contacting W&B.
+    sys.argv = [str(launch_argv[1]), *trainer_args, "--cfg", "job", "--resolve"]
+    train.main()
+    _verify_imported_module("configs", snapshot / "configs/__init__.py")
+    return 0
+
+
 def _parse(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launch", type=Path, required=True)
@@ -869,14 +1066,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # and exact launch re-derivation. Signals were already latched safely above.
     notify_worker_ready(args.ready_fd)
     train = _register_and_import_trainer()
-    for module_name in ("treewm", "treewm.utils.checkpoint", "scripts.train"):
-        module = sys.modules.get(module_name)
-        path = Path(os.path.abspath(str(getattr(module, "__file__", ""))))
-        try:
-            path.relative_to(REPOSITORY_ROOT)
-        except ValueError as exc:
-            raise EntryContractError(f"{module_name} imported outside snapshot") from exc
-        _regular_nonsymlink(path, f"{module_name} imported module")
+    for module_name, expected_path in (
+        ("treewm", REPOSITORY_ROOT / "treewm/__init__.py"),
+        ("treewm.utils.checkpoint", REPOSITORY_ROOT / "treewm/utils/checkpoint.py"),
+        ("scripts.train", REPOSITORY_ROOT / "scripts/train.py"),
+    ):
+        _verify_imported_module(module_name, expected_path)
 
     # Hydra now sees the same argv it would see under direct scripts/train.py.
     sys.argv = [str(launch["argv"][1]), *args.trainer_args]
@@ -886,7 +1081,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        raw_argv = sys.argv[1:]
+        if raw_argv and raw_argv[0] == "--_hydra-composition-smoke":
+            raise SystemExit(hydra_composition_smoke(raw_argv))
+        raise SystemExit(main(raw_argv))
     except EntryContractError as exc:
         print(f"Exp23 train-entry contract error: {exc}", file=sys.stderr, flush=True)
         raise SystemExit(2)

@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch5"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -52,6 +52,29 @@ SBATCH_JOB = re.compile(r"^(?P<job_id>[0-9]+)$")
 JOB_ID = re.compile(r"^[1-9][0-9]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA1 = re.compile(r"^[0-9a-f]{40}$")
+TRAINER_BOOTSTRAP_SMOKE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "cell_index",
+        "python_flags",
+        "entry_relative_path",
+        "config_package_relative_path",
+        "config_package_sha256",
+        "snapshot_inventory_sha256",
+        "launch_sha256",
+        "resolved_config_sha256",
+        "stdout_sha256",
+        "stdout_bytes",
+        "cuda_visible_devices",
+        "full_output_fingerprint_before",
+        "full_output_fingerprint_after",
+        "scientific_output_fingerprint_before",
+        "scientific_output_fingerprint_after",
+        "persistent_writes_performed",
+        "scheduler_calls",
+    }
+)
 RECEIPT_FIELDS = frozenset(
     {
         "schema_version", "status", "campaign_id", "submission_root",
@@ -1575,7 +1598,7 @@ def _ephemeral_child_environment(
 
     temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch5-{os.getuid()}-", dir=temporary_parent
+        prefix=f"treewm-exp23-launch6-{os.getuid()}-", dir=temporary_parent
     ) as raw_root:
         root = Path(raw_root)
         root_info = root.lstat()
@@ -1941,6 +1964,184 @@ def direct_hydra_matrix(
     concrete_records = [value for value in records if value is not None]
     require(len({row["launch_sha256"] for row in concrete_launches}) == 20, "launch identities are not unique")
     return concrete_launches, concrete_records
+
+
+def trainer_bootstrap_smoke(
+    snapshot_root: Path,
+    inventory: Mapping[str, str],
+    launch: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    runner: AuditRunner = _default_runner,
+    timeout: float = 300,
+) -> dict[str, Any]:
+    """Exercise the exact trainer entry/import/Hydra path without running the app."""
+
+    root = _directory_nonsymlink(snapshot_root, "trainer smoke snapshot root")
+    verify_snapshot_files(root, inventory)
+    manifest = read_json(root / PACKAGE_RELATIVE / "manifest.json")
+    interpreter = interpreter_contract(manifest)
+    python = str(interpreter["lexical_executable"])
+    entry = root / PACKAGE_RELATIVE / "train_entry.py"
+    _regular_nonsymlink(entry, "trainer composition-smoke entry")
+    argv = launch.get("argv")
+    cell = launch.get("cell")
+    environment = launch.get("environment")
+    require(isinstance(argv, list) and len(argv) >= 3, "trainer smoke argv is invalid")
+    require(isinstance(cell, Mapping) and type(cell.get("index")) is int, "trainer smoke cell is invalid")
+    require(type(cell.get("seed")) is int, "trainer smoke seed is invalid")
+    require(isinstance(environment, Mapping), "trainer smoke environment is invalid")
+    require(argv[0] == python, "trainer smoke interpreter differs")
+    require(Path(str(argv[1])) == root / "scripts/train.py", "trainer smoke script differs")
+    command = [
+        python,
+        "-P",
+        "-S",
+        "-B",
+        str(entry),
+        "--_hydra-composition-smoke",
+        "--snapshot-root",
+        str(root),
+        "--snapshot-inventory-sha256",
+        stable_hash(inventory),
+        "--snapshot-inventory-json",
+        canonical_json(inventory),
+        "--launch-json",
+        canonical_json(launch),
+    ]
+    smoke_environment = {
+        **{str(key): str(value) for key, value in environment.items()},
+        "PYTHONHASHSEED": str(cell["seed"]),
+        # Importing torch is unavoidable because scripts.train owns the Hydra
+        # decorator.  Hiding every device ensures this probe cannot initialize or
+        # reserve a campaign GPU.
+        "CUDA_VISIBLE_DEVICES": "",
+    }
+    full_output_before = _output_tree_fingerprint(manifest)
+    scientific_output_before = _scientific_output_fingerprint(manifest)
+    with _ephemeral_child_environment(smoke_environment) as child_environment:
+        completed = runner(command, root, child_environment, timeout)
+    require(
+        completed.returncode == 0,
+        f"cell{cell['index']}: sealed trainer Hydra smoke failed "
+        f"({completed.returncode}): "
+        + completed.stderr.decode("utf-8", "replace")[-8000:],
+    )
+    try:
+        from omegaconf import OmegaConf
+
+        config = OmegaConf.to_container(
+            OmegaConf.create(completed.stdout.decode("utf-8")), resolve=True
+        )
+    except Exception as exc:
+        raise SubmissionError(
+            f"cell{cell['index']}: sealed trainer Hydra smoke stdout is invalid: {exc}"
+        ) from exc
+    require(isinstance(config, dict), "sealed trainer Hydra smoke config is not an object")
+    require(
+        config == expected.get("resolved_config"),
+        f"cell{cell['index']}: sealed trainer Hydra smoke config differs",
+    )
+    resolved_sha256 = stable_hash(config)
+    require(
+        resolved_sha256 == expected.get("resolved_config_sha256"),
+        f"cell{cell['index']}: sealed trainer Hydra smoke config hash differs",
+    )
+    verify_snapshot_files(root, inventory)
+    full_output_after = _output_tree_fingerprint(manifest)
+    scientific_output_after = _scientific_output_fingerprint(manifest)
+    require(
+        full_output_after == full_output_before,
+        "sealed trainer Hydra smoke changed the prospective output tree",
+    )
+    require(
+        scientific_output_after == scientific_output_before,
+        "sealed trainer Hydra smoke changed prospective scientific outputs",
+    )
+    return {
+        "schema_version": 1,
+        "status": "sealed_trainer_hydra_composition_verified",
+        "cell_index": int(cell["index"]),
+        "python_flags": ["-P", "-S", "-B"],
+        "entry_relative_path": str(PACKAGE_RELATIVE / "train_entry.py"),
+        "config_package_relative_path": "configs/__init__.py",
+        "config_package_sha256": hashlib.sha256(b"").hexdigest(),
+        "snapshot_inventory_sha256": stable_hash(inventory),
+        "launch_sha256": str(launch["launch_sha256"]),
+        "resolved_config_sha256": resolved_sha256,
+        "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(),
+        "stdout_bytes": len(completed.stdout),
+        "cuda_visible_devices": "",
+        "full_output_fingerprint_before": full_output_before,
+        "full_output_fingerprint_after": full_output_after,
+        "scientific_output_fingerprint_before": scientific_output_before,
+        "scientific_output_fingerprint_after": scientific_output_after,
+        "persistent_writes_performed": 0,
+        "scheduler_calls": 0,
+    }
+
+
+def _validated_trainer_bootstrap_smoke(
+    value: Mapping[str, Any],
+    *,
+    inventory_sha256: str,
+    launch_sha256: str,
+    resolved_config_sha256: str,
+    full_output_fingerprint: str,
+    scientific_output_fingerprint: str,
+) -> dict[str, Any]:
+    result = dict(value)
+    require(set(result) == TRAINER_BOOTSTRAP_SMOKE_FIELDS, "trainer bootstrap smoke fields differ")
+    require(
+        result.get("schema_version") == 1
+        and result.get("status") == "sealed_trainer_hydra_composition_verified"
+        and result.get("cell_index") == 0,
+        "trainer bootstrap smoke identity differs",
+    )
+    require(result.get("python_flags") == ["-P", "-S", "-B"], "trainer bootstrap smoke Python flags differ")
+    require(
+        result.get("entry_relative_path") == str(PACKAGE_RELATIVE / "train_entry.py")
+        and result.get("config_package_relative_path") == "configs/__init__.py"
+        and result.get("config_package_sha256") == hashlib.sha256(b"").hexdigest(),
+        "trainer bootstrap smoke import binding differs",
+    )
+    require(
+        result.get("snapshot_inventory_sha256") == inventory_sha256
+        and result.get("launch_sha256") == launch_sha256
+        and result.get("resolved_config_sha256") == resolved_config_sha256,
+        "trainer bootstrap smoke source/launch/config binding differs",
+    )
+    require(
+        SHA256.fullmatch(str(result.get("stdout_sha256", ""))) is not None
+        and type(result.get("stdout_bytes")) is int
+        and result["stdout_bytes"] > 0,
+        "trainer bootstrap smoke stdout evidence differs",
+    )
+    require(result.get("cuda_visible_devices") == "", "trainer bootstrap smoke exposed CUDA")
+    for flavor in ("full_output", "scientific_output"):
+        require(
+            SHA256.fullmatch(
+                str(result.get(f"{flavor}_fingerprint_before", ""))
+            ) is not None
+            and SHA256.fullmatch(
+                str(result.get(f"{flavor}_fingerprint_after", ""))
+            ) is not None
+            and result.get(f"{flavor}_fingerprint_before")
+            == result.get(f"{flavor}_fingerprint_after"),
+            f"trainer bootstrap smoke changed {flavor.replace('_', ' ')}s",
+        )
+    require(
+        result.get("full_output_fingerprint_before") == full_output_fingerprint
+        and result.get("scientific_output_fingerprint_before")
+        == scientific_output_fingerprint,
+        "trainer bootstrap smoke output evidence is detached from snapshot preflight",
+    )
+    require(
+        result.get("persistent_writes_performed") == 0
+        and result.get("scheduler_calls") == 0,
+        "trainer bootstrap smoke side-effect ledger differs",
+    )
+    return result
 
 
 def static_preflight(
@@ -3561,8 +3762,8 @@ def scheduler_preclaim_test(
         ),
     }
     job_names = {
-        "train": f"exp23-launch5-scheduler-test-train",
-        "report": f"exp23-launch5-scheduler-test-report",
+        "train": f"exp23-launch6-scheduler-test-train",
+        "report": f"exp23-launch6-scheduler-test-report",
     }
     observations: list[dict[str, Any]] = []
     commands: list[list[str]] = []
@@ -3802,8 +4003,8 @@ def _validated_scheduler_preclaim(
         result["zero_job_proof"]
         == {
             "job_names": {
-                "train": "exp23-launch5-scheduler-test-train",
-                "report": "exp23-launch5-scheduler-test-report",
+                "train": "exp23-launch6-scheduler-test-train",
+                "report": "exp23-launch6-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -3877,6 +4078,26 @@ def _snapshot_preflight_in_process(
         runner=runner,
         snapshot_inventory=inventory,
     )
+    expected_rows = resolved.get("matrix")
+    require(
+        isinstance(expected_rows, list) and len(expected_rows) == 20,
+        "snapshot resolved-config matrix differs before trainer smoke",
+    )
+    smoke = trainer_bootstrap_smoke(
+        snapshot_root,
+        inventory,
+        launches[0],
+        expected_rows[0],
+        runner=runner,
+    )
+    smoke = _validated_trainer_bootstrap_smoke(
+        smoke,
+        inventory_sha256=stable_hash(inventory),
+        launch_sha256=launches[0]["launch_sha256"],
+        resolved_config_sha256=compositions[0]["resolved_config_sha256"],
+        full_output_fingerprint=output_before,
+        scientific_output_fingerprint=scientific_before,
+    )
     source_after = campaign.source_contract(snapshot_root)
     output_after = _output_tree_fingerprint(manifest)
     scientific_after = _scientific_output_fingerprint(manifest)
@@ -3909,6 +4130,7 @@ def _snapshot_preflight_in_process(
             "orchestration_interpreter": runtime_interpreter,
             "import_containment": "all_treewm_modules_inside_snapshot",
             "audit_input_root": str(input_root),
+            "trainer_bootstrap_smoke": smoke,
         },
     }
 
@@ -3977,6 +4199,27 @@ def _snapshot_preflight(
         verification.get("audit_input_root") == str(input_root),
         "isolated snapshot audit input root differs",
     )
+    compositions = value.get("compositions")
+    launches = value.get("launches")
+    require(
+        isinstance(compositions, list)
+        and len(compositions) == 20
+        and isinstance(launches, list)
+        and len(launches) == 20,
+        "isolated snapshot trainer matrices differ",
+    )
+    _validated_trainer_bootstrap_smoke(
+        verification.get("trainer_bootstrap_smoke") or {},
+        inventory_sha256=stable_hash(inventory),
+        launch_sha256=str(launches[0].get("launch_sha256", "")),
+        resolved_config_sha256=str(compositions[0].get("resolved_config_sha256", "")),
+        full_output_fingerprint=str(
+            verification.get("full_output_fingerprint_before", "")
+        ),
+        scientific_output_fingerprint=str(
+            verification.get("scientific_output_fingerprint_before", "")
+        ),
+    )
     return value
 
 
@@ -3987,7 +4230,7 @@ def _restore_snapshot_test_permissions(task_root: Path) -> None:
     root = task_root.absolute()
     require(
         root.parent == temporary_parent
-        and root.name.startswith(f"treewm-exp23-launch5-snapshot-test-{os.getuid()}-"),
+        and root.name.startswith(f"treewm-exp23-launch6-snapshot-test-{os.getuid()}-"),
         "refusing to restore permissions outside a snapshot-test temporary tree",
     )
     if not _lexical_exists(root):
@@ -4041,7 +4284,7 @@ def snapshot_test(
     task_root: Path | None = None
     copied: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch5-snapshot-test-{os.getuid()}-",
+        prefix=f"treewm-exp23-launch6-snapshot-test-{os.getuid()}-",
         dir=temporary_parent,
     ) as raw_task_root:
         task_root = Path(raw_task_root)
@@ -4088,6 +4331,29 @@ def snapshot_test(
         verification.get("audit_input_root") == str(root),
         "snapshot-test audit input root differs",
     )
+    copied_launches = copied.get("launches")
+    copied_compositions = copied.get("compositions")
+    require(
+        isinstance(copied_launches, list)
+        and len(copied_launches) == 20
+        and isinstance(copied_compositions, list)
+        and len(copied_compositions) == 20,
+        "snapshot-test trainer matrices differ",
+    )
+    trainer_smoke = _validated_trainer_bootstrap_smoke(
+        verification.get("trainer_bootstrap_smoke") or {},
+        inventory_sha256=stable_hash(inventory),
+        launch_sha256=str(copied_launches[0].get("launch_sha256", "")),
+        resolved_config_sha256=str(
+            copied_compositions[0].get("resolved_config_sha256", "")
+        ),
+        full_output_fingerprint=str(
+            verification.get("full_output_fingerprint_before", "")
+        ),
+        scientific_output_fingerprint=str(
+            verification.get("scientific_output_fingerprint_before", "")
+        ),
+    )
     return {
         "schema_version": 1,
         "status": "snapshot_test_verified",
@@ -4101,6 +4367,7 @@ def snapshot_test(
         "cells": len(copied["launches"]),
         "import_containment": verification["import_containment"],
         "audit_input_root": verification["audit_input_root"],
+        "trainer_bootstrap_smoke": trainer_smoke,
         "full_output_fingerprint_before": output_before,
         "full_output_fingerprint_after": output_after,
         "scientific_output_fingerprint_before": scientific_before,
@@ -4179,6 +4446,18 @@ def _submission_contract(
         "live_audit_replays": preflight["audit_replays"],
         "snapshot_audit_replays": snapshot_preflight["audit_replays"],
         "direct_hydra_compositions": list(compositions),
+        "trainer_bootstrap_smoke": _validated_trainer_bootstrap_smoke(
+            snapshot_preflight.get("trainer_bootstrap_smoke") or {},
+            inventory_sha256=stable_hash(inventory),
+            launch_sha256=rows[0]["launch_sha256"],
+            resolved_config_sha256=str(compositions[0]["resolved_config_sha256"]),
+            full_output_fingerprint=str(
+                snapshot_preflight["full_output_fingerprint_before"]
+            ),
+            scientific_output_fingerprint=str(
+                snapshot_preflight["scientific_output_fingerprint_before"]
+            ),
+        ),
         "scientific_output_fingerprint_before": preflight["scientific_output_fingerprint_before"],
         "scientific_output_fingerprint_after": preflight["scientific_output_fingerprint_after"],
         "full_output_fingerprint_before": preflight["full_output_fingerprint_before"],
@@ -4397,8 +4676,8 @@ def _submit_campaign_impl(
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch5-{token}-train"
-    report_name = f"exp23-launch5-{token}-report"
+    train_name = f"exp23-launch6-{token}-train"
+    report_name = f"exp23-launch6-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
@@ -5079,8 +5358,8 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch5-{token}-train"
-    report_name = f"exp23-launch5-{token}-report"
+    train_name = f"exp23-launch6-{token}-train"
+    report_name = f"exp23-launch6-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
     role_names = {"train": train_name, "report": report_name}
     journal_paths = {

@@ -31,7 +31,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch5"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",
@@ -98,6 +98,22 @@ GENERATION_CANCELLED_NAME = "WORKER_CANCELLED.json"
 GENERATION_FAILED_NAME = "WORKER_FAILED.json"
 
 SHA256 = frozenset("0123456789abcdef")
+SNAPSHOT_IMPORT_FILES = {
+    "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+}
+TRAINER_BOOTSTRAP_SMOKE_FIELDS = frozenset(
+    {
+        "schema_version", "status", "cell_index", "python_flags",
+        "entry_relative_path", "config_package_relative_path",
+        "config_package_sha256", "snapshot_inventory_sha256", "launch_sha256",
+        "resolved_config_sha256", "stdout_sha256", "stdout_bytes",
+        "cuda_visible_devices", "full_output_fingerprint_before",
+        "full_output_fingerprint_after", "scientific_output_fingerprint_before",
+        "scientific_output_fingerprint_after", "persistent_writes_performed",
+        "scheduler_calls",
+    }
+)
 SUBMISSION_CONTRACT_FIELDS = frozenset(
     {
         "schema_version",
@@ -123,6 +139,7 @@ SUBMISSION_CONTRACT_FIELDS = frozenset(
         "live_audit_replays",
         "snapshot_audit_replays",
         "direct_hydra_compositions",
+        "trainer_bootstrap_smoke",
         "scientific_output_fingerprint_before",
         "scientific_output_fingerprint_after",
         "full_output_fingerprint_before",
@@ -936,10 +953,14 @@ def _verify_snapshot_tree(snapshot_root: Path, inventory: Mapping[str, Any]) -> 
         str(PACKAGE_RELATIVE / "worker.py"),
         str(PACKAGE_RELATIVE / "train_entry.py"),
         str(PACKAGE_RELATIVE / "train.slurm"),
-        "scripts/__init__.py",
         "scripts/train.py",
     ):
         require(required in expected, f"snapshot inventory omits lifecycle source: {required}")
+    for required, digest in SNAPSHOT_IMPORT_FILES.items():
+        require(
+            expected.get(required) == digest,
+            f"snapshot inventory omits/replaces exact import marker: {required}",
+        )
 
     root_fd = _open_absolute_directory(snapshot_root, "snapshot root")
     actual: dict[str, str] = {}
@@ -1107,8 +1128,8 @@ def bootstrap_submission(
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch5-scheduler-test-train",
-                "report": "exp23-launch5-scheduler-test-report",
+                "train": "exp23-launch6-scheduler-test-train",
+                "report": "exp23-launch6-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -1253,6 +1274,55 @@ def bootstrap_submission(
     inventory = contract.get("snapshot_inventory")
     require(isinstance(inventory, Mapping) and bool(inventory), "snapshot inventory is absent")
     require(stable_hash(inventory) == contract.get("snapshot_inventory_sha256"), "snapshot inventory hash differs")
+    smoke = contract.get("trainer_bootstrap_smoke")
+    compositions = contract.get("direct_hydra_compositions")
+    launches = contract.get("launches")
+    require(
+        isinstance(smoke, Mapping) and set(smoke) == TRAINER_BOOTSTRAP_SMOKE_FIELDS,
+        "trainer bootstrap smoke fields differ",
+    )
+    require(
+        smoke.get("schema_version") == 1
+        and smoke.get("status") == "sealed_trainer_hydra_composition_verified"
+        and smoke.get("cell_index") == 0
+        and smoke.get("python_flags") == ["-P", "-S", "-B"]
+        and smoke.get("entry_relative_path") == str(PACKAGE_RELATIVE / "train_entry.py")
+        and smoke.get("config_package_relative_path") == "configs/__init__.py"
+        and smoke.get("config_package_sha256") == SNAPSHOT_IMPORT_FILES["configs/__init__.py"]
+        and smoke.get("snapshot_inventory_sha256") == contract.get("snapshot_inventory_sha256")
+        and smoke.get("cuda_visible_devices") == ""
+        and smoke.get("persistent_writes_performed") == 0
+        and smoke.get("scheduler_calls") == 0,
+        "trainer bootstrap smoke contract differs",
+    )
+    require(
+        isinstance(compositions, list) and len(compositions) == 20
+        and isinstance(launches, list) and len(launches) == 20
+        and smoke.get("launch_sha256") == launches[0].get("launch_sha256")
+        and smoke.get("resolved_config_sha256")
+        == compositions[0].get("resolved_config_sha256"),
+        "trainer bootstrap smoke launch/config binding differs",
+    )
+    require(
+        sha256_string(smoke.get("stdout_sha256"))
+        and type(smoke.get("stdout_bytes")) is int
+        and smoke["stdout_bytes"] > 0,
+        "trainer bootstrap smoke stdout evidence differs",
+    )
+    for flavor in ("full_output", "scientific_output"):
+        require(
+            sha256_string(smoke.get(f"{flavor}_fingerprint_before"))
+            and sha256_string(smoke.get(f"{flavor}_fingerprint_after"))
+            and smoke.get(f"{flavor}_fingerprint_before")
+            == smoke.get(f"{flavor}_fingerprint_after"),
+            f"trainer bootstrap smoke {flavor} drifted",
+        )
+        require(
+            smoke.get(f"{flavor}_fingerprint_before")
+            == contract.get(f"snapshot_{flavor}_fingerprint_before")
+            == contract.get(f"snapshot_{flavor}_fingerprint_after"),
+            f"trainer bootstrap smoke {flavor} evidence is detached",
+        )
     _verify_snapshot_location(snapshot, submission)
     _verify_snapshot_tree(snapshot, inventory)
     if configure_imports:

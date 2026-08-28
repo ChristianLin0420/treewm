@@ -79,10 +79,11 @@ PROTOCOL_FILES = (
     "tests/test_orchestration.py",
 )
 SNAPSHOT_IMPORT_FILES = {
-    "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch5"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch6"
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -493,6 +494,239 @@ SUPERSEDED_LAUNCHES = [{
     "resume_allowed": False,
     "retry_allowed": False,
     "recovery_allowed": False,
+}, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
+    "run_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
+    ),
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch5/state/submission"
+    ),
+    "snapshot_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch5/state/"
+        "submission/source-snapshot/repo"
+    ),
+    "transaction_lock": "outputs/.exp23-9066d1c600046ae2.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch5",
+    "status": "cancelled_after_trainer_bootstrap_failure_before_hydra_composition",
+    "failure_phase": "sealed_train_entry_import_of_hydra_relative_config_package",
+    "failure_error": (
+        "Primary config module 'configs' not found. Check that it's correct and "
+        "contains an __init__.py file"
+    ),
+    "source_commit": "332a26f2f88e627f842eebbfc8310978ad606898",
+    "source_commit_claimed_by_contract": True,
+    "source_commit_claimed_by_journal": False,
+    "source_commit_evidence": (
+        "contract_clean_head_origin_and_independent_137_of_137_snapshot_file_byte_match"
+    ),
+    "proof_scope": (
+        "The sealed contract records clean HEAD and origin/main at commit "
+        "332a26f2f88e627f842eebbfc8310978ad606898, and all 137 snapshot files "
+        "were independently byte-matched to that commit. Twelve array tasks entered "
+        "the real sealed train_entry bridge and emitted byte-identical Hydra config-"
+        "package failures before config composition, model construction, or an optimizer "
+        "update. Cancellation was then sealed and exact-ID scancel returned zero. A "
+        "later unsealed exact-ID sacct/squeue observation showed that eight remaining tasks "
+        "and the reporter were cancelled, accounted for all twenty tasks plus the "
+        "reporter, and corroborated terminal absence; its raw stdout was not preserved in launch5 "
+        "bytes and is not durable launch-journal proof. Empty run directories are "
+        "scheduler/bootstrap residue, not scientific artifacts. No result or checkpoint "
+        "from this attempt may be consumed."
+    ),
+    "package_protocol_sha256": "e9ac9f39e9261ca6ab0dcd5aadeba3dd3eb4ec25c999846c55fc09b2168c62a7",
+    "manifest_canonical_sha256": "80665a573a6f7d19b63adb0064d5dd6fd98c7af37a64e6f974cfbe20d92e158e",
+    "manifest_raw_sha256": "f4b72bfd77599be2bd00656e518eec8fc21ec0574e743232bca113f4d55f8321",
+    "snapshot": {
+        "inventory_sha256": "1a74e2356af32a68aba6f6cde78a262c96a2334976f9e1fcab00cd2115ee188e",
+        "file_count": 137,
+        "independently_matched_files": 137,
+        "all_files_match": True,
+    },
+    "preserved_tree": {
+        "regular_file_count": 235,
+        "symlink_count": 0,
+        "snapshot_file_count": 137,
+        "launch_file_count": 20,
+        "contract_file_count": 1,
+        "receipt_file_count": 1,
+        "journal_file_count": 6,
+        "task_file_count": 53,
+        "log_file_count": 13,
+        "cancellation_file_count": 2,
+        "aggregate_schema_version": 1,
+        "aggregate_algorithm": (
+            "sha256(json.dumps({schema_version:1,files:{relative_posix_path:"
+            "raw_file_sha256}},sort_keys=True,separators=(',',':')).encode('utf-8'))"
+        ),
+        "preserved_root_path_base": "run_root",
+        "preserved_root_aggregate_canonical_json_bytes": 32248,
+        "preserved_root_aggregate_sha256": (
+            "c07dce9aa58352f790af94bff8c719a3e9c8639bdd268d5b7d33824db8b7a874"
+        ),
+        "submission_root_path_base": "submission_root",
+        "submission_root_aggregate_canonical_json_bytes": 28253,
+        "submission_root_aggregate_sha256": (
+            "1c1082dd6a9f43220a1de15eaafcb5d947dfcf88f49f9415633ad2865c3d36d4"
+        ),
+        "task_root_path_base": "submission_root/tasks",
+        "task_root_aggregate_canonical_json_bytes": 5406,
+        "task_root_aggregate_sha256": (
+            "31d41fd81ee8092c0ebdfc68e9cd5199e81698fb62a7a2a88e5f2c2a6f5666f5"
+        ),
+    },
+    "claim_token": "aded842d0b386521cfe8d99791f4f42c5d4f4396c7f6537d6367780caaf1481e",
+    "transaction_lock_state": {
+        "regular_file": True,
+        "symlink": False,
+        "mode": "0600",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+    "scientific_output_fingerprint": "786beb527e80f37a8382059309858437df25ec867c5eb3c1e1b1fe1064b62cd4",
+    "contract_sha256": "8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+    "submission_sha256": "8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+    "receipt_sha256": "463397088705144887fa8c75d6b40f3e770dca3f891d818e4178c9351672fbd5",
+    "journal_sha256": {
+        "0000_CLAIMED.json": "1dc871202751f498654c3eafa79e78d31d707603a631c612196943d7de268929",
+        "0001_SNAPSHOT_SEALED.json": "d5ec982cc057878eb542433e568693d2d7e73c51bacab20f75545e98f6269368",
+        "0002_CONTRACT_SEALED.json": "ac15380a94b4e61de8e5b50c0d0ba834f229d3cef03f7aca86493e350eb85da7",
+        "0003_TRAIN_SUBMITTED.json": "b872b9eb574de46320d5dce114ec00a076e15d6f4b02aaf802eaacc3c595819d",
+        "0004_REPORT_SUBMITTED.json": "b3add73cb036b8b1a91d834e89d48d0ead4503acd25a3cfdcb401deddbb846b2",
+        "0005_READY_TO_COMMIT.json": "d05b39b204bbdefb8846e7074725eba7f85b674dbb81a57c4c72b4933ddcfa84",
+    },
+    "scheduler_submission": {
+        "train_array_job_id": "33217168",
+        "report_job_id": "33217171",
+        "requested_dependency": "afterok:33217168",
+        "accepted_dependency": "afterok:33217168_*(unfulfilled)",
+        "kill_on_invalid_dependency": "Yes",
+        "actual_sbatch_calls": 2,
+    },
+    "cancellation": {
+        "latch_sha256": "b28ca9e23ffdbb523f3c11f4cea686388563a3e3aefec5c491a97a5e86ff972a",
+        "call_token": "1787888274165397643-1491782",
+        "call_sha256": "6628089da0e20c4176b3eea9b106d732913326e3df9138bdbda1f9c8085bb13e",
+        "result_sha256": "68c09e9031c668a8dff337a171c9ca2fe3f962efd76297a84ed8ae47b9a44108",
+        "command": ["/usr/local/bin/scancel", "33217168", "33217171"],
+        "returncode": 0,
+        "scheduler_calls": 1,
+    },
+    "failure_logs": {
+        "deterministic_failed_cell_indices": list(range(12)),
+        "deterministic_log_count": 12,
+        "byte_identical": True,
+        "raw_log_sha256": "4a624c03f806664ce70d0b98af2b8ea3e6f61a24ef4160357348441aa93b405b",
+        "cancellation_only_cell_indices": [17],
+        "cancellation_only_log_sha256": "01455d9b4b80863a529f3f27e08b7b6553c2be1bce041721c6ab520295313b90",
+        "no_log_cell_indices": [12, 13, 14, 15, 16, 18, 19],
+    },
+    "unsealed_later_terminal_scheduler_observation": {
+        "provenance": (
+            "independent_operator_observation_after_exact_cancellation_reached_terminal_state"
+        ),
+        "observation_utc": "2026-08-28T04:16:52Z",
+        "preserved_in_launch5_bytes": False,
+        "evidence_policy": (
+            "corroborative_current_state_only_not_durable_launch5_journal_proof"
+        ),
+        "environment": {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PYTHONHASHSEED": "0",
+            "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+        },
+        "sacct_command": [
+            "/usr/local/bin/sacct", "-X", "-n", "-P", "-S", "2026-08-28",
+            "-j", "33217168,33217171", "-o",
+            "JobID,JobIDRaw,JobName%100,State,ElapsedRaw,AllocNodes,NodeList%100,"
+            "Submit,Start,End,ExitCode,DerivedExitCode,Reason%100,Comment%150",
+        ],
+        "columns": [
+            "JobID", "JobIDRaw", "JobName%100", "State", "ElapsedRaw",
+            "AllocNodes", "NodeList%100", "Submit", "Start", "End", "ExitCode",
+            "DerivedExitCode", "Reason%100", "Comment%150",
+        ],
+        "sacct_raw_stdout_bytes": 5116,
+        "sacct_raw_stdout_sha256": "4a741ee0ece1e84644bf1628ba2666e2e35d3e2c906fdd643a8beaccedff7429",
+        "canonical_ledger_algorithm": (
+            "sha256(json.dumps({schema_version:1,columns:columns,rows:[row.split('|') "
+            "for row in serialized_rows]},sort_keys=True,separators=(',',':'),"
+            "ensure_ascii=True,allow_nan=False).encode('ascii'))"
+        ),
+        "canonical_ledger_sha256": "14e77c0964e2c42e0ef6d1be17926751da6fc0f1d8a2615e240ceba51d5a5061",
+        "serialized_rows": [
+            "33217168_0|33217200|exp23-launch5-8848790ca118a2fb-train|FAILED|28|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:13|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_1|33217201|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_2|33217202|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_3|33217203|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_4|33217204|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_5|33217205|exp23-launch5-8848790ca118a2fb-train|FAILED|30|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:15|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_6|33217206|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_7|33217207|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-01951|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_8|33217208|exp23-launch5-8848790ca118a2fb-train|FAILED|26|1|batch-block5-01951|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:11|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_9|33217209|exp23-launch5-8848790ca118a2fb-train|FAILED|25|1|batch-block5-03415|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:10|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_10|33217210|exp23-launch5-8848790ca118a2fb-train|FAILED|25|1|batch-block5-03415|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:10|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_11|33217211|exp23-launch5-8848790ca118a2fb-train|FAILED|25|1|batch-block5-04017|2026-08-28T03:36:17|2026-08-28T03:36:45|2026-08-28T03:37:10|2:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_12|33217258|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-03951|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_13|33217259|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_14|33217260|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_15|33217261|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_16|33217262|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_17|33217263|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_18|33217264|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217168_19|33217168|exp23-launch5-8848790ca118a2fb-train|CANCELLED by 147230|9|1|batch-block5-00642|2026-08-28T03:36:17|2026-08-28T03:37:47|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+            "33217171|33217171|exp23-launch5-8848790ca118a2fb-report|CANCELLED by 147230|0|0|None assigned|2026-08-28T03:36:18|None|2026-08-28T03:37:56|0:0|0:0|None|treewm-exp23:8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe",
+        ],
+        "sacct_row_count": 21,
+        "failed_task_indices": list(range(12)),
+        "cancelled_task_indices": list(range(12, 20)),
+        "report_state": "CANCELLED",
+        "squeue_command": [
+            "/usr/local/bin/squeue", "--array", "--noheader",
+            "--jobs=33217168,33217171", "--format=%i|%T|%R|%N",
+        ],
+        "squeue_raw_stdout_bytes": 0,
+        "squeue_raw_stdout_sha256": (
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ),
+        "squeue_row_count": 0,
+    },
+    "scientific_state": {
+        "worker_started_cell_count": 13,
+        "trainer_bridge_started_cell_count": 12,
+        "hydra_composition_completed": False,
+        "model_constructed": False,
+        "optimizer_updates": 0,
+        "empty_run_directory_count": 12,
+        "checkpoint_files": 0,
+        "result_files": 0,
+        "wandb_files": 0,
+        "report_files": 0,
+        "submission_ready_to_commit_journal_0005_committed": True,
+        "scheduler_report_submitted_journal_0004_committed": True,
+        "scientific_ready_marker_committed": False,
+        "scientific_report_bundle_committed": False,
+        "results_consumed": False,
+        "checkpoints_consumed": False,
+    },
+    "known_job_ids": ["33217168", "33217171"],
+    "job_ids_by_role": {"train": ["33217168"], "report": ["33217171"]},
+    "submission_contract_committed": True,
+    "submission_receipt_committed": True,
+    "cancel_latch_committed": True,
+    "scientific_run_completed": False,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
 }]
 
 
@@ -666,7 +900,8 @@ def protocol_sha256(root: str | Path = PACKAGE_DIR) -> str:
 
 def validate_snapshot_import_files(repo_root: str | Path = REPOSITORY_ROOT) -> None:
     expected = {
-        "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
     require(SNAPSHOT_IMPORT_FILES == expected, "snapshot import inventory differs")
     root = Path(repo_root).resolve()
@@ -713,7 +948,7 @@ def expand_matrix(manifest: Mapping[str, Any]) -> list[Cell]:
                         env_config=str(setting["env_config"]),
                         arm=arm,
                         seed=seed,
-                        run_name=f"exp23-launch5-{setting['id']}-arm{arm.lower()}-seed{seed}",
+                        run_name=f"exp23-launch6-{setting['id']}-arm{arm.lower()}-seed{seed}",
                     )
                 )
     return result
@@ -1286,22 +1521,22 @@ def validate_manifest(
     )
     require(
         manifest["paths"]["prospective_run_root"]
-        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
+        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch6"
         and manifest["paths"]["transaction_lock"]
-        == "outputs/.exp23-9066d1c600046ae2.transaction.lock"
+        == "outputs/.exp23-34d79ab13d65ef27.transaction.lock"
         and manifest["paths"]["run_root"]
         == (
             "/lustre/fs11/portfolios/edgeai/projects/"
             "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
-            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
+            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch6"
         ),
-        "launch5 run/transaction namespace differs",
+        "launch6 run/transaction namespace differs",
     )
     require(
         manifest["paths"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_group"] == CAMPAIGN_ID,
-        "launch5 W&B namespace differs",
+        "launch6 W&B namespace differs",
     )
     require(
         manifest["design"]["fresh_start_policy"].endswith(
@@ -1330,8 +1565,8 @@ def validate_manifest(
     cells = expand_matrix(manifest)
     require(len(cells) == 20, "matrix expansion differs")
     require(
-        all(cell.run_name.startswith("exp23-launch5-") for cell in cells),
-        "launch5 run-name namespace differs",
+        all(cell.run_name.startswith("exp23-launch6-") for cell in cells),
+        "launch6 run-name namespace differs",
     )
     launch = manifest["launch_contract"]
     require(launch["array"] == "0-19%20" and launch["array_cells"] == 20, "launch array differs")

@@ -44,7 +44,13 @@ def trainer_code_fingerprint(repo_root: str | Path) -> dict[str, Any]:
     """
     root = Path(repo_root).resolve()
     paths = [
+        root / "scripts" / "__init__.py",
         root / "scripts" / "train.py",
+        # When scripts.train is imported by a sealed campaign entry point, Hydra
+        # resolves its relative config_path through the ``configs`` package rather
+        # than as a filesystem path.  The package marker is therefore executable
+        # trainer input, not incidental packaging metadata.
+        root / "configs" / "__init__.py",
         *sorted((root / "treewm").rglob("*.py")),
         *sorted((root / "configs").rglob("*.yaml")),
     ]

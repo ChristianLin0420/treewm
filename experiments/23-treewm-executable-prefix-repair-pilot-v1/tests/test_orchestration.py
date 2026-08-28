@@ -130,6 +130,38 @@ def scheduler_fallback(submit) -> dict:
     }
 
 
+def trainer_smoke_record(
+    submit,
+    *,
+    inventory: dict[str, str],
+    launch_sha256: str,
+    resolved_config_sha256: str,
+    full_output_fingerprint: str,
+    scientific_output_fingerprint: str,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "sealed_trainer_hydra_composition_verified",
+        "cell_index": 0,
+        "python_flags": ["-P", "-S", "-B"],
+        "entry_relative_path": str(submit.PACKAGE_RELATIVE / "train_entry.py"),
+        "config_package_relative_path": "configs/__init__.py",
+        "config_package_sha256": hashlib.sha256(b"").hexdigest(),
+        "snapshot_inventory_sha256": submit.stable_hash(inventory),
+        "launch_sha256": launch_sha256,
+        "resolved_config_sha256": resolved_config_sha256,
+        "stdout_sha256": hashlib.sha256(b"config").hexdigest(),
+        "stdout_bytes": 6,
+        "cuda_visible_devices": "",
+        "full_output_fingerprint_before": full_output_fingerprint,
+        "full_output_fingerprint_after": full_output_fingerprint,
+        "scientific_output_fingerprint_before": scientific_output_fingerprint,
+        "scientific_output_fingerprint_after": scientific_output_fingerprint,
+        "persistent_writes_performed": 0,
+        "scheduler_calls": 0,
+    }
+
+
 def bind_causal_execution_context(
     causal_parity_audit,
     monkeypatch,
@@ -205,13 +237,13 @@ def interpreter_identity(submit):
     }
 
 
-def test_launch5_transaction_lock_path_is_exact(submit):
+def test_launch6_transaction_lock_path_is_exact(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     run_root = Path(manifest["paths"]["run_root"])
     submission_root = run_root / "state" / "submission"
     expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
     assert submit._transaction_lock_path(submission_root) == expected
-    assert expected.name == ".exp23-9066d1c600046ae2.transaction.lock"
+    assert expected.name == ".exp23-34d79ab13d65ef27.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -1119,6 +1151,288 @@ def test_child_cache_tree_is_private_contained_and_ephemeral(submit, tmp_path):
     assert not hostile_tmp.exists()
 
 
+def _trainer_smoke_unit_inputs(submit, tmp_path: Path):
+    snapshot = tmp_path / "snapshot"
+    package = snapshot / submit.PACKAGE_RELATIVE
+    package.mkdir(parents=True)
+    (snapshot / "scripts").mkdir()
+    (package / "train_entry.py").write_text("# entry\n", encoding="utf-8")
+    (package / "manifest.json").write_text(
+        json.dumps(
+            {
+                "design": {"settings": []},
+                "paths": {
+                    "run_root": str(tmp_path / "prospective-output"),
+                    "python": "/pinned/python",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (snapshot / "scripts/train.py").write_text("# trainer\n", encoding="utf-8")
+    config = {"seed": 110, "objective_version": "smoke"}
+    launch_body = {
+        "schema_version": 1,
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "cell": {"index": 0, "seed": 110},
+        "argv": [
+            "/pinned/python",
+            str(snapshot / "scripts/train.py"),
+            "resume=auto",
+            "train.steps=25000",
+        ],
+        "environment": {
+            "MUJOCO_GL": "egl",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        },
+    }
+    launch = {**launch_body, "launch_sha256": submit.stable_hash(launch_body)}
+    expected = {
+        "resolved_config": config,
+        "resolved_config_sha256": submit.stable_hash(config),
+    }
+    inventory = {"probe": "a" * 64}
+    return snapshot, inventory, launch, expected, config
+
+
+def test_trainer_bootstrap_smoke_uses_exact_entry_flags_and_hides_cuda(
+    submit, tmp_path, monkeypatch
+):
+    snapshot, inventory, launch, expected, config = _trainer_smoke_unit_inputs(
+        submit, tmp_path
+    )
+    monkeypatch.setattr(submit, "verify_snapshot_files", lambda *_args: None)
+    monkeypatch.setattr(
+        submit,
+        "interpreter_contract",
+        lambda _manifest: {"lexical_executable": "/pinned/python"},
+    )
+    observed = {}
+
+    def runner(command, cwd, environment, timeout):
+        observed.update(
+            command=list(command), cwd=cwd, environment=dict(environment), timeout=timeout
+        )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=("seed: 110\nobjective_version: smoke\n").encode(),
+            stderr=b"",
+        )
+
+    record = submit.trainer_bootstrap_smoke(
+        snapshot, inventory, launch, expected, runner=runner
+    )
+    assert observed["command"][:5] == [
+        "/pinned/python",
+        "-P",
+        "-S",
+        "-B",
+        str(snapshot / submit.PACKAGE_RELATIVE / "train_entry.py"),
+    ]
+    assert "--_hydra-composition-smoke" in observed["command"]
+    assert str(snapshot / "scripts/train.py") not in observed["command"][:5]
+    assert observed["cwd"] == snapshot
+    assert observed["environment"]["CUDA_VISIBLE_DEVICES"] == ""
+    assert observed["environment"]["PYTHONHASHSEED"] == "110"
+    assert record["python_flags"] == ["-P", "-S", "-B"]
+    assert record["resolved_config_sha256"] == submit.stable_hash(config)
+    assert record["full_output_fingerprint_before"] == record[
+        "full_output_fingerprint_after"
+    ]
+
+
+def test_trainer_bootstrap_smoke_rejects_resolved_config_mismatch(
+    submit, tmp_path, monkeypatch
+):
+    snapshot, inventory, launch, expected, _config = _trainer_smoke_unit_inputs(
+        submit, tmp_path
+    )
+    monkeypatch.setattr(submit, "verify_snapshot_files", lambda *_args: None)
+    monkeypatch.setattr(
+        submit,
+        "interpreter_contract",
+        lambda _manifest: {"lexical_executable": "/pinned/python"},
+    )
+
+    def runner(command, *_args):
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b"seed: 111\nobjective_version: smoke\n", stderr=b""
+        )
+
+    with pytest.raises(submit.SubmissionError, match="smoke config differs"):
+        submit.trainer_bootstrap_smoke(
+            snapshot, inventory, launch, expected, runner=runner
+        )
+
+
+def test_trainer_bootstrap_smoke_rejects_output_mutation(
+    submit, tmp_path, monkeypatch
+):
+    snapshot, inventory, launch, expected, _config = _trainer_smoke_unit_inputs(
+        submit, tmp_path
+    )
+    monkeypatch.setattr(submit, "verify_snapshot_files", lambda *_args: None)
+    monkeypatch.setattr(
+        submit,
+        "interpreter_contract",
+        lambda _manifest: {"lexical_executable": "/pinned/python"},
+    )
+
+    def runner(command, *_args):
+        output = tmp_path / "prospective-output"
+        output.mkdir()
+        (output / "unexpected").write_text("mutation", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b"seed: 110\nobjective_version: smoke\n",
+            stderr=b"",
+        )
+
+    with pytest.raises(submit.SubmissionError, match="changed the prospective output tree"):
+        submit.trainer_bootstrap_smoke(
+            snapshot, inventory, launch, expected, runner=runner
+        )
+
+
+def _real_trainer_smoke_case(
+    submit, tmp_path: Path, *, config_marker: bytes | None
+):
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+    from treewm.utils.provenance import trainer_code_fingerprint
+
+    case_root = tmp_path
+    source = case_root / "source"
+    package = source / submit.PACKAGE_RELATIVE
+    prospective_output = case_root / "prospective-output"
+    manifest = {
+        "design": {"settings": []},
+        "paths": {
+            "python": str(
+                json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))[
+                    "paths"
+                ]["python"]
+            ),
+            "run_root": str(prospective_output),
+        },
+    }
+    source_files = set(trainer_code_fingerprint(REPO)["files"])
+    source_files.update(
+        {
+            str(submit.PACKAGE_RELATIVE / "train_entry.py"),
+            str(submit.PACKAGE_RELATIVE / "worker.py"),
+            str(submit.PACKAGE_RELATIVE / "train.slurm"),
+        }
+    )
+    for relative in sorted(source_files):
+        if relative == "configs/__init__.py" and config_marker is None:
+            continue
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = (REPO / relative).read_bytes()
+        if relative == "configs/__init__.py" and config_marker is not None:
+            payload = config_marker
+        destination.write_bytes(payload)
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+    inventory = {
+        str(path.relative_to(source)): submit.file_sha256(path)
+        for path in sorted(source.rglob("*"))
+        if path.is_file()
+    }
+    snapshot = case_root / "source-snapshot/repo"
+    submit.create_source_snapshot(source, snapshot, inventory)
+
+    trainer_args = [
+        "experiment=treewm_v2_grounded_executable_prefix_pilot_v1",
+        "seed=110",
+        "device=cpu",
+        "resume=auto",
+        "train.steps=25000",
+        f"hydra.run.dir={prospective_output / 'hydra'}",
+        "hydra.job.chdir=false",
+    ]
+    with initialize_config_dir(
+        version_base=None, config_dir=str(REPO / "configs")
+    ):
+        expected_config = OmegaConf.to_container(
+            compose(config_name="base", overrides=trainer_args), resolve=True
+        )
+    launch_body = {
+        "schema_version": 1,
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "cell": {"index": 0, "seed": 110},
+        "argv": [
+            manifest["paths"]["python"],
+            str(snapshot / "scripts/train.py"),
+            *trainer_args,
+        ],
+        "environment": {
+            "MUJOCO_GL": "egl",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        },
+    }
+    launch = {**launch_body, "launch_sha256": submit.stable_hash(launch_body)}
+    expected = {
+        "resolved_config": expected_config,
+        "resolved_config_sha256": submit.stable_hash(expected_config),
+    }
+    return case_root, snapshot, inventory, launch, expected, prospective_output
+
+
+def test_real_sealed_trainer_bootstrap_smoke_resolves_exact_hydra_config(
+    submit, tmp_path
+):
+    case_root, snapshot, inventory, launch, expected, prospective_output = (
+        _real_trainer_smoke_case(submit, tmp_path, config_marker=b"")
+    )
+    try:
+        record = submit.trainer_bootstrap_smoke(
+            snapshot, inventory, launch, expected
+        )
+        assert record["status"] == "sealed_trainer_hydra_composition_verified"
+        assert record["resolved_config_sha256"] == expected[
+            "resolved_config_sha256"
+        ]
+        assert record["config_package_sha256"] == hashlib.sha256(b"").hexdigest()
+        assert record["python_flags"] == ["-P", "-S", "-B"]
+        assert record["cuda_visible_devices"] == ""
+        assert record["full_output_fingerprint_before"] == record[
+            "full_output_fingerprint_after"
+        ]
+        assert record["scientific_output_fingerprint_before"] == record[
+            "scientific_output_fingerprint_after"
+        ]
+        assert not prospective_output.exists()
+    finally:
+        submit._restore_private_tree_modes(case_root, "real trainer smoke case")
+
+
+@pytest.mark.parametrize("config_marker", [None, b"# replacement marker\n"])
+def test_real_sealed_trainer_bootstrap_smoke_rejects_config_marker_drift(
+    submit, tmp_path, config_marker
+):
+    case_root, snapshot, inventory, launch, expected, prospective_output = (
+        _real_trainer_smoke_case(
+            submit, tmp_path, config_marker=config_marker
+        )
+    )
+    try:
+        with pytest.raises(
+            submit.SubmissionError, match="omits/replaces exact import marker"
+        ):
+            submit.trainer_bootstrap_smoke(
+                snapshot, inventory, launch, expected
+            )
+        assert not prospective_output.exists()
+    finally:
+        submit._restore_private_tree_modes(case_root, "adversarial trainer smoke case")
+
+
 def test_sealed_snapshot_preflight_uses_live_inputs_and_ephemeral_cache(
     submit, tmp_path
 ):
@@ -1187,17 +1501,54 @@ assert all("/proc/" not in str(path) for path in cache_paths)
 for index, path in enumerate(cache_paths):
     (path / f"probe-{index}").write_text("temporary", encoding="utf-8")
 manifest = json.loads((pathlib.Path(__file__).parent / "manifest.json").read_text())
+stable = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+launches = [{"launch_sha256": hashlib.sha256(f"launch-{index}".encode()).hexdigest()} for index in range(20)]
+compositions = [
+    {
+        "index": index,
+        "launch_sha256": launches[index]["launch_sha256"],
+        "resolved_config_sha256": hashlib.sha256(f"config-{index}".encode()).hexdigest(),
+        "stdout_sha256": hashlib.sha256(f"stdout-{index}".encode()).hexdigest(),
+    }
+    for index in range(20)
+]
+full_output = "5" * 64
+scientific_output = "6" * 64
+smoke = {
+    "schema_version": 1,
+    "status": "sealed_trainer_hydra_composition_verified",
+    "cell_index": 0,
+    "python_flags": ["-P", "-S", "-B"],
+    "entry_relative_path": "experiments/23-treewm-executable-prefix-repair-pilot-v1/train_entry.py",
+    "config_package_relative_path": "configs/__init__.py",
+    "config_package_sha256": hashlib.sha256(b"").hexdigest(),
+    "snapshot_inventory_sha256": stable(inventory),
+    "launch_sha256": launches[0]["launch_sha256"],
+    "resolved_config_sha256": compositions[0]["resolved_config_sha256"],
+    "stdout_sha256": hashlib.sha256(b"config").hexdigest(),
+    "stdout_bytes": 6,
+    "cuda_visible_devices": "",
+    "full_output_fingerprint_before": full_output,
+    "full_output_fingerprint_after": full_output,
+    "scientific_output_fingerprint_before": scientific_output,
+    "scientific_output_fingerprint_after": scientific_output,
+    "persistent_writes_performed": 0,
+    "scheduler_calls": 0,
+}
 value = {
     "manifest": manifest,
-    "launches": [{} for _ in range(20)],
-    "compositions": [],
+    "launches": launches,
+    "compositions": compositions,
     "cache_root": str(cache_root),
     "verification": {
         "audit_replays": {},
-        "scientific_output_fingerprint_before": "same",
-        "scientific_output_fingerprint_after": "same",
+        "full_output_fingerprint_before": full_output,
+        "full_output_fingerprint_after": full_output,
+        "scientific_output_fingerprint_before": scientific_output,
+        "scientific_output_fingerprint_after": scientific_output,
         "import_containment": "all_treewm_modules_inside_snapshot",
         "audit_input_root": str(inputs),
+        "trainer_bootstrap_smoke": smoke,
     },
 }
 print("EXP23_SNAPSHOT_PREFLIGHT=" + json.dumps(value, sort_keys=True, separators=(",", ":")))
@@ -2158,9 +2509,29 @@ def test_snapshot_test_uses_production_seal_and_removes_it(
         assert claimed == protocol
         submit.verify_snapshot_files(snapshot_root, exact)
         assert not snapshot_root.stat().st_mode & 0o222
+        launches = [
+            {"launch_sha256": hashlib.sha256(f"launch-{index}".encode()).hexdigest()}
+            for index in range(20)
+        ]
+        compositions = [
+            {
+                "index": index,
+                "launch_sha256": launches[index]["launch_sha256"],
+                "resolved_config_sha256": hashlib.sha256(
+                    f"config-{index}".encode()
+                ).hexdigest(),
+                "stdout_sha256": hashlib.sha256(
+                    f"stdout-{index}".encode()
+                ).hexdigest(),
+            }
+            for index in range(20)
+        ]
+        full_output = submit._output_tree_fingerprint(manifest)
+        scientific_output = submit._scientific_output_fingerprint(manifest)
         return {
             "manifest": manifest,
-            "launches": [{} for _ in range(20)],
+            "launches": launches,
+            "compositions": compositions,
             "verification": {
                 "audit_replays": {
                     name: {"artifact_sha256": str(index) * 64}
@@ -2171,6 +2542,20 @@ def test_snapshot_test_uses_production_seal_and_removes_it(
                 },
                 "import_containment": "all_treewm_modules_inside_snapshot",
                 "audit_input_root": str(repo),
+                "full_output_fingerprint_before": full_output,
+                "full_output_fingerprint_after": full_output,
+                "scientific_output_fingerprint_before": scientific_output,
+                "scientific_output_fingerprint_after": scientific_output,
+                "trainer_bootstrap_smoke": trainer_smoke_record(
+                    submit,
+                    inventory=exact,
+                    launch_sha256=launches[0]["launch_sha256"],
+                    resolved_config_sha256=compositions[0][
+                        "resolved_config_sha256"
+                    ],
+                    full_output_fingerprint=full_output,
+                    scientific_output_fingerprint=scientific_output,
+                ),
             },
         }
 
@@ -3285,7 +3670,7 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3343,7 +3728,7 @@ def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
         "submission_sha256": "c" * 64,
         "train_array_job_id": "100",
         "report_job_id": "101",
@@ -3394,7 +3779,7 @@ def test_explicit_cancel_retries_exact_ids_when_canonical_failure_closes_on_drif
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch5",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch6",
         "submission_sha256": "d" * 64,
         "train_array_job_id": "200",
         "report_job_id": "201",

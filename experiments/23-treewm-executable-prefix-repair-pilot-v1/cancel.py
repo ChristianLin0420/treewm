@@ -634,7 +634,7 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
     receipt = read_json(receipt_path)
     require(set(receipt) == RECEIPT_KEYS, "submission receipt schema differs")
     require(receipt["schema_version"] == 1 and receipt["status"] == "submitted", "submission receipt is not committed")
-    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch5", "submission receipt campaign differs")
+    require(receipt["campaign_id"] == "treewm-executable-prefix-repair-pilot-v1-launch6", "submission receipt campaign differs")
     require(Path(str(receipt["submission_root"])) == submission_root.absolute(), "receipt submission root differs")
     require(Path(str(receipt["snapshot_root"])).is_absolute(), "receipt snapshot root is not absolute")
     claimed = str(receipt["submission_sha256"])
@@ -760,8 +760,8 @@ def validate_receipt(submission_root: Path) -> tuple[dict[str, Any], dict[str, A
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch5-scheduler-test-train",
-                "report": "exp23-launch5-scheduler-test-report",
+                "train": "exp23-launch6-scheduler-test-train",
+                "report": "exp23-launch6-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,

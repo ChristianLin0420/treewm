@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
@@ -39,10 +40,10 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch5-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch6-") for cell in cells)
 
 
-def test_launch5_namespace_and_ordered_superseded_aborts_are_exact():
+def test_launch6_namespace_and_ordered_superseded_aborts_are_exact():
     manifest, lock = contracts()
     superseded = manifest["superseded_launches"]
     assert superseded == campaign.SUPERSEDED_LAUNCHES
@@ -51,8 +52,9 @@ def test_launch5_namespace_and_ordered_superseded_aborts_are_exact():
         "treewm-executable-prefix-repair-pilot-v1-launch2",
         "treewm-executable-prefix-repair-pilot-v1-launch3",
         "treewm-executable-prefix-repair-pilot-v1-launch4",
+        "treewm-executable-prefix-repair-pilot-v1-launch5",
     ]
-    launch1, launch2, launch3, launch4 = superseded
+    launch1, launch2, launch3, launch4, launch5 = superseded
     assert launch1["source_commit_claimed_by_journal"] is False
     assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
@@ -244,10 +246,72 @@ def test_launch5_namespace_and_ordered_superseded_aborts_are_exact():
         and row["reason"] == "None"
         for row in history["sacct_rows"]
     )
+    assert launch5["status"] == (
+        "cancelled_after_trainer_bootstrap_failure_before_hydra_composition"
+    )
+    assert launch5["source_commit"] == "332a26f2f88e627f842eebbfc8310978ad606898"
+    assert launch5["package_protocol_sha256"] == (
+        "e9ac9f39e9261ca6ab0dcd5aadeba3dd3eb4ec25c999846c55fc09b2168c62a7"
+    )
+    assert launch5["contract_sha256"] == launch5["submission_sha256"] == (
+        "8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe"
+    )
+    assert launch5["receipt_sha256"] == (
+        "463397088705144887fa8c75d6b40f3e770dca3f891d818e4178c9351672fbd5"
+    )
+    assert launch5["preserved_tree"]["preserved_root_path_base"] == "run_root"
+    assert launch5["preserved_tree"]["preserved_root_aggregate_sha256"] == (
+        "c07dce9aa58352f790af94bff8c719a3e9c8639bdd268d5b7d33824db8b7a874"
+    )
+    assert launch5["preserved_tree"]["task_root_aggregate_sha256"] == (
+        "31d41fd81ee8092c0ebdfc68e9cd5199e81698fb62a7a2a88e5f2c2a6f5666f5"
+    )
+    assert launch5["failure_logs"]["deterministic_failed_cell_indices"] == list(
+        range(12)
+    )
+    assert launch5["failure_logs"]["raw_log_sha256"] == (
+        "4a624c03f806664ce70d0b98af2b8ea3e6f61a24ef4160357348441aa93b405b"
+    )
+    later = launch5["unsealed_later_terminal_scheduler_observation"]
+    assert later["preserved_in_launch5_bytes"] is False
+    assert later["observation_utc"] == "2026-08-28T04:16:52Z"
+    assert later["sacct_raw_stdout_bytes"] == 5116
+    assert later["sacct_raw_stdout_sha256"] == (
+        "4a741ee0ece1e84644bf1628ba2666e2e35d3e2c906fdd643a8beaccedff7429"
+    )
+    ledger = {
+        "schema_version": 1,
+        "columns": later["columns"],
+        "rows": [row.split("|") for row in later["serialized_rows"]],
+    }
+    assert len(ledger["rows"]) == later["sacct_row_count"] == 21
+    assert {len(row) for row in ledger["rows"]} == {14}
+    assert hashlib.sha256(
+        json.dumps(
+            ledger,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+    ).hexdigest() == later["canonical_ledger_sha256"]
+    assert later["squeue_raw_stdout_bytes"] == later["squeue_row_count"] == 0
+    assert later["squeue_raw_stdout_sha256"] == hashlib.sha256(b"").hexdigest()
+    scientific = launch5["scientific_state"]
+    assert scientific["submission_ready_to_commit_journal_0005_committed"] is True
+    assert scientific["scheduler_report_submitted_journal_0004_committed"] is True
+    assert scientific["scientific_ready_marker_committed"] is False
+    assert scientific["scientific_report_bundle_committed"] is False
+    assert scientific["hydra_composition_completed"] is False
+    assert scientific["model_constructed"] is False
+    assert scientific["optimizer_updates"] == 0
+    assert launch5["submission_contract_committed"] is True
+    assert launch5["submission_receipt_committed"] is True
+    assert launch5["cancel_latch_committed"] is True
     for row in superseded[:2]:
         assert row["submission_sha256"] is None
         assert row["known_job_ids"] == []
-    for row in superseded:
+    for row in superseded[:4]:
         for key in (
             "submission_receipt_committed",
             "scientific_run_started",
@@ -262,16 +326,19 @@ def test_launch5_namespace_and_ordered_superseded_aborts_are_exact():
         ):
             assert row[key] is False
         assert row["optimizer_updates"] == 0
+    for row in superseded:
+        for key in ("reuse_allowed", "resume_allowed", "retry_allowed", "recovery_allowed"):
+            assert row[key] is False
     assert launch2["submission_contract_committed"] is False
     assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch5"
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch6"
     )
     assert manifest["paths"]["transaction_lock"] == (
-        "outputs/.exp23-9066d1c600046ae2.transaction.lock"
+        "outputs/.exp23-34d79ab13d65ef27.transaction.lock"
     )
     assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
-    assert manifest["logging"]["wandb_project"].endswith("-launch5")
-    assert manifest["logging"]["wandb_group"].endswith("-launch5")
+    assert manifest["logging"]["wandb_project"].endswith("-launch6")
+    assert manifest["logging"]["wandb_group"].endswith("-launch6")
 
     tampered = copy.deepcopy(manifest)
     tampered["paths"]["run_root"] = launch2["run_root"]
@@ -426,7 +493,25 @@ def test_protocol_inventory_is_closed_and_deterministic():
     assert len(campaign.PROTOCOL_FILES) == len(set(campaign.PROTOCOL_FILES))
     assert "protocol.sha256" not in campaign.PROTOCOL_FILES
     assert campaign.SNAPSHOT_IMPORT_FILES == {
-        "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
     campaign.validate_snapshot_import_files(REPO)
     assert campaign.protocol_sha256(PACKAGE) == campaign.protocol_sha256(PACKAGE)
+
+
+def test_snapshot_import_markers_fail_closed_when_absent_or_replaced(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "scripts/__init__.py").write_bytes(b"")
+    config_marker = tmp_path / "configs/__init__.py"
+
+    with pytest.raises(campaign.ContractError, match="unavailable"):
+        campaign.validate_snapshot_import_files(tmp_path)
+
+    config_marker.write_text("# not the sealed empty marker\n", encoding="utf-8")
+    with pytest.raises(campaign.ContractError, match="bytes differ"):
+        campaign.validate_snapshot_import_files(tmp_path)
+
+    config_marker.write_bytes(b"")
+    campaign.validate_snapshot_import_files(tmp_path)

@@ -146,8 +146,8 @@ def _scheduler_preclaim() -> dict:
         ],
         "zero_job_proof": {
             "job_names": {
-                "train": "exp23-launch5-scheduler-test-train",
-                "report": "exp23-launch5-scheduler-test-report",
+                "train": "exp23-launch6-scheduler-test-train",
+                "report": "exp23-launch6-scheduler-test-report",
             },
             "pre_queries": 2,
             "post_queries": 2,
@@ -938,22 +938,57 @@ def _seal_tree(root: Path) -> dict[str, str]:
     return inventory
 
 
+def _smoke_evidence(
+    *,
+    inventory_sha256: str,
+    launch_sha256: str,
+    resolved_config_sha256: str,
+    full_output_fingerprint: str,
+    scientific_output_fingerprint: str,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "sealed_trainer_hydra_composition_verified",
+        "cell_index": 0,
+        "python_flags": ["-P", "-S", "-B"],
+        "entry_relative_path": str(worker.PACKAGE_RELATIVE / "train_entry.py"),
+        "config_package_relative_path": "configs/__init__.py",
+        "config_package_sha256": hashlib.sha256(b"").hexdigest(),
+        "snapshot_inventory_sha256": inventory_sha256,
+        "launch_sha256": launch_sha256,
+        "resolved_config_sha256": resolved_config_sha256,
+        "stdout_sha256": "7" * 64,
+        "stdout_bytes": 1,
+        "cuda_visible_devices": "",
+        "full_output_fingerprint_before": full_output_fingerprint,
+        "full_output_fingerprint_after": full_output_fingerprint,
+        "scientific_output_fingerprint_before": scientific_output_fingerprint,
+        "scientific_output_fingerprint_after": scientific_output_fingerprint,
+        "persistent_writes_performed": 0,
+        "scheduler_calls": 0,
+    }
+
+
 def _submission(root: Path) -> tuple[Path, str]:
     root.chmod(0o700)
     snapshot = root / "source-snapshot" / "repo"
     package = snapshot / worker.PACKAGE_RELATIVE
     scripts = snapshot / "scripts"
+    configs = snapshot / "configs"
     package.mkdir(parents=True)
     scripts.mkdir(parents=True)
+    configs.mkdir(parents=True)
     for relative, payload in {
         package / "worker.py": (PACKAGE / "worker.py").read_bytes(),
         package / "train_entry.py": (PACKAGE / "train_entry.py").read_bytes(),
         package / "train.slurm": (PACKAGE / "train.slurm").read_bytes(),
+        configs / "__init__.py": (REPO / "configs/__init__.py").read_bytes(),
         scripts / "__init__.py": (REPO / "scripts/__init__.py").read_bytes(),
         scripts / "train.py": (REPO / "scripts/train.py").read_bytes(),
     }.items():
         relative.write_bytes(payload)
     inventory = _seal_tree(snapshot)
+    inventory_sha256 = worker.stable_hash(inventory)
     snapshot.parent.chmod(0o555)
 
     launches = []
@@ -980,6 +1015,19 @@ def _submission(root: Path) -> tuple[Path, str]:
                 **audits,
             }
         )
+    compositions = [
+        {
+            "index": index,
+            "resolved_config_sha256": hashlib.sha256(
+                f"config-{index}".encode()
+            ).hexdigest(),
+            "launch_sha256": launches[index]["launch_sha256"],
+            "stdout_sha256": hashlib.sha256(f"stdout-{index}".encode()).hexdigest(),
+        }
+        for index in range(20)
+    ]
+    snapshot_full = "5" * 64
+    snapshot_scientific = "6" * 64
     contract = {
         "schema_version": 1,
         "status": "sealed_for_submission",
@@ -997,18 +1045,25 @@ def _submission(root: Path) -> tuple[Path, str]:
         "scheduler_fallback_config": _scheduler_fallback(),
         **audits,
         "snapshot_inventory": inventory,
-        "snapshot_inventory_sha256": worker.stable_hash(inventory),
+        "snapshot_inventory_sha256": inventory_sha256,
         "live_audit_replays": {},
         "snapshot_audit_replays": {},
-        "direct_hydra_compositions": [],
+        "direct_hydra_compositions": compositions,
+        "trainer_bootstrap_smoke": _smoke_evidence(
+            inventory_sha256=inventory_sha256,
+            launch_sha256=launches[0]["launch_sha256"],
+            resolved_config_sha256=compositions[0]["resolved_config_sha256"],
+            full_output_fingerprint=snapshot_full,
+            scientific_output_fingerprint=snapshot_scientific,
+        ),
         "scientific_output_fingerprint_before": {},
         "scientific_output_fingerprint_after": {},
         "full_output_fingerprint_before": {},
         "full_output_fingerprint_after": {},
-        "snapshot_full_output_fingerprint_before": {},
-        "snapshot_full_output_fingerprint_after": {},
-        "snapshot_scientific_output_fingerprint_before": {},
-        "snapshot_scientific_output_fingerprint_after": {},
+        "snapshot_full_output_fingerprint_before": snapshot_full,
+        "snapshot_full_output_fingerprint_after": snapshot_full,
+        "snapshot_scientific_output_fingerprint_before": snapshot_scientific,
+        "snapshot_scientific_output_fingerprint_after": snapshot_scientific,
         "git_provenance": {},
         "launches": launches,
         "array": "0-19%20",
@@ -1060,6 +1115,45 @@ def test_bootstrap_rejects_snapshot_extra_and_swapped_site_binding(tmp_path: Pat
     swapped_digest = worker.file_sha256(contract_path)
     with pytest.raises(worker.LifecycleError, match="site-package binding"):
         worker.bootstrap_submission(root, swapped_digest)
+
+
+def test_both_bootstraps_reject_detached_trainer_smoke_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "submission"
+    root.mkdir()
+    contract_path, _digest = _submission(root)
+    contract_path.chmod(0o600)
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["trainer_bootstrap_smoke"]["launch_sha256"] = "9" * 64
+    contract_path.write_text(
+        json.dumps(contract, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    contract_path.chmod(0o444)
+    detached_digest = worker.file_sha256(contract_path)
+
+    with pytest.raises(worker.LifecycleError, match="smoke launch/config binding"):
+        worker.bootstrap_submission(root, detached_digest)
+
+    entry = root / "source-snapshot/repo" / worker.PACKAGE_RELATIVE / "train_entry.py"
+    code = (
+        "import pathlib,runpy;"
+        f"entry=runpy.run_path({str(entry)!r});"
+        f"entry['bootstrap_submission'](pathlib.Path({str(root)!r}),{detached_digest!r})"
+    )
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONHASHSEED": "110",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    completed = subprocess.run(
+        [str(worker.PINNED_PYTHON), "-P", "-S", "-B", "-c", code],
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "smoke launch/config binding" in completed.stderr
 
 
 def test_preimport_revalidation_rejects_mutation_after_initial_snapshot_check(
@@ -1360,12 +1454,34 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         "full_output_fingerprint_before": {},
         "full_output_fingerprint_after": {},
     }
+    snapshot_full = "5" * 64
+    snapshot_scientific = "6" * 64
+    compositions = [
+        {
+            "index": index,
+            "resolved_config_sha256": hashlib.sha256(
+                f"config-{index}".encode()
+            ).hexdigest(),
+            "launch_sha256": launches[index]["launch_sha256"],
+            "stdout_sha256": hashlib.sha256(f"stdout-{index}".encode()).hexdigest(),
+        }
+        for index in range(20)
+    ]
+    inventory = {"scripts/train.py": "c" * 64}
+    inventory_sha256 = submit.stable_hash(inventory)
     snapshot_preflight = {
         "audit_replays": {},
-        "scientific_output_fingerprint_before": {},
-        "scientific_output_fingerprint_after": {},
-        "full_output_fingerprint_before": {},
-        "full_output_fingerprint_after": {},
+        "scientific_output_fingerprint_before": snapshot_scientific,
+        "scientific_output_fingerprint_after": snapshot_scientific,
+        "full_output_fingerprint_before": snapshot_full,
+        "full_output_fingerprint_after": snapshot_full,
+        "trainer_bootstrap_smoke": _smoke_evidence(
+            inventory_sha256=inventory_sha256,
+            launch_sha256=launches[0]["launch_sha256"],
+            resolved_config_sha256=compositions[0]["resolved_config_sha256"],
+            full_output_fingerprint=snapshot_full,
+            scientific_output_fingerprint=snapshot_scientific,
+        ),
     }
     scheduler_preclaim = _scheduler_preclaim()
     contract = submit._submission_contract(
@@ -1374,10 +1490,10 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
         source={"source_sha256": "a" * 64, "runtime_sha256": "b" * 64},
         snapshot_root=tmp_path / "snapshot",
         submission_root=tmp_path / "submission",
-        inventory={"scripts/train.py": "c" * 64},
+        inventory=inventory,
         launch_rows=[{"launch_file_sha256": "d" * 64} for _ in range(20)],
         preflight=preflight,
-        compositions=[],
+        compositions=compositions,
         snapshot_preflight=snapshot_preflight,
         git={},
         scheduler_preclaim=scheduler_preclaim,

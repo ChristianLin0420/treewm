@@ -256,16 +256,26 @@ def test_trainer_fingerprint_includes_hydra_configs(tmp_path):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "treewm").mkdir()
     (tmp_path / "configs" / "model").mkdir(parents=True)
+    (tmp_path / "scripts" / "__init__.py").write_bytes(b"")
     (tmp_path / "scripts" / "train.py").write_text("# trainer\n")
     (tmp_path / "treewm" / "model.py").write_text("# model\n")
+    config_package = tmp_path / "configs" / "__init__.py"
+    config_package.write_bytes(b"")
     config = tmp_path / "configs" / "model" / "treewm.yaml"
     config.write_text("hidden_dim: 256\n")
 
     before = trainer_code_fingerprint(tmp_path)
+    assert "scripts/__init__.py" in before["files"]
+    assert "configs/__init__.py" in before["files"]
     assert "configs/model/treewm.yaml" in before["files"]
     config.write_text("hidden_dim: 512\n")
     after = trainer_code_fingerprint(tmp_path)
     assert after["manifest_sha256"] != before["manifest_sha256"]
+
+    config.write_text("hidden_dim: 256\n")
+    config_package.write_text("# replacement marker\n")
+    replaced = trainer_code_fingerprint(tmp_path)
+    assert replaced["manifest_sha256"] != before["manifest_sha256"]
 
 
 def test_gradient_checkpointing_preserves_forward_and_gradients():

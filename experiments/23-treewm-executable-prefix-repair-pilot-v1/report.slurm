@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-exp23-launch5-terminal-report
+#SBATCH --job-name=treewm-exp23-launch6-terminal-report
 #SBATCH --partition=cpu
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal

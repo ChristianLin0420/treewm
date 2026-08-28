@@ -1,16 +1,16 @@
-# Exp23 executable-prefix repair pilot v1 launch5
+# Exp23 executable-prefix repair pilot v1 launch6
 
-This is the sealed, launch-capable but unsubmitted launch5 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted launch6 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch5`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch5` namespace,
-`outputs/.exp23-9066d1c600046ae2.transaction.lock`, and `exp23-launch5-*` run names.
-No launch5 submission, persistent submission snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch6`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch6` namespace,
+`outputs/.exp23-34d79ab13d65ef27.transaction.lock`, and `exp23-launch6-*` run names.
+No launch6 submission, persistent submission snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
 verifying this package; the required private snapshot-test copy was removed on success.
 
-Launch1, launch2, launch3, and launch4 are permanently ordered negative provenance. Each
+Launch1 through launch5 are permanently ordered negative provenance. Each
 preserved read-only source snapshot was independently byte-matched 137/137 to its
 recorded commit. Launch1 aborted before the submission contract because its isolated
 audit inputs were unavailable. Launch2 also aborted before the contract: its causal
@@ -47,10 +47,35 @@ canonical `afterok:33211846_*(unfulfilled)` dependency and
 immediately after abort and before slurmctld purged the records; the package does not
 claim that value was preserved in journal stdout.
 
+Launch5 sealed submission contract
+`8848790ca118a2fbf07b3a9f2edcceaec032c5005fc5eb7d918d55e066713abe`,
+and the scheduler accepted train array `33217168` plus dependent reporter `33217171`.
+Twelve tasks entered the real sealed `train_entry.py` bridge and failed with one
+byte-identical log because Hydra could not import the relative `configs` package. This
+occurred before config composition, model construction, or any optimizer update. The
+exact cancel latch, call, and result preserve a successful exact-ID `scancel`. A later
+independent terminal observation showed eight other tasks and the reporter cancelled.
+That 21-row `sacct` ledger and empty `squeue` observation are explicitly unsealed
+Launch6 attestation, not bytes preserved by Launch5. By contrast, the accepted
+array-wide dependency and `KillOInInvalidDependent=Yes` are durable in Launch5 journal
+`0004`.
+
+The preserved Launch5 run root has 235 regular nonsymlink files and canonical
+run-root-relative inventory SHA-256
+`c07dce9aa58352f790af94bff8c719a3e9c8639bdd268d5b7d33824db8b7a874`;
+its task subtree has 53 files and SHA-256
+`31d41fd81ee8092c0ebdfc68e9cd5199e81698fb62a7a2a88e5f2c2a6f5666f5`.
+Twelve empty run directories are bootstrap residue. There are no model, optimizer,
+checkpoint, result, W&B, scientific READY, or scientific report-bundle files, and
+Launch5 must never be retried or used as a resume/recovery source. The repair adds the
+empty `configs/__init__.py` package marker to both trainer and snapshot identity and
+exercises the actual sealed trainer bridge through resolved Hydra composition before
+submission.
+
 Exact protocols, manifests, inventories, claims, contracts,
-fingerprints, scheduler evidence, and journals for all four attempts are sealed in order
+fingerprints, scheduler evidence, and journals for all five attempts are sealed in order
 in `manifest.superseded_launches`; no superseded namespace, identity, snapshot, or
-state may be reused or resumed by launch5. Launch1–4 must never be retried, recovered
+state may be reused or resumed by launch6. Launch1–5 must never be retried, recovered
 into submission, or used as a recovery source.
 
 ## Scientific design
@@ -133,10 +158,12 @@ the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.js
 form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
 fsynced state transitions and fail closed.
 
-Any launch5 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any launch6 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
-reporter, and tests. `scripts/__init__.py` is included as an exact supplemental import
-file with the empty-file SHA-256 recorded in `campaign.SNAPSHOT_IMPORT_FILES`.
+reporter, and tests. `scripts/__init__.py` and `configs/__init__.py` are exact
+empty-file import markers recorded in `campaign.SNAPSHOT_IMPORT_FILES`; both also enter
+the trainer source fingerprint because their presence controls the sealed module-import
+semantics.
 Static preflight freezes that exact inventory once; copying and the isolated snapshot
 bootstrap reopen and verify only the same mapping, so a later mutation or change to the
 campaign file list cannot redefine the sealed execution tree.
@@ -182,7 +209,11 @@ Before any launch attempt, the copied-tree path must also pass its explicit regr
 `--snapshot-test` runs the production snapshot inventory, seals a real read-only copy
 under a private task-specific `/tmp` tree, and executes the full isolated copied-tree
 preflight: all four real audit replays plus all 20 direct Hydra compositions. It never
-checks or contacts Slurm clients and never creates submission/run state. Temporary
+checks or contacts Slurm clients and never creates submission/run state. It also runs
+one representative sealed launch through the real `train_entry.py` bridge under
+`-P -S -B`, hides CUDA, calls the Hydra-decorated `scripts.train.main` only with
+`--cfg job --resolve`, proves that `configs` came from the sealed package marker, and
+requires the parsed config to equal the frozen resolved-config row. Temporary
 snapshot and library-cache files are permission-restored and removed before success is
 reported. A successful `--test-only` does not substitute for this check; this command
 must pass for the final launch namespace and protocol before `--submit` is authorized.
