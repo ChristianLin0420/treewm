@@ -1,12 +1,12 @@
-# Exp23 executable-prefix repair pilot v1 launch7
+# Exp23 executable-prefix repair pilot v1 Launch8
 
-This is the sealed, launch-capable but unsubmitted launch7 package for a bounded 20-cell
+This is the sealed, launch-capable but unsubmitted Launch8 package for a bounded 20-cell
 engineering pilot. It compares the corrected Exp20 gauge + separate-branch-clipping
 recipe (`GS`) with the same recipe plus executable-prefix grounding (`GSEP`).
-The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch7`,
-with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch7` namespace,
-`outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock`, and `exp23-launch7-*` run names.
-No launch7 submission, persistent submission snapshot, scheduler job, W&B run,
+The active campaign identity is `treewm-executable-prefix-repair-pilot-v1-launch8`,
+with a fresh `outputs/treewm-executable-prefix-repair-pilot-v1-launch8` namespace,
+`outputs/.exp23-c85fcaba919d617f.transaction.lock`, and `exp23-launch8-*` run names.
+No Launch8 submission, persistent submission snapshot, scheduler job, W&B run,
 checkpoint, optimizer update, or scientific output was created while building or
 verifying this package; the required private snapshot-test copy was removed on success.
 
@@ -97,17 +97,27 @@ Launch7 candidate reporter—not the immutable Launch6 snapshot—authenticates 
 allowed W&B leaves per run without following them, rejects conflicting scalar keys,
 and assigns those seven diagnostics to the dense training axis.
 
+Launch7 then started all 20 fresh cells in array `33236584`, with reporter `33236586`.
+Four cells completed 25k and terminal evaluation; sixteen sealed exact READY checkpoints
+between 17,518 and 24,703 updates. Every incomplete task then failed because the GPU
+compute-node image lacked the scheduler client used by the historical self-requeue path.
+No replacement generation or `REQUEUE_CALLING` exists, and the reporter never ran. The
+complete immutable negative census is `launch7_negative_provenance.json`, independently
+cleared at raw SHA-256
+`29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e` and canonical
+SHA-256 `48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62`.
+
 Exact protocols, manifests, inventories, claims, contracts, fingerprints, scheduler
-evidence, and journals for all six attempts are recorded in order in
+evidence, and journals for all seven attempts are recorded in order in
 `manifest.superseded_launches`. Launch6's run root contains 629 regular files,
 2,009,101,434 regular-file bytes, 297 directories including the root, 80 symlinks, and
 no special files; the canonical regular-file inventory SHA-256 is
 `0ba872f7a03f42a58dfd9dcbc55afef0ec94dba6bef66744845c12f55cd340a8`.
 No superseded namespace, W&B identity, snapshot, checkpoint, optimizer state, result,
-or other state may enter Launch7. Launch1–6 have `reuse_allowed`, `resume_allowed`,
+or other state may enter Launch8. Launch1–7 have `reuse_allowed`, `resume_allowed`,
 `retry_allowed`, and `recovery_allowed` all false and must never be retried, requeued,
-resumed, or recovered. `resume=auto` and W&B resume are allowed only inside a genuine
-scheduler requeue lineage of the same fresh Launch7 generation-zero cell.
+resumed, or recovered. `resume=auto` and W&B resume are allowed only from wave zero to
+wave one for the exact same fresh Launch8 cell and authorization-bound identity.
 
 ## Scientific design
 
@@ -116,10 +126,12 @@ cube-quadruple-100m. Each has both arms at fresh seeds 110 and 111. Array identi
 `((setting_index * 2) + arm_index) * 2 + seed_index`, with settings, arms, and seeds
 in manifest order.
 
-All 20 independent GPU cells start from scratch and continue under one trainer identity
-to update 25,000. Update 5,000 is a retrospective analysis boundary only: it is not a
-stop, promotion, stage, or selection point. Genuine USR1 requeues may exact-resume the
-same owned checkpoint. Natural 25k completion then runs the terminal evaluation bank of
+All 20 independent GPU cells start from scratch in wave zero and continue under one
+trainer identity to update 25,000. Update 5,000 is a retrospective analysis boundary
+only: it is not a stop, promotion, stage, or selection point. On USR1, wave zero seals
+an exact checkpoint-bound `CONTINUATION_READY.json` and exits scheduler-success; its
+already-declared afterok wave-one cell authenticates and resumes it. Natural 25k
+completion then runs the terminal evaluation bank of
 five tasks times five episodes. The gate consumes those exact 25 terminal rows, not the
 descriptive five-episode periodic monitor.
 
@@ -180,16 +192,17 @@ its candidate-quality values remain causal observations rather than vetoes.
 
 ## Immutable launch lifecycle
 
-The only launch topology is Slurm batch shell → `worker.py` → `train_entry.py` →
-in-process `scripts.train`; there is no `srun` and no midpoint process. The array is
-exactly `0-19%20`. A CPU report/gate job is submitted with `afterok` on the whole
-array. The worker rejects inherited `TREEWM_STOP_AFTER_UPDATE`, validates scratch
-generation zero or the exact current requeue lineage, and accepts success only after
-the 25k checkpoint, complete 25-row final-evaluation artifact, and `COMPLETED.json`
-form the terminal triplet. USR1 requeue and cancellation use create-exclusive,
-fsynced state transitions and fail closed.
+The fixed launch topology is a held `0-19%20` wave-zero GPU array, an independently
+submitted `0-19%20` wave-one GPU array with whole-array afterok and kill-on-invalid
+dependency, and a CPU report/gate job with afterok and kill-on-invalid dependency on
+wave one. Wave zero is released only after all three accepted IDs, both dependencies,
+the authorization, and the receipt are durable. Each GPU task remains Slurm batch shell
+→ `worker.py` → `train_entry.py` → in-process `scripts.train`; there is no `srun`,
+compute-side scheduler client, or within-wave requeue. Wave one either authenticates the
+same-cell wave-zero READY checkpoint, authenticates a complete terminal triplet and
+no-ops, or fails nonzero if it reaches another USR1 without completion.
 
-Any launch7 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
+Any Launch8 snapshot is read-only, nonsymlinked, byte-verified, and binds the final protocol,
 manifest, source/runtime, all resolved configs, all four audits, lifecycle scripts,
 reporter, and tests. `scripts/__init__.py` and `configs/__init__.py` are exact
 empty-file import markers recorded in `campaign.SNAPSHOT_IMPORT_FILES`; both also enter
@@ -201,12 +214,13 @@ campaign file list cannot redefine the sealed execution tree.
 
 Scheduler access is fail-closed. The package binds the canonical root-admin Slurm
 configuration and Lua policy bytes across preclaim, exact-name absence checks,
-`sbatch --test-only`, submission, reconciliation, cancellation, and requeue. The
-submission preclaim makes seven read-only scheduler calls, requires zero matching jobs
-before and after, and tests the exact whole-array `afterok` report dependency without
-creating a job. A sealed copy of the originally authenticated Slurm configuration may
-be used only for exact-ID reconciliation, cancellation, or requeue after a job is
-accepted; it is never authorized for submission.
+`sbatch --test-only`, submission, dependency authentication, release, reconciliation,
+and cancellation. The submission preclaim makes ten read-only scheduler calls, requires
+zero matching jobs before and after for wave zero, wave one, and reporter, and validates
+all three exact scripts without creating a job. A sealed copy of the originally
+authenticated Slurm configuration may be used only for accepted-job exact
+reconciliation, cancellation, dependency verification, and wave-zero release; it is
+never authorized for submission or compute-side execution.
 
 ## Commands
 
@@ -222,7 +236,7 @@ PKG=experiments/23-treewm-executable-prefix-repair-pilot-v1
 ```
 
 All commands above are read-only. `--scheduler-test` performs only the authenticated
-Slurm control-plane observation, exact-name zero-job checks, and the two
+Slurm control-plane observation, exact-name zero-job checks, and the three
 `sbatch --test-only` probes; it requires zero scheduler mutation calls and zero
 persistent writes. `submit.py` defaults to `--test-only`, replays
 the frozen audits through its hash-bound isolated runtime, recomposes all 20 direct
@@ -254,6 +268,33 @@ Submission is intentionally explicit and was not run during package construction
 ```bash
 "$PY" -I -S -B "$PKG/submit.py" --submit
 ```
+
+The separate tiny two-wave real-GPU canary is non-scientific and is never invoked by
+`--test-only`, `--snapshot-test`, or `--scheduler-test`. Its default action is a
+read-only description:
+
+```bash
+"$PY" -I -S -B "$PKG/two_wave_canary.py" --describe
+```
+
+A real canary requires an unused absolute state root directly beneath the dedicated
+`outputs/exp23-launch8-two-wave-canaries/` parent, whose basename starts with
+`exp23-launch8-two-wave-canary-`, the explicit mutation flag, and the exact confirmation
+phrase printed by `--describe`. It is enabled only from the final sealed package. It
+submits one held GPU wave-zero job, one dependent GPU wave-one job, and one dependent CPU
+reporter; durably publishes the three accepted identities, authorization, receipt, and
+READY record; then releases wave zero. The compute worker uses pinned Python `-I -S -B`
+and validates the two nonsymlink venv/base package-root locations before importing
+Torch from one of them. The positive claim is deliberately narrow: it proves the
+lexical pinned interpreter and isolation flags, one visible selected CUDA device, a
+real CUDA tensor operation, and checkpoint transfer across the two waves. It does not
+hash or version-bind the resolved interpreter, `pyvenv.cfg`, the Torch distribution or
+native libraries, the CUDA driver/runtime, and it is not evidence of byte-equivalence
+to the scientific trainer environment. If the controller is
+hard-killed, the explicit `--recover-or-cancel-real-gpu-canary` action reopens the same
+controller lock, reconciles all three unique scheduler identities, and cancels only live
+members without creating jobs. The canary must never be substituted for the 20-cell
+scientific preflight or submission and was not run while preparing this package.
 
 For an existing sealed submission, cancellation is separately explicit:
 

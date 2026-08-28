@@ -33,6 +33,7 @@ def _load(name: str, filename: str):
 
 
 worker = _load("exp23_lifecycle_worker", "worker.py")
+dag_evidence = _load("exp23_lifecycle_dag_evidence", "dag_evidence.py")
 train_entry = _load("exp23_lifecycle_train_entry", "train_entry.py")
 
 
@@ -85,8 +86,8 @@ def _scheduler_fallback() -> dict:
     return {
         "schema_version": 1,
         "purpose": (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         ),
         "encoding": "base64",
         "payload_base64": base64.b64encode(payload).decode("ascii"),
@@ -98,8 +99,14 @@ def _scheduler_fallback() -> dict:
 
 def _scheduler_preclaim() -> dict:
     comment = "treewm-exp23:" + "0" * 64
-    train_output = "/repo/scheduler-test-never-executed/logs/train_%A_%a.out"
+    wave0_output = "/repo/scheduler-test-never-executed/logs/wave0_%A_%a.out"
+    wave1_output = "/repo/scheduler-test-never-executed/logs/wave1_%A_%a.out"
     report_output = "/repo/scheduler-test-never-executed/logs/report_%j.out"
+    common = {
+        "array": "0-19%20", "comment": comment, "export": "NONE",
+        "no-requeue": "no-requeue", "parsable": "set", "test-only": "set",
+        "verbose": "3",
+    }
     return {
         "schema_version": 1,
         "status": "scheduler_preclaim_verified",
@@ -107,13 +114,17 @@ def _scheduler_preclaim() -> dict:
         "scheduler_control_plane": _scheduler_observation(),
         "controller_configuration": _scheduler_critical(),
         "sbatch_test_only": {
-            "train": {
-                "role": "train",
+            "wave0": {
+                "role": "wave0",
                 "defined_options": {
-                    "array": "0-19%20", "comment": comment, "export": "NONE",
-                    "output": train_output, "parsable": "set", "test-only": "set",
-                    "verbose": "3",
+                    **common, "hold": "set", "output": wave0_output,
                 },
+                "decision": {},
+                "warnings": [],
+            },
+            "wave1": {
+                "role": "wave1",
+                "defined_options": {**common, "output": wave1_output},
                 "decision": {},
                 "warnings": [],
             },
@@ -127,34 +138,46 @@ def _scheduler_preclaim() -> dict:
                 "warnings": [],
             },
         },
-        "report_dependency_test": worker.REPORT_DEPENDENCY_TEST_REQUIREMENT,
+        "dependency_tests": worker.DEPENDENCY_TEST_REQUIREMENT,
         "scheduler_probe_commands": [
             ["scontrol"],
-            ["squeue"],
-            ["squeue"],
+            ["squeue"], ["squeue"], ["squeue"],
             [
                 "sbatch", "-vvv", "--test-only", "--parsable", "--export=NONE",
                 "--array=0-19%20",
-                f"--comment={comment}", f"--output={train_output}", "train.slurm",
+                "--job-name=exp23-launch8-scheduler-test-wave0",
+                f"--comment={comment}", f"--output={wave0_output}", "--hold",
+                "train.slurm", "/repo", "/repo/scheduler-test-never-executed",
+                "0" * 64, "0", "none",
             ],
             [
                 "sbatch", "-vvv", "--test-only", "--parsable", "--export=NONE",
-                f"--comment={comment}", f"--output={report_output}", "report.slurm",
+                "--array=0-19%20",
+                "--job-name=exp23-launch8-scheduler-test-wave1",
+                f"--comment={comment}", f"--output={wave1_output}",
+                "train.slurm", "/repo", "/repo/scheduler-test-never-executed",
+                "0" * 64, "1", "1",
             ],
-            ["squeue"],
-            ["squeue"],
+            [
+                "sbatch", "-vvv", "--test-only", "--parsable", "--export=NONE",
+                "--job-name=exp23-launch8-scheduler-test-report",
+                f"--comment={comment}", f"--output={report_output}", "report.slurm",
+                "/repo", "/repo/scheduler-test-never-executed", "0" * 64,
+            ],
+            ["squeue"], ["squeue"], ["squeue"],
         ],
         "zero_job_proof": {
             "job_names": {
-                "train": "exp23-launch7-scheduler-test-train",
-                "report": "exp23-launch7-scheduler-test-report",
+                "wave0": "exp23-launch8-scheduler-test-wave0",
+                "wave1": "exp23-launch8-scheduler-test-wave1",
+                "report": "exp23-launch8-scheduler-test-report",
             },
-            "pre_queries": 2,
-            "post_queries": 2,
+            "pre_queries": 3,
+            "post_queries": 3,
             "matching_jobs_before": 0,
             "matching_jobs_after": 0,
         },
-        "scheduler_calls": 7,
+        "scheduler_calls": 10,
         "scheduler_mutation_calls": 0,
         "persistent_writes_performed": 0,
     }
@@ -319,6 +342,11 @@ def test_metric_tracker_requires_exact_unflushed_window() -> None:
 
     with pytest.raises(worker.LifecycleError, match="nonempty at a logging boundary"):
         worker.validate_metric_tracker_state(_tracker(49), 50)
+
+    bool_schema = _tracker(37)
+    bool_schema["schema_version"] = True
+    with pytest.raises(worker.LifecycleError, match="schema differs"):
+        worker.validate_metric_tracker_state(bool_schema, 37)
 
 
 def test_loader_cursor_is_exact_across_epoch_boundary() -> None:
@@ -501,6 +529,33 @@ def test_final_progress_rejects_extra_fields_and_all_symlinks(tmp_path: Path) ->
         )
 
 
+@pytest.mark.parametrize(
+    "mutation,pattern",
+    (
+        (lambda value: value.__setitem__("schema_version", True), "schema differs"),
+        (lambda value: value.__setitem__("episodes_per_task", 5.0), "episode count differs"),
+        (
+            lambda value: value["task_ids"].__setitem__(0, True),
+            "task IDs differ",
+        ),
+    ),
+)
+def test_final_progress_requires_exact_json_scalar_types(
+    tmp_path: Path, mutation, pattern: str
+) -> None:
+    value = _progress([_episode(0, 0)])
+    mutation(value)
+    path = tmp_path / f"strict-{pattern.replace(' ', '-')}.json"
+    _write_json(path, value)
+    with pytest.raises(worker.LifecycleError, match=pattern):
+        worker.validate_final_progress(
+            path,
+            expected_identity_sha256="a" * 64,
+            expected_seed_table_sha256="b" * 64,
+            manifest=_manifest(),
+        )
+
+
 def _terminal_case(
     run: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -624,6 +679,13 @@ def _terminal_case(
         completion.pop("recipe_runtime_sha256")
     elif mutation == "drift":
         completion["dataset_dir"] = "/drifted/dataset"
+    elif mutation == "schema-bool":
+        completion["schema_version"] = True
+    elif mutation == "updates-float":
+        completion["completed_updates"] = 25_000.0
+    elif mutation == "nested-bool-int":
+        completion["run_identity"] = copy.deepcopy(identity)
+        completion["run_identity"]["gradient_checkpointing"] = 1
     _write_json(run / "COMPLETED.json", completion)
     return context, state
 
@@ -640,6 +702,9 @@ def test_completion_requires_exact_full_trainer_schema_and_checkpoint_config(
         ("extra", "fields differ"),
         ("stripped", "fields differ"),
         ("drift", "dataset_dir differs"),
+        ("schema-bool", "schema_version differs"),
+        ("updates-float", "completed_updates differs"),
+        ("nested-bool-int", "run_identity differs"),
     ):
         case_context, case_state = _terminal_case(tmp_path / mutation, monkeypatch, mutation)
         with pytest.raises(worker.LifecycleError, match=pattern):
@@ -667,9 +732,11 @@ def _lineage_args(task_index: int = 3) -> argparse.Namespace:
     return argparse.Namespace(
         submission_sha256="c" * 64,
         cell_index=task_index,
-        restart_count=1,
-        array_job_id="12345",
+        wave_index=1,
+        array_job_id="22345",
         array_task_id=task_index,
+        predecessor_array_job_id="12345",
+        _submission_authorization_sha256="e" * 64,
     )
 
 
@@ -678,8 +745,8 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
 ) -> None:
     args = _lineage_args()
     task = tmp_path / "task"
-    previous = worker.generation_root_for(task, 0)
-    previous.mkdir(parents=True)
+    wave0 = worker.generation_root_for(task, 0)
+    wave0.mkdir(parents=True)
     run = tmp_path / "run"
     latest = run / "checkpoints/latest.pt"
     latest.parent.mkdir(parents=True)
@@ -690,11 +757,6 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
         "launch": {
             "launch_sha256": "d" * 64,
             "cell": {"run_directory": str(run)},
-        },
-        "manifest": {"execution": {"scontrol": "/usr/local/bin/scontrol"}},
-        "submission_contract": {
-            "scheduler_preclaim": _scheduler_preclaim(),
-            "scheduler_fallback_config": _scheduler_fallback(),
         },
         **_run_layout(run),
     }
@@ -724,13 +786,15 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
         "submission_sha256": args.submission_sha256,
         "launch_sha256": "d" * 64,
         "cell_index": args.cell_index,
-        "restart_count": 0,
-        "array_job_id": args.array_job_id,
+        "wave_index": 0,
+        "array_job_id": args.predecessor_array_job_id,
         "array_task_id": args.array_task_id,
+        "predecessor_array_job_id": "none",
+        "submission_authorization_sha256": args._submission_authorization_sha256,
     }
     ready = {
         **common,
-        "status": "requeue_ready",
+        "status": "continuation_ready",
         "trainer_exit_code": 75,
         "checkpoint_kind": "train",
         "completed_updates": 1234,
@@ -740,38 +804,33 @@ def test_arbitrary_checkpoint_lineage_accepts_1234_and_rejects_advanced_file(
         "checkpoint_file_identity": checkpoint_identity,
         "final_eval_progress_sha256": None,
     }
-    ready_path = previous / worker.REQUEUE_READY_NAME
+    ready_path = wave0 / worker.CONTINUATION_READY_NAME
     _write_json(ready_path, ready)
-    _write_json(
-        previous / worker.REQUEUE_CALLING_NAME,
-        {
-            **common,
-                "status": "scontrol_requeue_calling",
-                "requeue_target": "12345_3",
-                "requeue_ready_sha256": worker.file_sha256(ready_path),
-                "checkpoint_sha256": checkpoint_sha,
-                "checkpoint_file_identity": checkpoint_identity,
-                "scheduler_control_plane": _scheduler_observation(),
-                "scheduler_config_sha256": _scheduler_fallback()["sha256"],
-                "scheduler_config_size": _scheduler_fallback()["size"],
-                "scontrol_executable_sha256": "e" * 64,
-                "scontrol_show_command": [
-                    "/usr/local/bin/scontrol", "show", "job", "12345_3", "--oneliner",
-                ],
-                "scontrol_show_stdout_sha256": "f" * 64,
-                "scontrol_requeue_command": [
-                    "/usr/local/bin/scontrol", "requeue", "12345_3",
-                ],
-            },
-        )
-    worker._verify_previous_lineage(args, task, context)
+    state, evidence_sha = worker._verify_wave0_ready_lineage(args, task, context)
+    assert state["completed_updates"] == 1234
+    assert evidence_sha == worker.file_sha256(ready_path)
+    ready_path.chmod(0o600)
+    bool_base = {**ready, "wave_index": False}
+    ready_path.write_text(
+        json.dumps(bool_base, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    ready_path.chmod(0o444)
+    with pytest.raises(worker.LifecycleError, match="wave-zero READY wave_index differs"):
+        worker._verify_wave0_ready_lineage(args, task, context)
+    ready_path.chmod(0o600)
+    ready_path.write_text(
+        json.dumps(ready, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    ready_path.chmod(0o444)
     current_state["completed_updates"] = 1235
     with pytest.raises(worker.LifecycleError, match="completed_updates differs"):
-        worker._verify_previous_lineage(args, task, context)
+        worker._verify_wave0_ready_lineage(args, task, context)
     current_state["completed_updates"] = 1234
     latest.write_bytes(b"advanced-after-ready")
     with pytest.raises(worker.LifecycleError, match="checkpoint_sha256|advanced/swapped"):
-        worker._verify_previous_lineage(args, task, context)
+        worker._verify_wave0_ready_lineage(args, task, context)
 
 
 def test_ready_binding_rejects_mutated_final_progress(tmp_path: Path) -> None:
@@ -805,6 +864,21 @@ def test_ready_binding_rejects_mutated_final_progress(tmp_path: Path) -> None:
     }
     with pytest.raises(worker.LifecycleError, match="final_eval_progress_sha256 differs"):
         worker.validate_ready_checkpoint_binding(ready, reopened, "adversarial READY")
+    for field, bad_value in (
+        ("trainer_exit_code", 75.0),
+        ("completed_updates", True),
+        ("pending_eval_step", True),
+    ):
+        forged = {**ready, field: bad_value}
+        with pytest.raises(worker.LifecycleError, match=f"{field} differs"):
+            worker.validate_ready_checkpoint_binding(
+                forged,
+                {
+                    **reopened,
+                    "progress": {"sha256": original_progress_sha},
+                },
+                "adversarial READY",
+            )
 
 
 def test_checkpoint_resolver_hashes_and_loads_one_open_inode(
@@ -980,6 +1054,8 @@ def _submission(root: Path) -> tuple[Path, str]:
     configs.mkdir(parents=True)
     for relative, payload in {
         package / "worker.py": (PACKAGE / "worker.py").read_bytes(),
+        package / "dag_evidence.py": (PACKAGE / "dag_evidence.py").read_bytes(),
+        package / "manifest.json": (PACKAGE / "manifest.json").read_bytes(),
         package / "train_entry.py": (PACKAGE / "train_entry.py").read_bytes(),
         package / "train.slurm": (PACKAGE / "train.slurm").read_bytes(),
         configs / "__init__.py": (REPO / "configs/__init__.py").read_bytes(),
@@ -1156,6 +1232,46 @@ def test_both_bootstraps_reject_detached_trainer_smoke_evidence(tmp_path: Path) 
     assert "smoke launch/config binding" in completed.stderr
 
 
+def test_both_bootstraps_reject_bool_coerced_trainer_smoke_schema(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "submission"
+    root.mkdir()
+    contract_path, _digest = _submission(root)
+    contract_path.chmod(0o600)
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["trainer_bootstrap_smoke"]["schema_version"] = True
+    contract_path.write_text(
+        json.dumps(contract, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    contract_path.chmod(0o444)
+    bool_digest = worker.file_sha256(contract_path)
+
+    with pytest.raises(worker.LifecycleError, match="smoke contract differs"):
+        worker.bootstrap_submission(root, bool_digest)
+
+    entry = root / "source-snapshot/repo" / worker.PACKAGE_RELATIVE / "train_entry.py"
+    code = (
+        "import pathlib,runpy;"
+        f"entry=runpy.run_path({str(entry)!r});"
+        f"entry['bootstrap_submission'](pathlib.Path({str(root)!r}),{bool_digest!r})"
+    )
+    completed = subprocess.run(
+        [str(worker.PINNED_PYTHON), "-P", "-S", "-B", "-c", code],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHONHASHSEED": "110",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "smoke contract differs" in completed.stderr
+
+
 def test_preimport_revalidation_rejects_mutation_after_initial_snapshot_check(
     tmp_path: Path,
 ) -> None:
@@ -1176,6 +1292,7 @@ def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Pat
     root = tmp_path / "submission"
     root.mkdir()
     _, digest = _submission(root)
+    _write_dag_authorization(root, submission_sha=digest, wave0="12345")
     hostile = tmp_path / "hostile"
     hostile.mkdir()
     sentinel = tmp_path / "customizer-ran"
@@ -1192,9 +1309,10 @@ def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Pat
             "--submission-root", str(root),
             "--submission-sha256", digest,
             "--cell-index", "0",
-            "--restart-count", "0",
+            "--wave-index", "0",
             "--array-job-id", "12345",
             "--array-task-id", "0",
+            "--predecessor-array-job-id", "none",
             "--signal", "USR1",
         ],
         env=environment,
@@ -1204,7 +1322,7 @@ def test_isolated_bootstrap_ignores_hostile_pythonpath_customizers(tmp_path: Pat
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    marker = root / "tasks/cell-00/requeue/0/USR1_REQUESTED.json"
+    marker = root / "tasks/cell-00/waves/0/USR1_REQUESTED.json"
     assert marker.is_file() and stat.S_IMODE(marker.stat().st_mode) == 0o444
 
     code = (
@@ -1380,9 +1498,11 @@ def test_invalid_context_creates_no_task_or_run_state(
         submission_root=submission,
         submission_sha256="a" * 64,
         cell_index=0,
-        restart_count=0,
+        wave_index=0,
         array_job_id="123",
         array_task_id=0,
+        predecessor_array_job_id="none",
+        _submission_authorization_sha256="c" * 64,
         _bootstrap_contract={},
     )
     monkeypatch.delenv(worker.STOP_ENVIRONMENT, raising=False)
@@ -1407,9 +1527,11 @@ def test_complete_receipt_status_cannot_be_overwritten() -> None:
     args = argparse.Namespace(
         submission_sha256="a" * 64,
         cell_index=0,
-        restart_count=2,
+        wave_index=1,
         array_job_id="123",
         array_task_id=0,
+        predecessor_array_job_id="122",
+        _submission_authorization_sha256="c" * 64,
     )
     context = {"launch": {"launch_sha256": "b" * 64}}
     marker = worker._complete_marker(
@@ -1536,28 +1658,32 @@ def test_worker_terminal_schemas_match_live_trainer_literals() -> None:
     assert expected_complete_progress in progress_complete
 
 
-def test_batch_script_is_direct_no_stage_and_orders_calling_before_requeue() -> None:
+def test_batch_and_worker_have_no_compute_side_scheduler_client() -> None:
     source = (PACKAGE / "train.slurm").read_text(encoding="utf-8")
     assert "#SBATCH --export=NONE" in source
     assert "#SBATCH --array=0-19%20" in source
+    assert "#SBATCH --no-requeue" in source
     assert "TREEWM_STOP_AFTER_UPDATE=" not in source
     assert "resume=" not in source  # the exact sealed launch owns resume=auto
     assert "s" + "run" not in source
     assert 'exec "$PYTHON_EXECUTABLE" -I -S -B "$WORKER" run' in source
-    assert source.count('"$PYTHON_EXECUTABLE" -I -S -B "$WORKER"') == 3
-    assert '"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" requeue' in source
-    assert "scontrol" not in source.lower()
+    assert source.count('"$PYTHON_EXECUTABLE" -I -S -B "$WORKER"') == 2
+    assert '"$WORKER" record-signal' in source
+    assert '"$WAVE_INDEX" != 0 || "$worker_status" -ne 75' in source
+    assert "exit 0" in source[source.index("# The controller predeclared wave one") :]
+    executable_source = "\n".join(
+        line for line in source.splitlines() if not line.startswith("#SBATCH")
+    ).lower()
+    for scheduler_client in ("scontrol", "squeue", "sbatch", "scancel", "sacct"):
+        assert scheduler_client not in executable_source
     assert "SLURM_CONF" not in source
     assert "SCHEDULER_ENV" not in source
-    assert "if [[ -f \"$REQUEUE_CALLING\" && ! -L \"$REQUEUE_CALLING\" ]]" in source
     worker_source = (PACKAGE / "worker.py").read_text(encoding="utf-8")
-    authenticated = worker_source[
-        worker_source.index("def authenticated_requeue"):worker_source.index("def _common_parser")
-    ]
-    show = authenticated.index("shown = scheduler_runner")
-    calling = authenticated.index("seal_json(generation / REQUEUE_CALLING_NAME")
-    requeue = authenticated.index("requeued = scheduler_runner")
-    assert show < calling < requeue
+    for scheduler_client in ("scontrol", "squeue", "sbatch", "scancel", "sacct"):
+        assert scheduler_client not in worker_source.lower()
+    assert "authenticated_requeue" not in worker_source
+    assert "CONTINUATION_READY.json" in worker_source
+    assert "WAVE_INCOMPLETE.json" in worker_source
     trainer_spawn = worker_source[
         worker_source.index("def _spawn_trainer"):worker_source.index("def _claim_fresh_run")
     ]
@@ -1565,219 +1691,611 @@ def test_batch_script_is_direct_no_stage_and_orders_calling_before_requeue() -> 
     assert '"-I"' not in trainer_spawn
 
 
-def test_authenticated_requeue_pins_preclaim_config_across_show_and_requeue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    submission = tmp_path / "submission"
-    task = worker.task_root_for(submission, 2)
-    generation = worker.generation_root_for(task, 1)
-    generation.mkdir(parents=True)
-    args = argparse.Namespace(
-        submission_root=submission,
-        submission_sha256="c" * 64,
-        cell_index=2,
-        restart_count=1,
-        array_job_id="7000",
-        array_task_id=2,
-        _bootstrap_contract={},
-        _bootstrap_snapshot_root=tmp_path / "snapshot",
+def _write_dag_authorization(
+    submission: Path,
+    *,
+    submission_sha: str = "c" * 64,
+    wave0: str = "7000",
+    wave1: str = "8000",
+    report: str = "9000",
+) -> tuple[dict, str]:
+    if not (submission / worker.SUBMISSION_CONTRACT_NAME).exists():
+        _submission(submission)
+    journal = submission / "journal"
+    journal.mkdir(mode=0o700, exist_ok=True)
+    contract = worker.read_json(submission / worker.SUBMISSION_CONTRACT_NAME)
+    snapshot = Path(contract["snapshot_root"])
+    manifest = worker.read_json(snapshot / worker.PACKAGE_RELATIVE / "manifest.json")
+    job_ids = {"wave0": wave0, "wave1": wave1, "report": report}
+    commands, test_commands, names, comment = dag_evidence._paths(
+        manifest, snapshot, submission, submission_sha, job_ids
     )
-    args._bootstrap_snapshot_root.mkdir()
-    context = {
-        "launch": {"launch_sha256": "d" * 64},
-        "manifest": {
-            "execution": {
-                "scontrol": "/usr/local/bin/scontrol",
-                "scheduler_control_plane": worker.SCHEDULER_CONTROL_PLANE,
-            }
-        },
-        "submission_contract": {
-            "scheduler_preclaim": _scheduler_preclaim(),
-            "scheduler_fallback_config": _scheduler_fallback(),
-        },
-    }
-    common = {
-        "schema_version": 1,
-        "campaign_id": worker.CAMPAIGN_ID,
-        "submission_sha256": args.submission_sha256,
-        "launch_sha256": "d" * 64,
-        "cell_index": 2,
-        "restart_count": 1,
-        "array_job_id": "7000",
-        "array_task_id": 2,
-    }
-    checkpoint_identity = {
-        "device": 1,
-        "inode": 2,
-        "size": 3,
-        "mtime_ns": 4,
-        "ctime_ns": 5,
-    }
-    checkpoint = {
-        "kind": "train",
-        "completed_updates": 1000,
-        "phase": "train",
-        "pending_eval_step": None,
-        "checkpoint_sha256": "f" * 64,
-        "checkpoint_file_identity": checkpoint_identity,
-        "progress": None,
-    }
-    _write_json(
-        generation / worker.REQUEUE_READY_NAME,
-        {
-            **common,
-            "status": "requeue_ready",
-            "trainer_exit_code": 75,
-            "checkpoint_kind": "train",
-            "completed_updates": 1000,
-            "phase": "train",
-            "pending_eval_step": None,
-            "checkpoint_sha256": "f" * 64,
-            "checkpoint_file_identity": checkpoint_identity,
-            "final_eval_progress_sha256": None,
-        },
+    lock_path = submission.absolute().parents[2] / (
+        ".exp23-"
+        + hashlib.sha256(str(submission.absolute()).encode("utf-8")).hexdigest()[:16]
+        + ".transaction.lock"
     )
-    monkeypatch.setattr(worker, "load_launch_context", lambda **_kwargs: context)
-    monkeypatch.setattr(worker, "resolve_checkpoint", lambda _context: checkpoint)
-    monkeypatch.setattr(
-        worker,
-        "scheduler_control_plane_observation",
-        lambda _context: pytest.fail("requeue reopened mutable canonical scheduler state"),
-    )
-    calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
-    config_descriptors: list[int] = []
-    executable_descriptors: list[int] = []
-    canonical_drifted = False
-
-    def runner(command, _cwd, environment, inherited_fds):
-        nonlocal canonical_drifted
-        values = list(command)
-        descriptors = tuple(inherited_fds)
-        calls.append((values, dict(environment), descriptors))
-        assert set(environment) == {"PATH", "LANG", "LC_ALL", "SLURM_CONF"}
-        assert environment["SLURM_CONF"].startswith("/proc/self/fd/")
-        assert len(descriptors) == 2
-        config_fd, executable_fd = descriptors
-        config_descriptors.append(config_fd)
-        executable_descriptors.append(executable_fd)
-        assert environment["SLURM_CONF"] == f"/proc/self/fd/{config_fd}"
-        assert values[0] == f"/proc/self/fd/{executable_fd}"
-        assert os.pread(config_fd, len(_scheduler_config_bytes()), 0) == _scheduler_config_bytes()
-        if values[1:3] == ["show", "job"]:
-            canonical_drifted = True
-            return subprocess.CompletedProcess(
-                values,
-                0,
-                stdout=(
-                    "JobId=7000_2 ArrayJobId=7000 ArrayTaskId=2 "
-                    "JobState=RUNNING\n"
-                ),
-                stderr="",
-            )
-        assert canonical_drifted
-        assert values[1:] == ["requeue", "7000_2"]
-        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
-
-    assert worker.authenticated_requeue(args, runner) == 0
-    assert len(calls) == 2
-    assert config_descriptors[0] == config_descriptors[1]
-    assert executable_descriptors[0] == executable_descriptors[1]
-    calling = json.loads(
-        (generation / worker.REQUEUE_CALLING_NAME).read_text(encoding="utf-8")
-    )
-    assert set(calling) == worker.REQUEUE_CALLING_FIELDS
-    assert calling["scheduler_config_sha256"] == _scheduler_fallback()["sha256"]
-    assert calling["scheduler_config_size"] == _scheduler_fallback()["size"]
-    assert calling["scontrol_show_command"] == [
-        "/usr/local/bin/scontrol", "show", "job", "7000_2", "--oneliner",
-    ]
-    assert calling["scontrol_requeue_command"] == [
-        "/usr/local/bin/scontrol", "requeue", "7000_2",
-    ]
-    for descriptor in {config_descriptors[0], executable_descriptors[0]}:
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
-
-
-def test_authenticated_requeue_rejects_fallback_not_bound_to_preclaim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    submission = tmp_path / "submission"
-    task = worker.task_root_for(submission, 2)
-    generation = worker.generation_root_for(task, 1)
-    generation.mkdir(parents=True)
-    args = argparse.Namespace(
-        submission_root=submission,
-        submission_sha256="c" * 64,
-        cell_index=2,
-        restart_count=1,
-        array_job_id="7000",
-        array_task_id=2,
-        _bootstrap_contract={},
-        _bootstrap_snapshot_root=tmp_path / "snapshot",
-    )
-    args._bootstrap_snapshot_root.mkdir()
-    preclaim = _scheduler_preclaim()
-    preclaim["scheduler_control_plane"]["cli_filter_policy"]["tree_sha256"] = "9" * 64
-    context = {
-        "launch": {"launch_sha256": "d" * 64},
-        "manifest": {"execution": {"scontrol": "/usr/local/bin/scontrol"}},
-        "submission_contract": {
-            "scheduler_preclaim": preclaim,
-            "scheduler_fallback_config": _scheduler_fallback(),
-        },
+    lock_path.touch(mode=0o600, exist_ok=True)
+    lock_path.chmod(0o600)
+    lock_info = lock_path.stat()
+    lock_binding = {
+        "path": str(lock_path),
+        "device": lock_info.st_dev,
+        "inode": lock_info.st_ino,
+        "uid": os.getuid(),
+        "mode": 0o600,
     }
-    checkpoint_identity = {
-        "device": 1, "inode": 2, "size": 3, "mtime_ns": 4, "ctime_ns": 5,
-    }
-    checkpoint = {
-        "kind": "train",
-        "completed_updates": 1000,
-        "phase": "train",
-        "pending_eval_step": None,
-        "checkpoint_sha256": "f" * 64,
-        "checkpoint_file_identity": checkpoint_identity,
-        "progress": None,
-    }
-    _write_json(
-        generation / worker.REQUEUE_READY_NAME,
+    claim_token = "b" * 64
+    worker.seal_json(
+        journal / "0000_CLAIMED.json",
         {
             "schema_version": 1,
+            "record": "claimed",
             "campaign_id": worker.CAMPAIGN_ID,
-            "submission_sha256": args.submission_sha256,
-            "launch_sha256": "d" * 64,
-            "cell_index": 2,
-            "restart_count": 1,
-            "array_job_id": "7000",
-            "array_task_id": 2,
-            "status": "requeue_ready",
-            "trainer_exit_code": 75,
-            "checkpoint_kind": "train",
-            "completed_updates": 1000,
-            "phase": "train",
-            "pending_eval_step": None,
-            "checkpoint_sha256": "f" * 64,
-            "checkpoint_file_identity": checkpoint_identity,
-            "final_eval_progress_sha256": None,
+            "submission_root": str(submission),
+            "claim_token": claim_token,
+            "scientific_output_fingerprint": "d" * 64,
         },
     )
-    monkeypatch.setattr(worker, "load_launch_context", lambda **_kwargs: context)
-    monkeypatch.setattr(worker, "resolve_checkpoint", lambda _context: checkpoint)
-    with pytest.raises(worker.LifecycleError, match="differs from the exact preclaim"):
-        worker.authenticated_requeue(
-            args, lambda *_args: pytest.fail("unbound scheduler config reached client")
+    calling_sha256: dict[str, str] = {}
+    for role in ("wave0", "wave1", "report"):
+        calling_path = journal / f"CALLING_{role.upper()}.json"
+        worker.seal_json(
+            calling_path,
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": worker.CAMPAIGN_ID,
+                "submission_sha256": submission_sha,
+                "claim_token": claim_token,
+                "role": role,
+                "job_name": names[role],
+                "scheduler_comment": comment,
+                "command": commands[role],
+                "transaction_lock": lock_binding,
+            },
         )
-    assert not (generation / worker.REQUEUE_CALLING_NAME).exists()
-
-
-@pytest.mark.parametrize("field", ["JobId", "ArrayJobId", "ArrayTaskId", "JobState"])
-def test_scontrol_show_rejects_duplicate_identity_or_state_field(field: str) -> None:
-    line = (
-        "JobId=7000_2 ArrayJobId=7000 ArrayTaskId=2 JobState=RUNNING "
-        f"{field}=forged\n"
+        calling_sha256[role] = worker.file_sha256(calling_path)
+    control = manifest["execution"]["scontrol"]
+    observation = contract["scheduler_preclaim"]["scheduler_control_plane"]
+    records = {}
+    hold_stdout = (
+        f"JobId={wave0} JobName={names['wave0']} Comment={comment} "
+        "JobState=PENDING Reason=JobHeldUser\n"
     )
-    with pytest.raises(worker.LifecycleError, match=field):
-        worker._scontrol_field(line, field)
+    records["wave0"] = {
+        "command": commands["wave0"],
+        "returncode": 0,
+        "stdout": f"{wave0}\n",
+        "stderr": "",
+        "reconciled_job_ids": [wave0],
+        "scheduler_control_plane": observation,
+        "calling_sha256": calling_sha256["wave0"],
+        "accepted_hold": {
+            "command": [control, "show", "job", wave0, "--oneliner"],
+            "returncode": 0,
+            "stdout": hold_stdout,
+            "stderr": "",
+            "state": "PENDING",
+            "reason": "JobHeldUser",
+            "scheduler_control_plane": observation,
+        },
+    }
+    for role, predecessor in (("wave1", "wave0"), ("report", "wave1")):
+        dependency = f"afterok:{job_ids[predecessor]}"
+        execution = manifest["execution"]
+        output = (
+            Path(manifest["paths"]["run_root"])
+            / "state/submission/logs"
+            / ("wave1_%A_%a.out" if role == "wave1" else "report_%j.out")
+        )
+        options = {
+            "account": "edgeai_tao-ptm_image-foundation-model-clip",
+            "cpus-per-task": str(execution["cpus_per_task"]),
+            "comment": comment,
+            "export": "NONE",
+            "job-name": names[role],
+            "mem": str(execution["memory_per_task"]),
+            "nodes": "1",
+            "ntasks-per-node": "1",
+            "open-mode": "a",
+            "output": str(output),
+            "parsable": "set",
+            "partition": str(
+                execution["gpu_partitions"]
+                if role == "wave1"
+                else execution["cpu_partition"]
+            ),
+            "qos": "normal",
+            "test-only": "set",
+            "time": str(execution["walltime"]),
+            "verbose": "3",
+            "dependency": dependency,
+            "kill-on-invalid-dep": "yes",
+        }
+        if role == "wave1":
+            options.update(
+                {
+                    "array": "0-19%20",
+                    "gpus-per-node": str(execution["gpus_per_task"]),
+                    "no-requeue": "no-requeue",
+                    "signal": f"B:USR1@{execution['signal_seconds_before_end']}",
+                }
+            )
+        partition = str(options["partition"]).split(",")[0]
+        stderr = "\n".join(
+            ["sbatch: defined options"]
+            + [f"sbatch: {key} : {value}" for key, value in options.items()]
+            + [
+                "sbatch: end of defined options",
+                f"sbatch: Job 123 to start at now using {execution['cpus_per_task']} "
+                f"processors on nodes fixture in partition {partition}",
+            ]
+        ) + "\n"
+        parsed = dag_evidence._parsed_test_only(
+            stderr, role=role, manifest=manifest, dependency=dependency
+        )
+        dependency_value = f"{dependency}_*(unfulfilled)"
+        dependency_stdout = (
+            f"JobId={job_ids[role]} JobName={names[role]} Comment={comment} "
+            f"JobState=PENDING Dependency={dependency_value} "
+            "KillOInInvalidDependent=Yes\n"
+        )
+        records[role] = {
+            "command": commands[role],
+            "returncode": 0,
+            "stdout": f"{job_ids[role]}\n",
+            "stderr": "",
+            "reconciled_job_ids": [job_ids[role]],
+            "scheduler_control_plane": observation,
+            "calling_sha256": calling_sha256[role],
+            "exact_dependency_test_only": {
+                "command": test_commands[role],
+                "returncode": 0,
+                "stdout": "",
+                "stderr": stderr,
+                "parsed": parsed,
+                "scheduler_control_plane": observation,
+                "zero_job_after_test": True,
+            },
+            "accepted_dependency": {
+                "command": [control, "show", "job", job_ids[role], "--oneliner"],
+                "returncode": 0,
+                "stdout": dependency_stdout,
+                "stderr": "",
+                "dependency": dependency_value,
+                "role": role,
+                "kill_on_invalid_dependency": "Yes",
+                "scheduler_control_plane": observation,
+            },
+        }
+    for role, ordinal, job_id in (
+        ("wave0", 3, wave0), ("wave1", 4, wave1), ("report", 5, report)
+    ):
+        worker.seal_json(
+            journal / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json",
+            {
+                "schema_version": 1,
+                "record": f"{role}_submitted",
+                "job_id": job_id,
+                **records[role],
+            },
+        )
+    authorization = {
+        "schema_version": 1,
+        "status": "authorized_two_wave_dag",
+        "campaign_id": worker.CAMPAIGN_ID,
+        "submission_sha256": submission_sha,
+        "array": "0-19%20",
+        "job_ids": {"wave0": wave0, "wave1": wave1, "report": report},
+        "dependencies": {
+            "wave0": "none", "wave1": f"afterok:{wave0}",
+            "report": f"afterok:{wave1}",
+        },
+        "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+        "within_wave_requeue": False,
+        "wave0_submitted_held": True,
+        "accepted_job_evidence_sha256": worker.stable_hash(records),
+        "authorized_at_utc": "2026-08-28T00:00:00Z",
+    }
+    worker.seal_json(submission / worker.SUBMISSION_AUTHORIZATION_NAME, authorization)
+    authorization_sha = worker.file_sha256(
+        submission / worker.SUBMISSION_AUTHORIZATION_NAME
+    )
+    receipt = {
+        "schema_version": 1,
+        "status": "committed_two_wave_dag",
+        "campaign_id": worker.CAMPAIGN_ID,
+        "submission_sha256": submission_sha,
+        "submission_authorization_sha256": authorization_sha,
+        "array": "0-19%20",
+        "wave0_array_job_id": wave0,
+        "wave1_array_job_id": wave1,
+        "report_job_id": report,
+        "wave1_dependency": f"afterok:{wave0}",
+        "report_dependency": f"afterok:{wave1}",
+        "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+        "within_wave_requeue": False,
+        "wave0_submitted_held": True,
+    }
+    worker.seal_json(submission / worker.SUBMISSION_RECEIPT_NAME, receipt)
+    worker.seal_json(
+        journal / "0006_DAG_AUTHORIZED.json",
+        {
+            "schema_version": 1,
+            "record": "dag_authorized",
+            "submission_authorization_sha256": authorization_sha,
+            "accepted_job_evidence_sha256": authorization[
+                "accepted_job_evidence_sha256"
+            ],
+            "job_ids": authorization["job_ids"],
+            "dependencies": authorization["dependencies"],
+        },
+    )
+    worker.seal_json(
+        journal / "0007_READY_TO_COMMIT.json",
+        {"schema_version": 1, "record": "ready_to_commit", **receipt},
+    )
+    return authorization, authorization_sha
+
+
+def test_submission_authorization_binds_both_waves_and_predecessor(
+    tmp_path: Path,
+) -> None:
+    submission = tmp_path / "submission"
+    submission.mkdir(mode=0o700)
+    authorization, authorization_sha = _write_dag_authorization(submission)
+    loaded, digest = worker.load_submission_authorization(
+        submission,
+        "c" * 64,
+        wave_index=0,
+        array_job_id="7000",
+        predecessor_array_job_id="none",
+    )
+    assert loaded == authorization and digest == authorization_sha
+    loaded, digest = worker.load_submission_authorization(
+        submission,
+        "c" * 64,
+        wave_index=1,
+        array_job_id="8000",
+        predecessor_array_job_id="7000",
+    )
+    assert loaded == authorization and digest == authorization_sha
+    for wave, array, predecessor, pattern in (
+        (0, "8000", "none", "current wave array"),
+        (1, "8000", "9999", "predecessor"),
+        (1, "7000", "7000", "current wave array"),
+    ):
+        with pytest.raises(worker.LifecycleError, match=pattern):
+            worker.load_submission_authorization(
+                submission,
+                "c" * 64,
+                wave_index=wave,
+                array_job_id=array,
+                predecessor_array_job_id=predecessor,
+            )
+
+
+@pytest.mark.parametrize("bad_id", (7000, True))
+@pytest.mark.parametrize(
+    "surface",
+    ("authorization", "receipt", "submitted_journal", "ready_journal"),
+)
+def test_submission_authorization_rejects_non_string_persisted_job_ids(
+    tmp_path: Path, surface: str, bad_id: object
+) -> None:
+    submission = tmp_path / f"submission-{surface}-{bad_id!r}"
+    submission.mkdir(mode=0o700)
+    _write_dag_authorization(submission)
+    paths = {
+        "authorization": submission / worker.SUBMISSION_AUTHORIZATION_NAME,
+        "receipt": submission / worker.SUBMISSION_RECEIPT_NAME,
+        "submitted_journal": submission / "journal/0003_WAVE0_SUBMITTED.json",
+        "ready_journal": submission / "journal/0007_READY_TO_COMMIT.json",
+    }
+    path = paths[surface]
+    value = worker.read_json(path)
+    if surface == "authorization":
+        value["job_ids"]["wave0"] = bad_id
+    elif surface in {"receipt", "ready_journal"}:
+        value["wave0_array_job_id"] = bad_id
+    else:
+        value["job_id"] = bad_id
+    path.chmod(0o600)
+    path.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o444)
+    before = {
+        str(item.relative_to(submission)): worker.file_sha256(item)
+        for item in submission.rglob("*")
+        if item.is_file()
+    }
+    with pytest.raises(worker.LifecycleError):
+        worker.load_submission_authorization(
+            submission,
+            "c" * 64,
+            wave_index=0,
+            array_job_id="7000",
+            predecessor_array_job_id="none",
+        )
+    after = {
+        str(item.relative_to(submission)): worker.file_sha256(item)
+        for item in submission.rglob("*")
+        if item.is_file()
+    }
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "filename,mutation,pattern",
+    [
+            (
+                "0003_WAVE0_SUBMITTED.json",
+                lambda value: {**value, "fixture_evidence": "forged"},
+                "accepted DAG scheduler evidence",
+        ),
+        (
+            "0006_DAG_AUTHORIZED.json",
+            lambda value: {**value, "accepted_job_evidence_sha256": "f" * 64},
+            "durable DAG authorization journal",
+        ),
+        (
+            "0003_WAVE0_SUBMITTED.json",
+            lambda value: {**value, "returncode": True},
+            "accepted DAG scheduler evidence",
+        ),
+        (
+            "0003_WAVE0_SUBMITTED.json",
+            lambda value: {
+                **value,
+                "scheduler_control_plane": {
+                    **value["scheduler_control_plane"],
+                    "schema_version": True,
+                },
+            },
+            "accepted DAG scheduler evidence",
+        ),
+        (
+            "0007_READY_TO_COMMIT.json",
+            lambda value: {**value, "report_job_id": "9999"},
+            "durable ready-to-commit journal",
+        ),
+    ],
+)
+def test_submission_authorization_reconstructs_all_durable_dag_journals(
+    tmp_path: Path, filename: str, mutation, pattern: str
+) -> None:
+    submission = tmp_path / "submission"
+    submission.mkdir(mode=0o700)
+    _write_dag_authorization(submission)
+    path = submission / "journal" / filename
+    value = worker.read_json(path)
+    path.chmod(0o600)
+    path.write_text(
+        json.dumps(mutation(value), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o444)
+    with pytest.raises(worker.LifecycleError, match=pattern):
+        worker.load_submission_authorization(
+            submission,
+            "c" * 64,
+            wave_index=0,
+            array_job_id="7000",
+            predecessor_array_job_id="none",
+        )
+
+
+def test_submission_authorization_rejects_noncanonical_calling_rewrite(
+    tmp_path: Path,
+) -> None:
+    submission = tmp_path / "submission"
+    submission.mkdir(mode=0o700)
+    _write_dag_authorization(submission)
+    calling_path = submission / "journal" / "CALLING_WAVE0.json"
+    calling = worker.read_json(calling_path)
+    calling_path.chmod(0o600)
+    calling_path.write_text(
+        json.dumps(calling, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    calling_path.chmod(0o444)
+    with pytest.raises(worker.LifecycleError, match="calling artifact bytes"):
+        worker.load_submission_authorization(
+            submission,
+            "c" * 64,
+            wave_index=0,
+            array_job_id="7000",
+            predecessor_array_job_id="none",
+        )
+
+
+def test_wave_zero_complete_triplet_allows_only_exact_wave_one_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del monkeypatch
+    args = _lineage_args(task_index=2)
+    task = tmp_path / "task"
+    wave0 = worker.generation_root_for(task, 0)
+    wave0.mkdir(parents=True)
+    context = {"launch": {"launch_sha256": "d" * 64}}
+    complete = {
+        "status": "complete",
+        "completed_updates": worker.TOTAL_UPDATES,
+        "checkpoint_sha256": "f" * 64,
+        "completion_sha256": "1" * 64,
+    }
+    marker = {
+        **worker._expected_wave0_base(args, context),
+        **complete,
+        "status": "worker_complete",
+    }
+    _write_json(wave0 / worker.GENERATION_COMPLETE_NAME, marker)
+    _write_json(task / worker.TASK_COMPLETE_NAME, marker)
+    evidence = worker._verify_wave0_complete_triplet(
+        args, task, context, {"kind": "complete", "complete": complete}
+    )
+    assert evidence == worker.file_sha256(wave0 / worker.GENERATION_COMPLETE_NAME)
+    _write_json(
+        wave0 / worker.CONTINUATION_READY_NAME,
+        {
+            **worker._expected_wave0_base(args, context),
+            "status": "continuation_ready",
+        },
+    )
+    with pytest.raises(worker.LifecycleError, match="conflicts"):
+        worker._verify_wave0_complete_triplet(
+            args, task, context, {"kind": "complete", "complete": complete}
+        )
+
+
+def test_wave_one_usr1_is_durable_failure_without_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _lineage_args(task_index=2)
+    context = {
+        "submission_root": tmp_path / "submission",
+        "launch": {"launch_sha256": "d" * 64},
+    }
+    task = worker.task_root_for(context["submission_root"], args.cell_index)
+    generation = worker.generation_root_for(task, 1)
+    generation.mkdir(parents=True)
+    _write_json(generation / worker.USR1_REQUEST_NAME, {"signal": "USR1"})
+    checkpoint = {
+        "kind": "train",
+        "reason": "graceful-stop:usr1",
+        "completed_updates": 20_000,
+        "phase": "train",
+        "pending_eval_step": None,
+        "checkpoint_sha256": "f" * 64,
+        "checkpoint_file_identity": {
+            "device": 1, "inode": 2, "size": 3, "mtime_ns": 4, "ctime_ns": 5,
+        },
+        "progress": None,
+    }
+    monkeypatch.setattr(worker, "inspect_run", lambda _context: dict(checkpoint))
+    monkeypatch.setattr(
+        worker, "_verify_wave0_ready_lineage", lambda *_args: (dict(checkpoint), "a" * 64)
+    )
+    monkeypatch.setattr(worker, "_spawn_trainer", lambda *_args: worker.GRACEFUL_EXIT_CODE)
+
+    class Relay:
+        @staticmethod
+        def service_pending() -> None:
+            return None
+
+    with pytest.raises(worker.LifecycleError, match="no third wave"):
+        worker._execute_generation(args, context, task, generation, Relay())
+    incomplete = worker.read_json(generation / worker.WAVE_INCOMPLETE_NAME)
+    assert incomplete["status"] == "wave_one_incomplete_no_successor"
+    assert incomplete["completed_updates"] == 20_000
+    assert not (generation / worker.CONTINUATION_READY_NAME).exists()
+
+
+def test_wave_zero_usr1_seals_exact_ready_without_scheduler_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submission = tmp_path / "submission"
+    args = argparse.Namespace(
+        submission_sha256="c" * 64,
+        cell_index=4,
+        wave_index=0,
+        array_job_id="7000",
+        array_task_id=4,
+        predecessor_array_job_id="none",
+        _submission_authorization_sha256="e" * 64,
+    )
+    context = {
+        "submission_root": submission,
+        "launch": {"launch_sha256": "d" * 64},
+    }
+    task = worker.task_root_for(submission, args.cell_index)
+    generation = worker.generation_root_for(task, 0)
+    generation.mkdir(parents=True)
+    _write_json(generation / worker.USR1_REQUEST_NAME, {"signal": "USR1"})
+    checkpoint = {
+        "kind": "final_pending",
+        "reason": "graceful-stop:usr1",
+        "completed_updates": worker.TOTAL_UPDATES,
+        "phase": "final_eval",
+        "pending_eval_step": worker.TOTAL_UPDATES,
+        "checkpoint_sha256": "f" * 64,
+        "checkpoint_file_identity": {
+            "device": 1, "inode": 2, "size": 3, "mtime_ns": 4, "ctime_ns": 5,
+        },
+        "progress": {"sha256": "1" * 64},
+    }
+    monkeypatch.setattr(worker, "_claim_fresh_run", lambda _context: None)
+    monkeypatch.setattr(worker, "_spawn_trainer", lambda *_args: 75)
+    monkeypatch.setattr(worker, "inspect_run", lambda _context: dict(checkpoint))
+
+    class Relay:
+        @staticmethod
+        def service_pending() -> None:
+            return None
+
+    assert worker._execute_generation(args, context, task, generation, Relay()) == 75
+    ready = worker.read_json(generation / worker.CONTINUATION_READY_NAME)
+    assert set(ready) == worker.CONTINUATION_READY_FIELDS
+    assert ready["wave_index"] == 0 and ready["array_job_id"] == "7000"
+    assert ready["checkpoint_sha256"] == "f" * 64
+    assert ready["final_eval_progress_sha256"] == "1" * 64
+    assert not (generation / worker.WAVE_INCOMPLETE_NAME).exists()
+
+
+def test_wave_one_exact_complete_triplet_is_noop_and_never_spawns_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _lineage_args(task_index=5)
+    submission = tmp_path / "submission"
+    context = {
+        "submission_root": submission,
+        "launch": {"launch_sha256": "d" * 64},
+    }
+    task = worker.task_root_for(submission, args.cell_index)
+    wave0 = worker.generation_root_for(task, 0)
+    wave1 = worker.generation_root_for(task, 1)
+    wave1.mkdir(parents=True)
+    complete = {
+        "status": "complete",
+        "completed_updates": worker.TOTAL_UPDATES,
+        "checkpoint_sha256": "f" * 64,
+        "completion_sha256": "1" * 64,
+    }
+    wave0_marker = {
+        **worker._expected_wave0_base(args, context),
+        **complete,
+        "status": "worker_complete",
+    }
+    _write_json(wave0 / worker.GENERATION_COMPLETE_NAME, wave0_marker)
+    _write_json(task / worker.TASK_COMPLETE_NAME, wave0_marker)
+    monkeypatch.setattr(
+        worker,
+        "inspect_run",
+        lambda _context: {
+            "kind": "complete",
+            "checkpoint_sha256": "f" * 64,
+            "complete": complete,
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_spawn_trainer",
+        lambda *_args: pytest.fail("wave-one no-op spawned the trainer"),
+    )
+
+    class Relay:
+        @staticmethod
+        def service_pending() -> None:
+            return None
+
+    assert worker._execute_generation(args, context, task, wave1, Relay()) == 0
+    marker = worker.read_json(wave1 / worker.GENERATION_COMPLETE_NAME)
+    assert marker["status"] == "wave_one_noop_after_wave_zero_complete"
+    assert marker["wave_index"] == 1
+    assert worker.read_json(task / worker.TASK_COMPLETE_NAME) == wave0_marker
 
 
 def test_train_entry_forbidden_environment_is_fail_closed() -> None:

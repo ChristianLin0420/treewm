@@ -105,9 +105,15 @@ SCHEDULER_CONTROL_PLANE = {
         "plugin binaries, and shared libraries are trusted mutable external runtime"
     ),
 }
-REPORT_DEPENDENCY_TEST_REQUIREMENT = {
-    "phase": "after_train_reconciliation_before_report_submission",
-    "dependency": "afterok:<accepted_train_array_job_id>",
+DEPENDENCY_TEST_REQUIREMENT = {
+    "phases": [
+        "after_wave0_reconciliation_before_wave1_submission",
+        "after_wave1_reconciliation_before_report_submission",
+    ],
+    "dependencies": [
+        "afterok:<accepted_wave0_array_job_id>",
+        "afterok:<accepted_wave1_array_job_id>",
+    ],
     "kill_on_invalid_dep": "yes",
     "required": True,
 }
@@ -562,7 +568,7 @@ def bootstrap_submission(
     _require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
     _require(contract.get("schema_version") == 1, "submission contract schema differs")
     _require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
-    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch7", "campaign differs")
+    _require(contract.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch8", "campaign differs")
     _require(contract.get("formal_validation") is False, "formal-validation label differs")
     _require(contract.get("array") == "0-19%20" and contract.get("fresh_start") is True, "submission lifecycle differs")
     _require(
@@ -575,25 +581,26 @@ def bootstrap_submission(
         and scheduler_preclaim.get("schema_version") == 1
         and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
         and scheduler_preclaim.get("campaign_id")
-        == "treewm-executable-prefix-repair-pilot-v1-launch7"
-        and scheduler_preclaim.get("scheduler_calls") == 7
+        == "treewm-executable-prefix-repair-pilot-v1-launch8"
+        and scheduler_preclaim.get("scheduler_calls") == 10
         and scheduler_preclaim.get("scheduler_mutation_calls") == 0
         and scheduler_preclaim.get("persistent_writes_performed") == 0,
         "scheduler preclaim differs",
     )
     _require(
         isinstance(scheduler_preclaim.get("scheduler_probe_commands"), list)
-        and len(scheduler_preclaim["scheduler_probe_commands"]) == 7
-        and scheduler_preclaim.get("report_dependency_test")
-        == REPORT_DEPENDENCY_TEST_REQUIREMENT
+        and len(scheduler_preclaim["scheduler_probe_commands"]) == 10
+        and scheduler_preclaim.get("dependency_tests")
+        == DEPENDENCY_TEST_REQUIREMENT
         and scheduler_preclaim.get("zero_job_proof")
         == {
             "job_names": {
-                "train": "exp23-launch7-scheduler-test-train",
-                "report": "exp23-launch7-scheduler-test-report",
+                "wave0": "exp23-launch8-scheduler-test-wave0",
+                "wave1": "exp23-launch8-scheduler-test-wave1",
+                "report": "exp23-launch8-scheduler-test-report",
             },
-            "pre_queries": 2,
-            "post_queries": 2,
+            "pre_queries": 3,
+            "post_queries": 3,
             "matching_jobs_before": 0,
             "matching_jobs_after": 0,
         },
@@ -605,8 +612,8 @@ def bootstrap_submission(
         and scheduler_fallback.get("schema_version") == 1
         and scheduler_fallback.get("purpose")
         == (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         )
         and scheduler_fallback.get("encoding") == "base64"
         and isinstance(scheduler_fallback.get("payload_base64"), str)
@@ -655,8 +662,10 @@ def bootstrap_submission(
         "trainer bootstrap smoke fields differ",
     )
     _require(
-        smoke.get("schema_version") == 1
+        type(smoke.get("schema_version")) is int
+        and smoke.get("schema_version") == 1
         and smoke.get("status") == "sealed_trainer_hydra_composition_verified"
+        and type(smoke.get("cell_index")) is int
         and smoke.get("cell_index") == 0
         and smoke.get("python_flags") == ["-P", "-S", "-B"]
         and smoke.get("entry_relative_path") == str(PACKAGE_RELATIVE / "train_entry.py")
@@ -664,7 +673,9 @@ def bootstrap_submission(
         and smoke.get("config_package_sha256") == SNAPSHOT_IMPORT_FILES["configs/__init__.py"]
         and smoke.get("snapshot_inventory_sha256") == contract.get("snapshot_inventory_sha256")
         and smoke.get("cuda_visible_devices") == ""
+        and type(smoke.get("persistent_writes_performed")) is int
         and smoke.get("persistent_writes_performed") == 0
+        and type(smoke.get("scheduler_calls")) is int
         and smoke.get("scheduler_calls") == 0,
         "trainer bootstrap smoke contract differs",
     )
@@ -989,7 +1000,7 @@ def hydra_composition_smoke(argv: Sequence[str] | None = None) -> int:
     )
     _require(
         launch.get("schema_version") == 1
-        and launch.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch7",
+        and launch.get("campaign_id") == "treewm-executable-prefix-repair-pilot-v1-launch8",
         "composition smoke launch identity differs",
     )
     cell = launch.get("cell")

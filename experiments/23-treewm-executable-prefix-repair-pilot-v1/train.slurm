@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch7
+#SBATCH --job-name=treewm-executable-prefix-pilot-v1-launch8
 #SBATCH --partition=polar4,polar3,polar,grizzly
 #SBATCH --account=edgeai_tao-ptm_image-foundation-model-clip
 #SBATCH --qos=normal
 #SBATCH --time=04:00:00
-#SBATCH --requeue
+#SBATCH --no-requeue
 #SBATCH --signal=B:USR1@420
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,16 +21,24 @@ umask 077
 PYTHON_EXECUTABLE=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python
 export PATH=/usr/bin:/bin
 
-if [[ "$#" -ne 3 ]]; then
-    echo "usage: train.slurm SNAPSHOT_ROOT SUBMISSION_ROOT SUBMISSION_SHA256" >&2
+if [[ "$#" -ne 5 ]]; then
+    echo "usage: train.slurm SNAPSHOT_ROOT SUBMISSION_ROOT SUBMISSION_SHA256 WAVE_INDEX PREDECESSOR_ARRAY_JOB_ID" >&2
     exit 2
 fi
 SNAPSHOT_ROOT=$1
 SUBMISSION_ROOT=$2
 SUBMISSION_SHA256=$3
+WAVE_INDEX=$4
+PREDECESSOR_ARRAY_JOB_ID=$5
 case "$SNAPSHOT_ROOT" in /*) ;; *) echo "snapshot root must be absolute" >&2; exit 2 ;; esac
 case "$SUBMISSION_ROOT" in /*) ;; *) echo "submission root must be absolute" >&2; exit 2 ;; esac
 [[ "$SUBMISSION_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "submission SHA256 is malformed" >&2; exit 2; }
+[[ "$WAVE_INDEX" == 0 || "$WAVE_INDEX" == 1 ]] || { echo "wave index must be 0 or 1" >&2; exit 2; }
+if [[ "$WAVE_INDEX" == 0 ]]; then
+    [[ "$PREDECESSOR_ARRAY_JOB_ID" == none ]] || { echo "wave zero must not name a predecessor" >&2; exit 2; }
+else
+    [[ "$PREDECESSOR_ARRAY_JOB_ID" =~ ^[0-9]+$ ]] || { echo "wave one predecessor job ID is malformed" >&2; exit 2; }
+fi
 [[ -d "$SNAPSHOT_ROOT" && ! -L "$SNAPSHOT_ROOT" ]] || { echo "snapshot root is unavailable or symlinked" >&2; exit 2; }
 [[ -d "$SUBMISSION_ROOT" && ! -L "$SUBMISSION_ROOT" ]] || { echo "submission root is unavailable or symlinked" >&2; exit 2; }
 [[ -f "$SUBMISSION_ROOT/SUBMISSION_CONTRACT.json" && ! -L "$SUBMISSION_ROOT/SUBMISSION_CONTRACT.json" ]] || {
@@ -55,17 +63,21 @@ case "$SUBMISSION_ROOT" in /*) ;; *) echo "submission root must be absolute" >&2
     exit 2
 }
 RESTART_COUNT=${SLURM_RESTART_COUNT:-0}
-[[ "$RESTART_COUNT" =~ ^[0-9]+$ ]] || { echo "restart count is malformed" >&2; exit 2; }
+[[ "$RESTART_COUNT" == 0 ]] || { echo "within-wave scheduler requeue is forbidden" >&2; exit 2; }
+if [[ "$WAVE_INDEX" == 1 && "$SLURM_ARRAY_JOB_ID" == "$PREDECESSOR_ARRAY_JOB_ID" ]]; then
+    echo "wave one must be a distinct array job" >&2
+    exit 2
+fi
 
 PACKAGE_DIR="$SNAPSHOT_ROOT/experiments/23-treewm-executable-prefix-repair-pilot-v1"
 WORKER="$PACKAGE_DIR/worker.py"
 [[ -f "$WORKER" && ! -L "$WORKER" ]] || { echo "snapshot worker is unavailable or symlinked" >&2; exit 2; }
 CELL_LABEL=$(printf '%02d' "$SLURM_ARRAY_TASK_ID")
 TASK_ROOT="$SUBMISSION_ROOT/tasks/cell-$CELL_LABEL"
-GENERATION_ROOT="$TASK_ROOT/requeue/$RESTART_COUNT"
+GENERATION_ROOT="$TASK_ROOT/waves/$WAVE_INDEX"
 SIGNAL_READY="$GENERATION_ROOT/WORKER_SIGNAL_READY.json"
-REQUEUE_READY="$GENERATION_ROOT/REQUEUE_READY.json"
-REQUEUE_CALLING="$GENERATION_ROOT/REQUEUE_CALLING.json"
+CONTINUATION_READY="$GENERATION_ROOT/CONTINUATION_READY.json"
+WAVE_INCOMPLETE="$GENERATION_ROOT/WAVE_INCOMPLETE.json"
 TASK_COMPLETE="$TASK_ROOT/WORKER_COMPLETE.json"
 TASK_CANCEL="$TASK_ROOT/CANCEL_REQUESTED.json"
 GLOBAL_CANCEL="$SUBMISSION_ROOT/CANCEL_REQUESTED.json"
@@ -73,9 +85,10 @@ COMMON_ARGS=(
     --submission-root "$SUBMISSION_ROOT"
     --submission-sha256 "$SUBMISSION_SHA256"
     --cell-index "$SLURM_ARRAY_TASK_ID"
-    --restart-count "$RESTART_COUNT"
+    --wave-index "$WAVE_INDEX"
     --array-job-id "$SLURM_ARRAY_JOB_ID"
     --array-task-id "$SLURM_ARRAY_TASK_ID"
+    --predecessor-array-job-id "$PREDECESSOR_ARRAY_JOB_ID"
 )
 
 worker_pid=
@@ -112,13 +125,6 @@ on_usr1() {
 }
 
 on_term() {
-    # A successful control-plane requeue terminates the old batch allocation.  Once
-    # CALLING is immutable that TERM is not a user cancellation.  cancel.py writes
-    # the global latch before scancel, so an authorized cancellation still wins in
-    # the replacement generation.
-    if [[ -f "$REQUEUE_CALLING" && ! -L "$REQUEUE_CALLING" ]]; then
-        return
-    fi
     record_and_forward TERM
 }
 
@@ -169,14 +175,18 @@ if [[ "$signal_record_failed" -ne 0 ]]; then
     exit 2
 fi
 
-if [[ "$worker_status" -ne 75 || ! -f "$REQUEUE_READY" || -L "$REQUEUE_READY" ]]; then
-    echo "worker failed without immutable requeue readiness (status=$worker_status)" >&2
+if [[ "$WAVE_INDEX" != 0 || "$worker_status" -ne 75 || ! -f "$CONTINUATION_READY" || -L "$CONTINUATION_READY" ]]; then
+    if [[ "$WAVE_INDEX" == 1 && -f "$WAVE_INCOMPLETE" && ! -L "$WAVE_INCOMPLETE" ]]; then
+        echo "wave one exhausted incomplete; the fixed DAG has no successor" >&2
+        exit 2
+    fi
+    echo "worker failed without valid wave-zero continuation readiness (status=$worker_status)" >&2
     exit "$worker_status"
 fi
 if cancel_is_latched; then
-    echo "cancellation raced with worker requeue readiness" >&2
+    echo "cancellation raced with wave-zero continuation readiness" >&2
     exit 76
 fi
-
-"$PYTHON_EXECUTABLE" -I -S -B "$WORKER" requeue "${COMMON_ARGS[@]}"
+# The controller predeclared wave one before releasing this array.  Compute-side
+# execution never contacts the scheduler; exit zero satisfies the afterok edge.
 exit 0

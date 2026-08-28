@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import copy
+import fcntl
 import importlib.util
 import hashlib
 import inspect
@@ -119,8 +121,8 @@ def scheduler_fallback(submit) -> dict:
     return {
         "schema_version": 1,
         "purpose": (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         ),
         "encoding": "base64",
         "payload_base64": submit.base64.b64encode(payload).decode("ascii"),
@@ -237,13 +239,13 @@ def interpreter_identity(submit):
     }
 
 
-def test_launch7_transaction_lock_path_is_exact(submit):
+def test_launch8_transaction_lock_path_is_exact(submit):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     run_root = Path(manifest["paths"]["run_root"])
     submission_root = run_root / "state" / "submission"
     expected = run_root.parents[1] / manifest["paths"]["transaction_lock"]
     assert submit._transaction_lock_path(submission_root) == expected
-    assert expected.name == ".exp23-8fc3c9e0775ae4d7.transaction.lock"
+    assert expected.name == ".exp23-c85fcaba919d617f.transaction.lock"
 
 
 def test_default_cli_is_read_only_and_rejects_wrong_interpreter(tmp_path):
@@ -1100,13 +1102,163 @@ def test_late_report_parity_and_accepted_dependency_precede_ready(submit):
     source = inspect.getsource(submit._submit_campaign_impl)
     late = source.index("report_test_completed, report_test_observation")
     zero_query = source.index("_assert_job_absent(", late)
-    zero_job = source.index("zero_job_after_test")
+    zero_job = source.index("zero_job_after_test", zero_query)
     real_report = source.index("report_id, report_record = _submit_one")
-    accepted = source.index("dependency_evidence = _accepted_report_dependency_evidence")
+    accepted = source.index("report_dependency_evidence = _accepted_dependency_evidence")
     journal = source.index('"REPORT_SUBMITTED"')
     ready = source.index('"READY_TO_COMMIT"')
-    cancellation = source.index("cancellation = _cancel_exact")
+    cancellation = source.index(
+        "abort_evidence = _initial_exception_reconcile_and_cancel", ready
+    )
     assert late < zero_query < zero_job < real_report < accepted < journal < ready < cancellation
+
+
+def test_two_wave_transaction_killpoint_partition_is_fail_closed(submit):
+    source = inspect.getsource(submit._submit_campaign_impl)
+    wave0 = source.index("wave0_id, wave0_record = _submit_one")
+    hold = source.index("wave0_hold = _accepted_wave0_hold_evidence")
+    wave1 = source.index("wave1_id, wave1_record = _submit_one")
+    wave1_dependency = source.index(
+        "wave1_dependency_evidence = _accepted_dependency_evidence"
+    )
+    report = source.index("report_id, report_record = _submit_one")
+    report_dependency = source.index(
+        "report_dependency_evidence = _accepted_dependency_evidence"
+    )
+    authorization = source.index('"SUBMISSION_AUTHORIZATION.json"')
+    authorization_journal = source.index('"DAG_AUTHORIZED"')
+    ready_journal = source.index('"READY_TO_COMMIT"')
+    ready_latch = source.index("ready_to_commit = True")
+    receipt = source.index('"SUBMISSION_RECEIPT.json"')
+    release = source.index("release_evidence = _release_authorized_wave0")
+    release_journal = source.index('"WAVE0_RELEASED"')
+    exception = source.index("except BaseException as exc:")
+    recovery_required = source.index("if ready_to_commit:", exception)
+    cancel_context = source.index("cancel_context = {", recovery_required)
+    reconcile = source.index(
+        "abort_evidence = _initial_exception_reconcile_and_cancel", cancel_context
+    )
+    assert (
+        wave0
+        < hold
+        < wave1
+        < wave1_dependency
+        < report
+        < report_dependency
+        < authorization
+        < authorization_journal
+        < ready_journal
+        < ready_latch
+        < receipt
+        < release
+        < release_journal
+        < exception
+    )
+    # Every cut before READY enters exact three-role reconciliation/cancellation;
+    # every cut from READY onward raises for recovery before either can execute.
+    assert recovery_required < cancel_context < reconcile
+    helper = inspect.getsource(submit._initial_exception_reconcile_and_cancel)
+    assert 'roles = ("wave0", "wave1", "report")' in helper
+    assert "_append_recovery_cancel_attempt(" in helper
+
+
+def test_recovery_orders_receipt_reconstruction_before_idempotent_release(submit):
+    source = inspect.getsource(submit._recover_transaction_locked)
+    committed = source.index("if _lexical_exists(receipt_path):")
+    ready = source.index("if _lexical_exists(ready_path):")
+    validate_authorization = source.index(
+        "_validated_dag_authorization(submission_root, submission_sha256, receipt)",
+        ready,
+    )
+    seal_receipt = source.index("exclusive_json(receipt_path, receipt)", ready)
+    finish = source.index("return finish_committed_receipt(", seal_receipt)
+    abort_recovery = source.index("prior_recovery_path", ready)
+    assert committed < ready < validate_authorization < seal_receipt < finish < abort_recovery
+
+
+def _release_evidence(submit, *, reason="None", job_id="7000", job_name="wave0"):
+    observation = scheduler_observation(submit)
+    stdout = (
+        f"JobId={job_id} JobName={job_name} JobState=PENDING "
+        f"Reason={reason} Comment=treewm-exp23:{'c' * 64}\n"
+    )
+    return {
+        "release_command": ["scontrol", "release", job_id],
+        "release_returncode": 0,
+        "release_stdout": "",
+        "release_stderr": "",
+        "show_command": ["scontrol", "show", "job", job_id, "--oneliner"],
+        "show_returncode": 0,
+        "show_stdout": stdout,
+        "show_stderr": "",
+        "state": "PENDING",
+        "reason": reason,
+        "release_scheduler_control_plane": observation,
+        "show_scheduler_control_plane": observation,
+    }
+
+
+def test_durable_wave0_release_evidence_is_exact_and_supports_crash_after_release(submit):
+    expected = scheduler_observation(submit)
+    full = _release_evidence(submit)
+    assert submit._validated_wave0_release_evidence(
+        full,
+        scontrol="scontrol",
+        job_id="7000",
+        job_name="wave0",
+        comment="treewm-exp23:" + "c" * 64,
+        expected_observation=expected,
+    ) == full
+    already_released = {
+        **full,
+        "release_command": None,
+        "release_returncode": None,
+        "release_scheduler_control_plane": None,
+    }
+    assert submit._validated_wave0_release_evidence(
+        already_released,
+        scontrol="scontrol",
+        job_id="7000",
+        job_name="wave0",
+        comment="treewm-exp23:" + "c" * 64,
+        expected_observation=expected,
+    ) == already_released
+
+
+@pytest.mark.parametrize(
+    "mutation,pattern",
+    [
+        ("held", "identity/state"),
+        ("wrong-job", "identity/state"),
+        ("wrong-command", "command/result"),
+        ("wrong-control", "command/result"),
+        ("extra", "fields"),
+    ],
+)
+def test_durable_wave0_release_evidence_rejects_forgery(submit, mutation, pattern):
+    expected = scheduler_observation(submit)
+    evidence = _release_evidence(submit)
+    if mutation == "held":
+        evidence = _release_evidence(submit, reason="JobHeldUser")
+    elif mutation == "wrong-job":
+        evidence["show_stdout"] = evidence["show_stdout"].replace(
+            "JobId=7000", "JobId=9999"
+        )
+    elif mutation == "wrong-command":
+        evidence["release_command"] = ["scontrol", "release", "9999"]
+    elif mutation == "wrong-control":
+        evidence["release_scheduler_control_plane"] = {"forged": True}
+    else:
+        evidence["unexpected"] = True
+    with pytest.raises(submit.SubmissionError, match=pattern):
+        submit._validated_wave0_release_evidence(
+            evidence,
+            scontrol="scontrol",
+            job_id="7000",
+            job_name="wave0",
+            comment="treewm-exp23:" + "c" * 64,
+            expected_observation=expected,
+        )
 
 
 def test_snapshot_verifier_rejects_extra_directory_and_writable_root(submit, tmp_path):
@@ -1173,7 +1325,7 @@ def _trainer_smoke_unit_inputs(submit, tmp_path: Path):
     config = {"seed": 110, "objective_version": "smoke"}
     launch_body = {
         "schema_version": 1,
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
         "cell": {"index": 0, "seed": 110},
         "argv": [
             "/pinned/python",
@@ -1364,7 +1516,7 @@ def _real_trainer_smoke_case(
         )
     launch_body = {
         "schema_version": 1,
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
         "cell": {"index": 0, "seed": 110},
         "argv": [
             manifest["paths"]["python"],
@@ -2662,6 +2814,47 @@ def test_nonzero_sbatch_preserves_parseable_exact_id(submit, tmp_path, monkeypat
     assert caught.value.job_ids == ("4312",)
 
 
+@pytest.mark.parametrize("response", ("0\n", "0007\n"))
+def test_noncanonical_sbatch_id_is_never_a_provenance_claim(
+    submit, tmp_path, monkeypatch, response
+):
+    monkeypatch.setattr(
+        submit,
+        "_scheduler_control_plane_observation",
+        lambda _value: scheduler_observation(submit),
+    )
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls = 0
+
+    def runner(command, cwd, environment, inherited_fds):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                command, 1, stdout=response, stderr="lost response"
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"7|exact|{expected_user}|PENDING|token\n",
+            stderr="",
+        )
+
+    with pytest.raises(submit.SchedulerSubmissionError) as caught:
+        submit._submit_one(
+            ["sbatch"],
+            job_name="exact",
+            comment="token",
+            squeue="squeue",
+            cwd=tmp_path,
+            runner=runner,
+            control_plane=scheduler_contract(),
+            fallback=scheduler_fallback(submit),
+        )
+    assert caught.value.job_ids == ("7",)
+    assert response.strip() not in caught.value.job_ids
+
+
 def test_federated_sbatch_suffix_is_rejected(submit, tmp_path, monkeypatch):
     monkeypatch.setattr(
         submit, "_scheduler_control_plane_observation", lambda _value: scheduler_observation(submit)
@@ -2773,45 +2966,21 @@ def test_live_fallback_roundtrip_and_memfd_squeue_are_read_only(submit):
     assert observation["mode"] == "sealed_original_config_fallback"
 
 
-def test_live_fd_pinned_scontrol_and_preclaim_memfd_can_show_config_read_only(
-    submit, worker
-):
-    control_plane = scheduler_contract()
-    fallback = submit._scheduler_fallback_config(control_plane)
-    binding, payload = submit._validated_scheduler_fallback(
-        fallback, control_plane, fallback["source_control_plane"]
-    )
-    directory_fd = executable_fd = config_fd = None
-    try:
-        directory_fd, executable_fd, _info, executable_sha256 = (
-            worker._open_root_owned_scheduler_executable(
-                Path("/usr/local/bin/scontrol")
-            )
-        )
-        assert len(executable_sha256) == 64
-        config_fd = worker._sealed_scheduler_config_descriptor(payload)
-        environment = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "LANG": "C",
-            "LC_ALL": "C",
-            "SLURM_CONF": f"/proc/self/fd/{config_fd}",
-        }
-        completed = worker._default_scheduler_runner(
-            [f"/proc/self/fd/{executable_fd}", "show", "config"],
-            REPO,
-            environment,
-            (config_fd, executable_fd),
-        )
-        assert completed.returncode == 0, completed.stderr
-        assert "ClusterName" in completed.stdout and "cs-oci-ord" in completed.stdout
-        assert hashlib.sha256(payload).hexdigest() == binding["sha256"]
-    finally:
-        for descriptor in (config_fd, executable_fd, directory_fd):
-            if descriptor is not None:
-                os.close(descriptor)
+def test_compute_worker_exposes_no_scheduler_client_surface(submit, worker):
+    del submit
+    source = inspect.getsource(worker).lower()
+    for scheduler_client in ("scontrol", "squeue", "sbatch", "scancel", "sacct"):
+        assert scheduler_client not in source
+    for removed_api in (
+        "authenticated_requeue",
+        "_open_root_owned_scheduler_executable",
+        "_sealed_scheduler_config_descriptor",
+        "_default_scheduler_runner",
+    ):
+        assert not hasattr(worker, removed_api)
 
 
-def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
+def test_scheduler_preclaim_is_exactly_ten_read_only_calls(
     submit, monkeypatch
 ):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
@@ -2846,7 +3015,10 @@ def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
         if executable == "squeue":
             return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
         assert executable == "sbatch" and "--test-only" in values
-        role = "train" if any(str(value).endswith("train.slurm") for value in values) else "report"
+        if any(str(value).endswith("report.slurm") for value in values):
+            role = "report"
+        else:
+            role = "wave0" if "--hold" in values else "wave1"
         execution = manifest["execution"]
         job_name = next(value.split("=", 1)[1] for value in values if value.startswith("--job-name="))
         comment = next(value.split("=", 1)[1] for value in values if value.startswith("--comment="))
@@ -2865,7 +3037,7 @@ def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
             "parsable": "set",
             "partition": (
                 str(execution["gpu_partitions"])
-                if role == "train"
+                if role in {"wave0", "wave1"}
                 else str(execution["cpu_partition"])
             ),
             "qos": "normal",
@@ -2873,18 +3045,20 @@ def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
             "time": str(execution["walltime"]),
             "verbose": "3",
         }
-        if role == "train":
+        if role in {"wave0", "wave1"}:
             options.update(
                 {
                     "array": "0-19%20",
                     "gpus-per-node": str(execution["gpus_per_task"]),
-                    "requeue": "requeue",
+                    "no-requeue": "no-requeue",
                     "signal": f"B:USR1@{execution['signal_seconds_before_end']}",
                 }
             )
+            if role == "wave0":
+                options["hold"] = "set"
         partition = (
             str(execution["gpu_partitions"]).split(",")[0]
-            if role == "train"
+            if role in {"wave0", "wave1"}
             else str(execution["cpu_partition"])
         )
         stderr = "\n".join(
@@ -2898,10 +3072,10 @@ def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
         return subprocess.CompletedProcess(values, 0, stdout="", stderr=stderr + "\n")
 
     result = submit.scheduler_preclaim_test(REPO, manifest, runner=runner)
-    assert result["scheduler_calls"] == 7
+    assert result["scheduler_calls"] == 10
     assert result["scheduler_mutation_calls"] == 0
-    assert len(commands) == 7
-    assert [Path(command[0]).name for command in commands].count("sbatch") == 2
+    assert len(commands) == 10
+    assert [Path(command[0]).name for command in commands].count("sbatch") == 3
     assert all(
         Path(command[0]).name in {"scontrol", "squeue", "sbatch"}
         for command in commands
@@ -2910,15 +3084,18 @@ def test_scheduler_preclaim_is_exactly_seven_read_only_calls(
         Path(command[0]).name != "sbatch" or "--test-only" in command
         for command in commands
     )
-    train_sbatch, report_sbatch = [
+    wave0_sbatch, wave1_sbatch, report_sbatch = [
         command for command in commands if Path(command[0]).name == "sbatch"
     ]
-    assert "--array=0-19%20" in train_sbatch
+    assert "--array=0-19%20" in wave0_sbatch
+    assert "--array=0-19%20" in wave1_sbatch
+    assert "--hold" in wave0_sbatch and "--hold" not in wave1_sbatch
     assert not any(value.startswith("--array=") for value in report_sbatch)
-    assert all(any(value.startswith("--comment=") for value in command) for command in (train_sbatch, report_sbatch))
-    assert all(any(value.startswith("--output=") for value in command) for command in (train_sbatch, report_sbatch))
-    assert all("--parsable" in command for command in (train_sbatch, report_sbatch))
-    assert result["report_dependency_test"] == submit.REPORT_DEPENDENCY_TEST_REQUIREMENT
+    dag_commands = (wave0_sbatch, wave1_sbatch, report_sbatch)
+    assert all(any(value.startswith("--comment=") for value in command) for command in dag_commands)
+    assert all(any(value.startswith("--output=") for value in command) for command in dag_commands)
+    assert all("--parsable" in command for command in dag_commands)
+    assert result["dependency_tests"] == submit.DEPENDENCY_TEST_REQUIREMENT
 
 
 def test_late_report_test_only_requires_exact_dependency_and_kill_policy(submit):
@@ -3013,11 +3190,12 @@ def test_accepted_report_dependency_is_verified_before_ready(
             stderr="",
         )
 
-    evidence = submit._accepted_report_dependency_evidence(
+    evidence = submit._accepted_dependency_evidence(
         scontrol="scontrol",
-        report_id="7001",
-        train_id="7000",
-        report_name="exact-report",
+        job_id="7001",
+        predecessor_id="7000",
+        job_name="exact-report",
+        role="report",
         comment="treewm-exp23:" + "c" * 64,
         cwd=tmp_path,
         runner=runner,
@@ -3104,11 +3282,12 @@ def test_accepted_report_dependency_rejects_noncanonical_scheduler_records(
         )
 
     with pytest.raises(submit.SubmissionError, match=error):
-        submit._accepted_report_dependency_evidence(
+        submit._accepted_dependency_evidence(
             scontrol="scontrol",
-            report_id="7001",
-            train_id="7000",
-            report_name="exact-report",
+            job_id="7001",
+            predecessor_id="7000",
+            job_name="exact-report",
+            role="report",
             comment="treewm-exp23:" + "c" * 64,
             cwd=tmp_path,
             runner=runner,
@@ -3182,6 +3361,7 @@ def test_accepted_id_is_exactly_cancelled_with_retained_config_after_critical_dr
         runner,
         scheduler_contract(),
         fallback,
+        stable,
     )
     assert cancellation["job_ids"] == ["4312"]
     assert [Path(command[0]).name for command, _env, _fds in calls] == [
@@ -3310,6 +3490,7 @@ def test_policy_drift_before_report_never_calls_report_and_cancels_train_exactly
         runner,
         scheduler_contract(),
         fallback,
+        authorized,
     )
     assert cancellation["job_ids"] == ["5100"]
     assert not any(
@@ -3365,13 +3546,14 @@ def test_recovery_reconciliation_and_cancel_survive_critical_canonical_drift(
         runner,
         scheduler_contract(),
         fallback,
+        fallback["source_control_plane"],
     )
     assert cancellation["job_ids"] == ["6100"]
     assert [Path(command[0]).name for command in calls] == ["squeue", "scancel"]
 
 
 def test_recovery_reconciliation_binds_optional_arguments_by_keyword(submit):
-    tree = ast.parse(inspect.getsource(submit._recover_transaction_locked))
+    tree = ast.parse(inspect.getsource(submit._recovery_census_rounds))
     calls = [
         node
         for node in ast.walk(tree)
@@ -3383,11 +3565,1682 @@ def test_recovery_reconciliation_binds_optional_arguments_by_keyword(submit):
     keywords = {item.arg: item.value for item in calls[0].keywords}
     assert set(keywords) == {"fallback", "expected_observation", "observations"}
     assert isinstance(keywords["fallback"], ast.Name)
-    assert keywords["fallback"].id == "scheduler_fallback"
-    assert isinstance(keywords["expected_observation"], ast.Constant)
-    assert keywords["expected_observation"].value is None
+    assert keywords["fallback"].id == "fallback"
+    assert isinstance(keywords["expected_observation"], ast.Name)
+    assert keywords["expected_observation"].id == "expected_observation"
     assert isinstance(keywords["observations"], ast.Name)
-    assert keywords["observations"].id == "scheduler_observations"
+    assert keywords["observations"].id == "observations"
+
+
+def test_recovery_census_is_reconstructed_from_exact_attempt_stdout(submit):
+    roles = {
+        "wave0": "exp23-launch8-token-wave0",
+        "wave1": "exp23-launch8-token-wave1",
+        "report": "exp23-launch8-token-report",
+    }
+    comment = "treewm-exp23:" + "c" * 64
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    attempts = []
+    rounds = []
+    cursor = 0
+    for round_index in range(3):
+        ids = {}
+        spans = {}
+        for role in ("wave0", "wave1", "report"):
+            active = ["123"] if role == "wave0" else []
+            stdout = (
+                f"123|{roles[role]}|{user}|RUNNING|{comment}\n"
+                if active
+                else ""
+            )
+            attempts.append(
+                {
+                    "command": [
+                        "/fixture/squeue",
+                        "--noheader",
+                        f"--name={roles[role]}",
+                        "--format=%A|%j|%u|%T|%k",
+                    ],
+                    "mode": "authenticated_canonical",
+                    "returncode": 0,
+                    "stdout": stdout,
+                    "stderr": "",
+                    "control_plane": {"schema_version": 1},
+                    "canonical_boundary_error": None,
+                }
+            )
+            ids[role] = active
+            spans[role] = {"start": cursor, "stop": cursor + 1}
+            cursor += 1
+        rounds.append(
+            {
+                "round": round_index,
+                "job_ids_by_role": ids,
+                "scheduler_attempt_spans_by_role": spans,
+            }
+        )
+    validated, settled, stop = submit._validated_recovery_census_rounds(
+        rounds,
+        attempts=attempts,
+        role_names=roles,
+        squeue="/fixture/squeue",
+        comment=comment,
+        label="fixture",
+        expected_start=0,
+    )
+    assert validated == rounds
+    assert settled == {"wave0": ["123"], "wave1": [], "report": []}
+    assert stop == 9
+
+    forged = json.loads(json.dumps(rounds))
+    forged[0]["job_ids_by_role"]["wave1"] = ["999"]
+    with pytest.raises(submit.SubmissionError, match="not derived"):
+        submit._validated_recovery_census_rounds(
+            forged,
+            attempts=attempts,
+            role_names=roles,
+            squeue="/fixture/squeue",
+            comment=comment,
+            label="fixture",
+            expected_start=0,
+        )
+    with pytest.raises(submit.SubmissionError, match="span"):
+        submit._validated_recovery_census_rounds(
+            rounds,
+            attempts=[],
+            role_names=roles,
+            squeue="/fixture/squeue",
+            comment=comment,
+            label="fixture",
+            expected_start=0,
+        )
+    duplicate_rounds = copy.deepcopy(rounds)
+    duplicate_attempts = copy.deepcopy(attempts)
+    for round_index in range(3):
+        wave1_attempt = round_index * 3 + 1
+        duplicate_attempts[wave1_attempt]["stdout"] = (
+            f"123|{roles['wave1']}|{user}|RUNNING|{comment}\n"
+        )
+        duplicate_rounds[round_index]["job_ids_by_role"]["wave1"] = ["123"]
+    with pytest.raises(submit.SubmissionError, match="multiple roles"):
+        submit._validated_recovery_census_rounds(
+            duplicate_rounds,
+            attempts=duplicate_attempts,
+            role_names=roles,
+            squeue="/fixture/squeue",
+            comment=comment,
+            label="fixture",
+            expected_start=0,
+        )
+
+
+def test_recovery_cancel_history_is_append_only_and_survives_lost_response(
+    submit, tmp_path, monkeypatch
+):
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    context = {
+        "schema_version": 1,
+        "status": "scheduler_calling",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "claim_token": "b" * 64,
+        "role": "recovery_cancel",
+        "transaction_lock": {
+            "path": str(tmp_path / "lock"),
+            "device": 1,
+            "inode": 2,
+            "uid": os.getuid(),
+            "mode": 0o600,
+        },
+    }
+
+    def scheduler_call(command, *_args, **_kwargs):
+        return (
+            subprocess.CompletedProcess(command, 0, stdout="cancelled\n", stderr=""),
+            {"schema_version": 1, "mode": "fixture"},
+        )
+
+    monkeypatch.setattr(submit, "_scheduler_call", scheduler_call)
+    observations = []
+    history, cancellation = submit._append_recovery_cancel_attempt(
+        journal,
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=context,
+        scancel="/fixture/scancel",
+        job_ids=["100", "101", "102"],
+        cwd=tmp_path,
+        runner=lambda *_args: None,
+        control_plane={},
+        fallback={},
+        expected_observation={"schema_version": 1, "mode": "fixture"},
+        observations=observations,
+    )
+    assert len(history) == 1 and cancellation["job_ids"] == ["100", "101", "102"]
+    submit.exclusive_json(
+        journal / "CALLING_RECOVERY_CANCEL_0001.json",
+        {
+            **context,
+            "attempt_index": 1,
+            "job_ids": ["100"],
+            "command": ["/fixture/scancel", "100"],
+        },
+    )
+    history = submit._validated_recovery_cancel_history(
+        journal,
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=context,
+        scancel="/fixture/scancel",
+        expected_control_plane={"schema_version": 1, "mode": "fixture"},
+        fallback={},
+    )
+    assert history[1]["cancellation"] is None
+    history, _ = submit._append_recovery_cancel_attempt(
+        journal,
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=context,
+        scancel="/fixture/scancel",
+        job_ids=["100"],
+        cwd=tmp_path,
+        runner=lambda *_args: None,
+        control_plane={},
+        fallback={},
+        expected_observation={"schema_version": 1, "mode": "fixture"},
+        observations=observations,
+    )
+    assert [item["attempt_index"] for item in history] == [0, 1, 2]
+    assert history[1]["result_sha256"] is None
+    assert history[2]["job_ids"] == ["100"]
+
+
+def test_recovery_attempt_ledger_binds_exact_control_planes_and_terminal_summary(
+    submit, tmp_path, monkeypatch
+):
+    expected = {"schema_version": 1, "mode": "canonical-fixture"}
+    fallback = {
+        "schema_version": 1,
+        "sha256": "a" * 64,
+        "size": 17,
+        "source_control_plane": {"critical": {"cluster_name": "fixture"}},
+    }
+    canonical = {
+        "command": ["/fixture/squeue"],
+        "mode": "authenticated_canonical",
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "control_plane": expected,
+        "canonical_boundary_error": None,
+    }
+    assert submit._validated_scheduler_attempt_ledger(
+        [canonical], expected_control_plane=expected, fallback=fallback
+    ) == [canonical]
+    forged = copy.deepcopy(canonical)
+    forged["control_plane"] = {"schema_version": 1, "mode": "forged"}
+    with pytest.raises(submit.SubmissionError, match="canonical binding"):
+        submit._validated_scheduler_attempt_ledger(
+            [forged], expected_control_plane=expected, fallback=fallback
+        )
+    bool_coerced = copy.deepcopy(canonical)
+    bool_coerced["control_plane"]["schema_version"] = True
+    with pytest.raises(submit.SubmissionError, match="canonical binding"):
+        submit._validated_scheduler_attempt_ledger(
+            [bool_coerced], expected_control_plane=expected, fallback=fallback
+        )
+    fallback_row = {
+        **canonical,
+        "mode": "sealed_original_config_fallback",
+        "control_plane": {
+            "schema_version": 1,
+            "mode": "sealed_original_config_fallback",
+            "sha256": "a" * 64,
+            "size": 17,
+            "critical": {"cluster_name": "fixture"},
+        },
+        "canonical_boundary_error": "canonical unavailable",
+    }
+    assert submit._validated_scheduler_attempt_ledger(
+        [fallback_row], expected_control_plane=expected, fallback=fallback
+    ) == [fallback_row]
+    fallback_bool_coerced = copy.deepcopy(fallback_row)
+    fallback_bool_coerced["control_plane"]["size"] = True
+    with pytest.raises(submit.SubmissionError, match="fallback binding"):
+        submit._validated_scheduler_attempt_ledger(
+            [fallback_bool_coerced],
+            expected_control_plane=expected,
+            fallback=fallback,
+        )
+
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    context = {
+        "schema_version": 1,
+        "status": "scheduler_calling",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "claim_token": "b" * 64,
+        "role": "recovery_cancel",
+        "transaction_lock": {
+            "path": str(tmp_path / "lock"),
+            "device": 1,
+            "inode": 2,
+            "uid": os.getuid(),
+            "mode": 0o600,
+        },
+    }
+
+    def scheduler_call(command, *_args, **_kwargs):
+        return (
+            subprocess.CompletedProcess(command, 0, stdout="cancelled\n", stderr=""),
+            expected,
+        )
+
+    monkeypatch.setattr(submit, "_scheduler_call", scheduler_call)
+    submit._append_recovery_cancel_attempt(
+        journal,
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=context,
+        scancel="/fixture/scancel",
+        job_ids=["100"],
+        cwd=tmp_path,
+        runner=lambda *_args: None,
+        control_plane={},
+        fallback=fallback,
+        expected_observation=expected,
+        observations=[],
+    )
+    result_path = journal / "RECOVERY_CANCEL_RESULT_0000.json"
+    result = submit.read_json(result_path)
+    result["cancellation"]["stdout"] = "forged\n"
+    result_path.chmod(0o600)
+    result_path.write_text(
+        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    with pytest.raises(submit.SubmissionError, match="terminal summary"):
+        submit._validated_recovery_cancel_history(
+            journal,
+            calling_prefix="CALLING_RECOVERY_CANCEL",
+            result_prefix="RECOVERY_CANCEL_RESULT",
+            context=context,
+            scancel="/fixture/scancel",
+            expected_control_plane=expected,
+            fallback=fallback,
+        )
+
+
+def test_initial_exception_cancel_is_intent_first_and_shared_with_recovery(submit):
+    helper = inspect.getsource(submit._append_recovery_cancel_attempt)
+    calling = helper.index("calling_sha256 = exclusive_json")
+    scheduler = helper.index("cancellation = _cancel_exact", calling)
+    result = helper.index("exclusive_json(", scheduler)
+    assert calling < scheduler < result
+
+    scientific = inspect.getsource(submit._submit_campaign_impl)
+    exception = scientific.index("except BaseException as exc:")
+    append = scientific.index(
+        "abort_evidence = _initial_exception_reconcile_and_cancel", exception
+    )
+    aborted = scientific.index('"ABORTED"', append)
+    assert append < aborted
+
+
+@pytest.mark.parametrize(
+    (
+        "prior_claims,exception_claims,active_role,live_role,live_id,"
+        "expected_claims,expected_authority,expected_claims_by_role"
+    ),
+    [
+        (
+            {"wave0": [], "wave1": [], "report": []},
+            ["999999"],
+            "wave0",
+            None,
+            None,
+            ["999999"],
+            [],
+            {"wave0": ["999999"], "wave1": [], "report": []},
+        ),
+        (
+            {"wave0": ["888888"], "wave1": [], "report": []},
+            [],
+            "wave0",
+            "wave1",
+            "7000",
+            ["7000", "888888"],
+            ["7000"],
+            {"wave0": ["888888"], "wave1": ["7000"], "report": []},
+        ),
+        (
+            {"wave0": ["7000"], "wave1": [], "report": []},
+            ["7000", "7999"],
+            "wave1",
+            "wave1",
+            "8000",
+            ["7000", "7999", "8000"],
+            ["8000"],
+            {
+                "wave0": ["7000"],
+                "wave1": ["7999", "8000"],
+                "report": [],
+            },
+        ),
+    ],
+    ids=["fake-stdout-id", "stale-prior-id", "stale-prior-role-stdout"],
+)
+def test_initial_exception_cancels_only_fresh_exact_scheduler_identity(
+    submit,
+    tmp_path,
+    monkeypatch,
+    prior_claims,
+    exception_claims,
+    active_role,
+    live_role,
+    live_id,
+    expected_claims,
+    expected_authority,
+    expected_claims_by_role,
+):
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    stable = {"schema_version": 1, "mode": "fixture"}
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: stable
+    )
+    monkeypatch.setattr(submit, "_scheduler_environment", lambda _value: {})
+    roles = {
+        "wave0": "exact-wave0",
+        "wave1": "exact-wave1",
+        "report": "exact-report",
+    }
+    comment = "treewm-exp23:" + "c" * 64
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls = []
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        values = list(command)
+        calls.append(values)
+        if Path(values[0]).name == "squeue":
+            name = next(item.split("=", 1)[1] for item in values if item.startswith("--name="))
+            stdout = (
+                f"{live_id}|{name}|{user}|PENDING|{comment}\n"
+                if live_role is not None and name == roles[live_role]
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert values == ["/fixture/scancel", *expected_authority]
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    result = submit._initial_exception_reconcile_and_cancel(
+        exception_job_ids=exception_claims,
+        active_role=active_role,
+        prior_claimed_ids_by_role=prior_claims,
+        role_names=roles,
+        squeue="/fixture/squeue",
+        scancel="/fixture/scancel",
+        scheduler_comment=comment,
+        cancel_directory=journal,
+        cancel_calling_prefix="CALLING_RECOVERY_CANCEL",
+        cancel_result_prefix="RECOVERY_CANCEL_RESULT",
+        snapshot_root=tmp_path,
+        scheduler_runner=runner,
+        control_plane={},
+        scheduler_fallback={},
+        expected_observation=stable,
+        scheduler_observations=[],
+        cancel_context={
+            "schema_version": 1,
+            "status": "scheduler_calling",
+            "campaign_id": submit.CAMPAIGN_ID,
+            "submission_sha256": "c" * 64,
+            "claim_token": "b" * 64,
+            "role": "recovery_cancel",
+            "transaction_lock": {
+                "path": str(tmp_path / "lock"),
+                "device": 1,
+                "inode": 2,
+                "uid": os.getuid(),
+                "mode": 0o600,
+            },
+        },
+    )
+    assert result["known_job_ids"] == expected_claims
+    assert result["job_ids_by_role"] == expected_claims_by_role
+    assert result["cancellation_authority_job_ids"] == expected_authority
+    scancel_calls = [row for row in calls if Path(row[0]).name == "scancel"]
+    assert scancel_calls == (
+        [["/fixture/scancel", *expected_authority]] if expected_authority else []
+    )
+
+    canary = load("two_wave_canary")
+    canary_source = inspect.getsource(canary.submit_real_canary)
+    exception = canary_source.index("except BaseException as exc:")
+    append = canary_source.index(
+        "abort_evidence = submit._initial_exception_reconcile_and_cancel",
+        exception,
+    )
+    aborted = canary_source.index('"CANARY_ABORTED.json"', append)
+    assert append < aborted
+
+
+def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
+    repo = tmp_path / "repo"
+    submission = repo / "outputs/run/state/submission"
+    snapshot = submission / "source-snapshot/repo"
+    package = snapshot / submit.PACKAGE_RELATIVE
+    journal = submission / "journal"
+    package.mkdir(parents=True)
+    journal.mkdir()
+    executables = {}
+    for name in ("sbatch", "scontrol", "squeue", "scancel"):
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        path.chmod(0o755)
+        executables[name] = str(path)
+    audits = {
+        "weight_audit": {"artifact_sha256": "1" * 64},
+        "prefix_target_contract": {"artifact_sha256": "2" * 64},
+        "resolved_config_contract": {"artifact_sha256": "3" * 64},
+        "causal_parity_contract": {"artifact_sha256": "4" * 64},
+    }
+    manifest = {
+        "campaign_id": submit.CAMPAIGN_ID,
+        "paths": {"run_root": str(repo / "outputs/run")},
+        "execution": {
+            **executables,
+            "scheduler_control_plane": scheduler_contract(),
+        },
+        **audits,
+    }
+    (package / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    (package / "protocol.sha256").write_text("e" * 64 + "\n", encoding="ascii")
+    for path in (package / "manifest.json", package / "protocol.sha256"):
+        path.chmod(0o444)
+    package.chmod(0o555)
+    package.parent.chmod(0o555)
+    snapshot.chmod(0o555)
+    observation = scheduler_observation(submit)
+    inventory = {"fixture": "f" * 64}
+    contract = {
+        "schema_version": 1,
+        "status": "sealed_for_submission",
+        "submission_root": str(submission),
+        "snapshot_root": str(snapshot),
+        "snapshot_inventory": inventory,
+        "snapshot_inventory_sha256": submit.stable_hash(inventory),
+        "manifest_sha256": submit.stable_hash(manifest),
+        "package_protocol_sha256": "e" * 64,
+        "trainer_code_fingerprint": "a" * 64,
+        "runtime_sha256": "b" * 64,
+        "orchestration_interpreter": "fixture-python",
+        "weight_audit_artifact_sha256": "1" * 64,
+        "prefix_target_artifact_sha256": "2" * 64,
+        "resolved_config_artifact_sha256": "3" * 64,
+        "causal_parity_artifact_sha256": "4" * 64,
+        "scheduler_control_plane_contract": scheduler_contract(),
+        "scheduler_preclaim": {"scheduler_control_plane": observation},
+        "scheduler_fallback_config": {"fixture": True},
+    }
+    contract_path = submission / "SUBMISSION_CONTRACT.json"
+    submission_sha256 = submit.exclusive_json(contract_path, contract)
+    submit.append_journal(
+        submission,
+        0,
+        "CLAIMED",
+        {
+            "campaign_id": submit.CAMPAIGN_ID,
+            "submission_root": str(submission),
+            "claim_token": "b" * 64,
+            "scientific_output_fingerprint": "d" * 64,
+        },
+    )
+    submit.append_journal(
+        submission,
+        2,
+        "CONTRACT_SEALED",
+        {"submission_sha256": submission_sha256, "launch_count": 20},
+    )
+    lock_binding = {
+        "path": str(repo / "outputs/.fixture.transaction.lock"),
+        "device": 1,
+        "inode": 2,
+        "uid": os.getuid(),
+        "mode": 0o600,
+    }
+    fake_campaign = SimpleNamespace(
+        read_json=lambda _path: {},
+        validate_manifest=lambda *_args: None,
+        source_contract=lambda _root: {
+            "source_sha256": "a" * 64,
+            "runtime_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(submit, "reject_inherited_environment", lambda: None)
+    monkeypatch.setattr(submit, "verify_snapshot_files", lambda *_args: None)
+    monkeypatch.setattr(
+        submit, "activate_isolated_runtime", lambda _manifest: "fixture-python"
+    )
+    monkeypatch.setattr(submit, "load_campaign", lambda _root: fake_campaign)
+    monkeypatch.setattr(submit, "load_dag_evidence", lambda _root: SimpleNamespace())
+    monkeypatch.setattr(
+        submit,
+        "_validated_scheduler_preclaim",
+        lambda *_args: {"scheduler_control_plane": observation},
+    )
+    monkeypatch.setattr(
+        submit,
+        "_validated_scheduler_fallback",
+        lambda *_args: ({"fixture": True}, b"fixture"),
+    )
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: observation
+    )
+    monkeypatch.setattr(submit, "_leased_transaction_lock_binding", lambda _runner: lock_binding)
+    monkeypatch.setattr(submit.time, "sleep", lambda _seconds: None)
+    return repo, submission, submission_sha256, lock_binding
+
+
+def _committed_recovery_fixture(tmp_path, submit, monkeypatch, *, released=False):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    journal = submission / "journal"
+    ids = {"wave0": "7000", "wave1": "8000", "report": "9000"}
+    dependencies = {
+        "wave0": "none",
+        "wave1": "afterok:7000",
+        "report": "afterok:8000",
+    }
+    for role, ordinal in (("wave0", 3), ("wave1", 4), ("report", 5)):
+        calling_sha256 = submit.exclusive_json(
+            journal / f"CALLING_{role.upper()}.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": submit.CAMPAIGN_ID,
+                "submission_sha256": submission_sha256,
+                "claim_token": "b" * 64,
+                "role": role,
+                "job_name": f"fixture-{role}",
+                "scheduler_comment": f"treewm-exp23:{submission_sha256}",
+                "command": ["/fixture/sbatch", role],
+                "transaction_lock": lock_binding,
+            },
+        )
+        submit.append_journal(
+            submission,
+            ordinal,
+            f"{role.upper()}_SUBMITTED",
+            {
+                "job_id": ids[role],
+                "command": ["/fixture/sbatch", role],
+                "returncode": 0,
+                "stdout": f"{ids[role]}\n",
+                "stderr": "",
+                "reconciled_job_ids": [ids[role]],
+                "scheduler_control_plane": scheduler_observation(submit),
+                "calling_sha256": calling_sha256,
+            },
+        )
+    evidence_sha256 = "a" * 64
+    authorization = {
+        "schema_version": 1,
+        "status": "authorized_two_wave_dag",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "array": "0-19%20",
+        "job_ids": ids,
+        "dependencies": dependencies,
+        "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+        "within_wave_requeue": False,
+        "wave0_submitted_held": True,
+        "accepted_job_evidence_sha256": evidence_sha256,
+        "authorized_at_utc": "2026-08-28T00:00:00Z",
+    }
+    authorization_sha256 = submit.exclusive_json(
+        submission / "SUBMISSION_AUTHORIZATION.json", authorization
+    )
+    submit.append_journal(
+        submission,
+        6,
+        "DAG_AUTHORIZED",
+        {
+            "submission_authorization_sha256": authorization_sha256,
+            "accepted_job_evidence_sha256": evidence_sha256,
+            "job_ids": ids,
+            "dependencies": dependencies,
+        },
+    )
+    receipt = {
+        "schema_version": 1,
+        "status": "committed_two_wave_dag",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "submission_authorization_sha256": authorization_sha256,
+        "array": "0-19%20",
+        "wave0_array_job_id": ids["wave0"],
+        "wave1_array_job_id": ids["wave1"],
+        "report_job_id": ids["report"],
+        "wave1_dependency": dependencies["wave1"],
+        "report_dependency": dependencies["report"],
+        "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+        "within_wave_requeue": False,
+        "wave0_submitted_held": True,
+    }
+    submit.append_journal(submission, 7, "READY_TO_COMMIT", receipt)
+    submit.exclusive_json(submission / "SUBMISSION_RECEIPT.json", receipt)
+    monkeypatch.setattr(
+        submit,
+        "load_dag_evidence",
+        lambda _root: SimpleNamespace(
+            validate_dag_records=lambda *_args, **_kwargs: evidence_sha256
+        ),
+    )
+    if released:
+        release_calling_sha256 = submit.exclusive_json(
+            journal / "CALLING_WAVE0_RELEASE.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": submit.CAMPAIGN_ID,
+                "submission_sha256": submission_sha256,
+                "claim_token": "b" * 64,
+                "role": "wave0_release",
+                "job_name": f"exp23-launch8-{submission_sha256[:16]}-wave0",
+                "scheduler_comment": f"treewm-exp23:{submission_sha256}",
+                "command": [str(tmp_path / "scontrol"), "release", ids["wave0"]],
+                "transaction_lock": lock_binding,
+            },
+        )
+        submit.append_journal(
+            submission,
+            8,
+            "WAVE0_RELEASED",
+            {
+                "wave0_array_job_id": ids["wave0"],
+                "submission_authorization_sha256": authorization_sha256,
+                "calling_sha256": release_calling_sha256,
+                "release_evidence": {},
+            },
+        )
+        monkeypatch.setattr(
+            submit, "_validated_wave0_release_evidence", lambda *_args, **_kwargs: None
+        )
+    return repo, submission, submission_sha256, receipt
+
+
+@pytest.mark.parametrize("bad_id", (7000, True))
+@pytest.mark.parametrize("surface", ("ready", "authorization", "submitted"))
+def test_main_recovery_rejects_non_string_persisted_job_ids_without_scheduler_or_writes(
+    submit, tmp_path, monkeypatch, surface, bad_id
+):
+    _repo, submission, submission_sha256, receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    if surface == "ready":
+        ready = submit.read_json(submission / "journal/0007_READY_TO_COMMIT.json")
+        ready["wave0_array_job_id"] = bad_id
+        before = {
+            str(path.relative_to(submission)): submit.file_sha256(path)
+            for path in submission.rglob("*")
+            if path.is_file()
+        }
+        with pytest.raises(submit.SubmissionError, match="job IDs differ"):
+            submit._receipt_from_ready_record(ready)
+    else:
+        path = (
+            submission / "SUBMISSION_AUTHORIZATION.json"
+            if surface == "authorization"
+            else submission / "journal/0003_WAVE0_SUBMITTED.json"
+        )
+        value = submit.read_json(path)
+        if surface == "authorization":
+            value["job_ids"]["wave0"] = bad_id
+        else:
+            value["job_id"] = bad_id
+        path.chmod(0o600)
+        path.write_text(
+            json.dumps(value, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o444)
+        before = {
+            str(item.relative_to(submission)): submit.file_sha256(item)
+            for item in submission.rglob("*")
+            if item.is_file()
+        }
+        with pytest.raises(submit.SubmissionError, match="job IDs differ|journal differs"):
+            submit._validated_dag_authorization(
+                submission, submission_sha256, receipt
+            )
+    after = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+@pytest.mark.parametrize("bad_id", (7000, True))
+def test_main_abort_cancel_and_latch_validators_reject_non_string_job_ids(
+    submit, bad_id
+):
+    abort = {
+        "job_ids_by_role": {"wave0": [bad_id], "wave1": [], "report": []},
+        "known_job_ids": [bad_id],
+    }
+    with pytest.raises(submit.SubmissionError, match="wave0 IDs differ"):
+        submit._validated_abort_role_ids(abort, "numeric abort")
+
+    cancellation = {
+        "cancellation_error": None,
+        "cancellation": {
+            "job_ids": [bad_id],
+            "command": ["/fixture/scancel", bad_id],
+            "stdout": "",
+            "stderr": "",
+            "scheduler_control_plane": {},
+            "canonical_boundary_error": None,
+            "scheduler_attempts": [{}],
+        },
+    }
+    with pytest.raises(submit.SubmissionError, match="cancellation IDs differ"):
+        submit._validated_successful_cancellation(
+            cancellation, "/fixture/scancel", ["7000"]
+        )
+
+    latch = {
+        "schema_version": 1,
+        "status": "cancel_requested",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "claim_token": "b" * 64,
+        "wave0_array_job_id": bad_id,
+        "wave1_array_job_id": None,
+        "report_job_id": None,
+        "job_ids_by_role": {"wave0": [bad_id], "wave1": [], "report": []},
+        "transaction_lock": {
+            "path": "/fixture/lock",
+            "device": 1,
+            "inode": 2,
+            "uid": os.getuid(),
+            "mode": 0o600,
+        },
+        "recovery": True,
+        "scheduler_id_authority": "fresh_settled_exact_name_census_only",
+    }
+    with pytest.raises(submit.SubmissionError, match="latch wave0 differs"):
+        submit._validated_recovery_cancel_latch(
+            latch,
+            submission_sha256="c" * 64,
+            claim_token="b" * 64,
+            transaction_lock=latch["transaction_lock"],
+        )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "SUBMISSION_AUTHORIZATION.json",
+        "journal/0000_CLAIMED.json",
+        "journal/0003_WAVE0_SUBMITTED.json",
+        "journal/0004_WAVE1_SUBMITTED.json",
+        "journal/0005_REPORT_SUBMITTED.json",
+        "journal/CALLING_WAVE0.json",
+        "journal/CALLING_WAVE1.json",
+        "journal/CALLING_REPORT.json",
+        "journal/0006_DAG_AUTHORIZED.json",
+    ),
+)
+@pytest.mark.parametrize("mutation", ("writable", "noncanonical"))
+def test_dag_authorization_recovery_rejects_mutable_or_raw_rewritten_prefix(
+    submit, tmp_path, monkeypatch, relative, mutation
+):
+    _repo, submission, submission_sha256, receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    path = submission / relative
+    if mutation == "writable":
+        path.chmod(0o644)
+        pattern = "mode differs"
+    else:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        path.chmod(0o644)
+        path.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o444)
+        pattern = "raw bytes differ"
+    with pytest.raises(submit.SubmissionError, match=pattern):
+        submit._validated_dag_authorization(
+            submission, submission_sha256, receipt
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative", "released"),
+    (
+        ("SUBMISSION_RECEIPT.json", False),
+        ("journal/0007_READY_TO_COMMIT.json", False),
+        ("journal/CALLING_WAVE0_RELEASE.json", True),
+        ("journal/0008_WAVE0_RELEASED.json", True),
+    ),
+)
+@pytest.mark.parametrize("mutation", ("writable", "noncanonical"))
+def test_committed_recovery_rejects_mutable_or_raw_rewritten_terminal_prefix(
+    submit, tmp_path, monkeypatch, relative, released, mutation
+):
+    repo, submission, _submission_sha256, receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch, released=released
+    )
+    if not released:
+        submit.exclusive_json(
+            submission / "CANCEL_REQUESTED.json",
+            {
+                "schema_version": 1,
+                "status": "cancel_requested",
+                "campaign_id": receipt["campaign_id"],
+                "submission_sha256": receipt["submission_sha256"],
+                "wave0_array_job_id": receipt["wave0_array_job_id"],
+                "wave1_array_job_id": receipt["wave1_array_job_id"],
+                "report_job_id": receipt["report_job_id"],
+            },
+        )
+    path = submission / relative
+    if mutation == "writable":
+        path.chmod(0o644)
+        pattern = "mode differs"
+    else:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        path.chmod(0o644)
+        path.write_text(
+            json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o444)
+        pattern = "raw bytes differ"
+    calls = []
+
+    def runner(command, *_args):
+        calls.append(list(command))
+        raise AssertionError("scheduler must not be reached for invalid authority bytes")
+
+    with pytest.raises(submit.SubmissionError, match=pattern):
+        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+    assert calls == []
+
+
+def test_durable_ready_cancel_precedence_needs_no_receipt_or_scheduler_call(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, _submission_sha256, receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    (submission / "SUBMISSION_RECEIPT.json").unlink()
+    submit.exclusive_json(
+        submission / "CANCEL_REQUESTED.json",
+        {
+            "schema_version": 1,
+            "status": "cancel_requested",
+            "campaign_id": receipt["campaign_id"],
+            "submission_sha256": receipt["submission_sha256"],
+            "wave0_array_job_id": receipt["wave0_array_job_id"],
+            "wave1_array_job_id": receipt["wave1_array_job_id"],
+            "report_job_id": receipt["report_job_id"],
+        },
+    )
+    calls = []
+
+    def runner(command, *_args):
+        calls.append(list(command))
+        raise AssertionError("durable cancel precedence must not call the scheduler")
+
+    result = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert result["status"] == "committed_two_wave_dag_cancel_requested"
+    assert result["recovery"] == "durable_ready_cancel_precedence"
+    assert result["scheduler_calls"] == 0
+    assert calls == []
+
+
+def test_recovery_rejects_one_live_scheduler_id_assigned_to_two_roles_before_mutation(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, _lock = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    token = submission_sha256[:16]
+    names = {
+        role: f"exp23-launch8-{token}-{role}"
+        for role in ("wave0", "wave1", "report")
+    }
+    comment = f"treewm-exp23:{submission_sha256}"
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls = []
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        values = list(command)
+        calls.append(values)
+        assert Path(values[0]).name == "squeue"
+        job_name = next(
+            item.split("=", 1)[1] for item in values if item.startswith("--name=")
+        )
+        duplicate = job_name in {names["wave0"], names["wave1"]}
+        stdout = (
+            f"7000|{job_name}|{user}|PENDING|{comment}\n" if duplicate else ""
+        )
+        return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+
+    before = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(submit.SubmissionError, match="multiple roles"):
+        submit._recover_transaction_locked(
+            repo, submission, scheduler_runner=runner
+        )
+    after = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert calls and all(Path(row[0]).name == "squeue" for row in calls)
+    assert not (submission / "CANCEL_REQUESTED.json").exists()
+    assert not (submission / "journal/9000_RECOVERY_CANCELLED.json").exists()
+
+
+def test_recovery_rejects_cross_artifact_duplicate_role_claim_before_scheduler(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, _lock = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    submit.append_journal(
+        submission,
+        9999,
+        "ABORTED",
+        {
+            "error": "fixture first abort",
+            "known_job_ids": ["7000"],
+            "job_ids_by_role": {
+                "wave0": ["7000"], "wave1": [], "report": []
+            },
+            "cancellation_authority_job_ids": [],
+            "cancellation_authority_job_ids_by_role": {
+                "wave0": [], "wave1": [], "report": []
+            },
+            "submission_sha256": submission_sha256,
+            "reconciliation_errors": [],
+            "cancellation": None,
+            "cancellation_error": None,
+            "cancel_attempt_history": [],
+            "scheduler_control_plane_observations": [],
+        },
+    )
+    submit.append_journal(
+        submission,
+        9998,
+        "OUTER_ABORTED",
+        {
+            "error": "fixture outer abort",
+            "receipt_committed": False,
+            "known_job_ids": ["7000"],
+            "job_ids_by_role": {
+                "wave0": [], "wave1": ["7000"], "report": []
+            },
+            "claim_token": "b" * 64,
+            "submission_sha256": submission_sha256,
+        },
+    )
+    calls = []
+
+    def runner(command, *_args):
+        calls.append(list(command))
+        raise AssertionError("conflicting durable roles must fail before scheduler")
+
+    before = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(submit.SubmissionError, match="multiple roles"):
+        submit._recover_transaction_locked(
+            repo, submission, scheduler_runner=runner
+        )
+    after = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert calls == []
+
+
+def test_full_recovery_never_cancels_unverified_abort_id_and_revalidates_prior(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, _lock = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    submit.append_journal(
+        submission,
+        9998,
+        "OUTER_ABORTED",
+        {
+            "error": "fixture lost response",
+            "receipt_committed": False,
+            "known_job_ids": ["999999"],
+            "job_ids_by_role": {
+                "wave0": [],
+                "wave1": [],
+                "report": ["999999"],
+            },
+            "claim_token": "b" * 64,
+            "submission_sha256": submission_sha256,
+        },
+    )
+    calls = []
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        values = list(command)
+        calls.append(values)
+        assert Path(values[0]).name == "squeue"
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    result = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert result["durable_claimed_job_ids"] == ["999999"]
+    assert result["live_verified_job_ids"] == []
+    assert result["cancelled_live_job_ids"] == []
+    assert result["scheduler_calls"] == 9
+    assert len(calls) == 9 and not any(Path(row[0]).name == "scancel" for row in calls)
+
+    terminal_path = submission / "journal/9000_RECOVERY_CANCELLED.json"
+    terminal = submit.read_json(terminal_path)
+    for mutate in (
+        lambda value: value["durable_claimed_job_ids_by_role"]["report"].__setitem__(
+            0, 999999
+        ),
+        lambda value: value.__setitem__("new_jobs_created", False),
+    ):
+        forged_terminal = copy.deepcopy(terminal)
+        mutate(forged_terminal)
+        terminal_path.chmod(0o600)
+        terminal_path.write_text(
+            json.dumps(forged_terminal, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        terminal_path.chmod(0o444)
+        prior_calls = len(calls)
+        with pytest.raises(submit.SubmissionError):
+            submit._recover_transaction_locked(
+                repo, submission, scheduler_runner=runner
+            )
+        assert len(calls) == prior_calls
+    terminal_path.chmod(0o600)
+    terminal_path.write_text(
+        json.dumps(terminal, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    terminal_path.chmod(0o444)
+    terminal["pre_cancel_census_rounds"][0]["job_ids_by_role"]["wave0"] = ["123"]
+    terminal_path.chmod(0o600)
+    terminal_path.write_text(
+        json.dumps(terminal, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    terminal_path.chmod(0o444)
+    prior_calls = len(calls)
+    with pytest.raises(submit.SubmissionError, match="not derived"):
+        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+    assert len(calls) == prior_calls
+
+
+def test_full_recovery_consumes_lost_cancel_response_with_residual_attempt(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    context = {
+        "schema_version": 1,
+        "status": "scheduler_calling",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "claim_token": "b" * 64,
+        "role": "recovery_cancel",
+        "transaction_lock": lock_binding,
+    }
+    submit.exclusive_json(
+        submission / "journal/CALLING_RECOVERY_CANCEL_0000.json",
+        {
+            **context,
+            "attempt_index": 0,
+            "job_ids": ["7000"],
+            "command": [str(tmp_path / "scancel"), "7000"],
+        },
+    )
+    initial_history = submit._validated_recovery_cancel_history(
+        submission / "journal",
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=context,
+        scancel=str(tmp_path / "scancel"),
+        expected_control_plane=scheduler_observation(submit),
+        fallback={"fixture": True},
+    )
+    submit.append_journal(
+        submission,
+        9999,
+        "ABORTED",
+        {
+            "error": "fixture hard death after accepted scancel",
+            "known_job_ids": ["7000", "7999"],
+            "job_ids_by_role": {
+                "wave0": ["7000", "7999"],
+                "wave1": [],
+                "report": [],
+            },
+            "cancellation_authority_job_ids": ["7000"],
+            "cancellation_authority_job_ids_by_role": {
+                "wave0": ["7000"], "wave1": [], "report": []
+            },
+            "submission_sha256": submission_sha256,
+            "reconciliation_errors": [],
+            "cancellation": None,
+            "cancellation_error": "lost scheduler response",
+            "cancel_attempt_history": initial_history,
+            "scheduler_control_plane_observations": [],
+        },
+    )
+    active = True
+    calls = []
+    token = submission_sha256[:16]
+    wave0_name = f"exp23-launch8-{token}-wave0"
+    comment = f"treewm-exp23:{submission_sha256}"
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        nonlocal active
+        values = list(command)
+        calls.append(values)
+        if Path(values[0]).name == "squeue":
+            name = next(item.split("=", 1)[1] for item in values if item.startswith("--name="))
+            stdout = (
+                f"7000|{wave0_name}|{user}|PENDING|{comment}\n"
+                if active and name == wave0_name
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert Path(values[0]).name == "scancel" and values[-1] == "7000"
+        active = False
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    result = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert result["status"] == "recovered_terminal_after_cancel_attempts"
+    assert result["durable_claimed_job_ids"] == ["7000", "7999"]
+    assert result["live_verified_job_ids"] == ["7000"]
+    assert result["post_cancel_active_job_ids_by_role"] == {
+        "wave0": [], "wave1": [], "report": []
+    }
+    assert [row["attempt_index"] for row in result["cancel_attempt_history"]] == [0, 1]
+    assert result["cancel_attempt_history"][0]["result_sha256"] is None
+    assert result["cancel_attempt_history"][1]["job_ids"] == ["7000"]
+    assert [Path(row[0]).name for row in calls].count("scancel") == 1
+    assert result["scheduler_calls"] == 19
+
+    active = True
+    prior_calls = len(calls)
+    resumed = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert len(calls) - prior_calls == 19
+    assert [Path(row[0]).name for row in calls[prior_calls:]].count("scancel") == 1
+    chain = resumed["residual_reconciliation_chain"]
+    assert len(chain) == 1
+    assert chain[0]["previous_terminal_name"] == "9000_RECOVERY_CANCELLED.json"
+    assert chain[0]["live_verified_job_ids"] == ["7000"]
+    assert chain[0]["status"] == (
+        "recovered_residual_terminal_after_residual_cancel"
+    )
+
+    prior_calls = len(calls)
+    reused = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert len(calls) - prior_calls == 9
+    assert len(reused["residual_reconciliation_chain"]) == 1
+
+    residual_path = submission / "journal/RECOVERY_RECONCILED_0000.json"
+    residual = submit.read_json(residual_path)
+    for mutate, expected_error in (
+        (
+            lambda value: value["live_verified_job_ids_by_role"]["wave0"].__setitem__(
+                0, 7000
+            ),
+            "residual recovery generation 0 live wave0 IDs differ",
+        ),
+        (
+            lambda value: value["live_verified_job_ids_by_role"]["wave1"].append(
+                "7000"
+            ),
+            (
+                "residual recovery generation 0 live assigns one scheduler ID "
+                "to multiple roles"
+            ),
+        ),
+        (
+            lambda value: value.__setitem__("new_jobs_created", False),
+            "residual recovery generation 0 identity differs",
+        ),
+    ):
+        forged_residual = copy.deepcopy(residual)
+        mutate(forged_residual)
+        residual_path.chmod(0o600)
+        residual_path.write_text(
+            json.dumps(forged_residual, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        residual_path.chmod(0o444)
+        prior_calls = len(calls)
+        with pytest.raises(submit.SubmissionError, match=expected_error):
+            submit._recover_transaction_locked(
+                repo, submission, scheduler_runner=runner
+            )
+        assert len(calls) == prior_calls
+
+
+def test_recovery_latch_is_historical_not_delayed_visibility_cancel_authority(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    empty_roles = {"wave0": [], "wave1": [], "report": []}
+    latch = {
+        "schema_version": 1,
+        "status": "cancel_requested",
+        "campaign_id": submit.CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "claim_token": "b" * 64,
+        "wave0_array_job_id": None,
+        "wave1_array_job_id": None,
+        "report_job_id": None,
+        "job_ids_by_role": empty_roles,
+        "transaction_lock": lock_binding,
+        "recovery": True,
+        "scheduler_id_authority": "fresh_settled_exact_name_census_only",
+    }
+    submit.exclusive_json(submission / "CANCEL_REQUESTED.json", latch)
+    latch_sha256 = submit.file_sha256(submission / "CANCEL_REQUESTED.json")
+    token = submission_sha256[:16]
+    wave0_name = f"exp23-launch8-{token}-wave0"
+    comment = f"treewm-exp23:{submission_sha256}"
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+    active = True
+    calls: list[list[str]] = []
+
+    def runner(command, _cwd, _environment, _inherited_fds):
+        nonlocal active
+        values = list(command)
+        calls.append(values)
+        if Path(values[0]).name == "squeue":
+            name = next(
+                item.split("=", 1)[1]
+                for item in values
+                if item.startswith("--name=")
+            )
+            stdout = (
+                f"7000|{wave0_name}|{expected_user}|PENDING|{comment}\n"
+                if active and name == wave0_name
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert values == [str(tmp_path / "scancel"), "7000"]
+        active = False
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    result = submit._recover_transaction_locked(
+        repo, submission, scheduler_runner=runner
+    )
+    assert result["live_verified_job_ids"] == ["7000"]
+    assert result["cancelled_live_job_ids"] == ["7000"]
+    assert [row for row in calls if Path(row[0]).name == "scancel"] == [
+        [str(tmp_path / "scancel"), "7000"]
+    ]
+    assert submit.file_sha256(submission / "CANCEL_REQUESTED.json") == latch_sha256
+    assert submit.read_json(submission / "CANCEL_REQUESTED.json") == latch
+
+
+def test_recovery_rejects_writable_historical_latch_before_scheduler_call(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    submit.exclusive_json(
+        submission / "CANCEL_REQUESTED.json",
+        {
+            "schema_version": 1,
+            "status": "cancel_requested",
+            "campaign_id": submit.CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "claim_token": "b" * 64,
+            "wave0_array_job_id": None,
+            "wave1_array_job_id": None,
+            "report_job_id": None,
+            "job_ids_by_role": {"wave0": [], "wave1": [], "report": []},
+            "transaction_lock": lock_binding,
+            "recovery": True,
+            "scheduler_id_authority": "fresh_settled_exact_name_census_only",
+        },
+    )
+    (submission / "CANCEL_REQUESTED.json").chmod(0o644)
+    calls = []
+
+    def runner(command, *_args):
+        calls.append(list(command))
+        raise AssertionError("invalid latch must fail before every scheduler call")
+
+    with pytest.raises(submit.SubmissionError, match="mode differs"):
+        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+    assert calls == []
+
+
+def test_scheduler_supervisor_retains_lock_when_client_closes_unknown_fds(
+    submit, tmp_path
+):
+    lock_path = tmp_path / "transaction.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(descriptor, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    started = tmp_path / "started"
+    release = tmp_path / "release"
+    code = "\n".join(
+        [
+            "import os,sys,time",
+            "for fd in range(3,256):",
+            "    try: os.close(fd)",
+            "    except OSError: pass",
+            "open(sys.argv[1],'wb').write(b'started')",
+            "while not os.path.exists(sys.argv[2]): time.sleep(.01)",
+            "sys.stdout.write('child-out\\n')",
+            "sys.stderr.write('child-err\\n')",
+            "raise SystemExit(7)",
+        ]
+    )
+    result = {}
+
+    def invoke():
+        result["completed"] = submit._default_scheduler_runner(
+            [sys.executable, "-I", "-S", "-B", "-c", code, str(started), str(release)],
+            tmp_path,
+            {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            (descriptor,),
+        )
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not started.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started.exists()
+    os.close(descriptor)
+    contender = os.open(lock_path, os.O_RDWR)
+    with pytest.raises(BlockingIOError):
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    release.write_bytes(b"release")
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.close(contender)
+    completed = result["completed"]
+    assert completed.returncode == 7
+    assert completed.stdout == "child-out\n"
+    assert completed.stderr == "child-err\n"
+
+
+def _seal_lineage_fixture(path: Path, value: dict) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    path.write_bytes(payload)
+    path.chmod(0o444)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _lineage_marker(report, *, wave_index: int) -> dict:
+    return {
+        "schema_version": 1,
+        "campaign_id": report.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "launch_sha256": "d" * 64,
+        "cell_index": 3,
+        "wave_index": wave_index,
+        "array_job_id": "7000" if wave_index == 0 else "8000",
+        "array_task_id": 3,
+        "predecessor_array_job_id": "none" if wave_index == 0 else "7000",
+        "submission_authorization_sha256": "e" * 64,
+        "status": "worker_complete",
+        "completed_updates": 25_000,
+        "checkpoint_sha256": "1" * 64,
+        "completion_sha256": "2" * 64,
+        "final_eval_progress_sha256": "3" * 64,
+        "completed_results_sha256": "4" * 64,
+        "identity_sha256": "5" * 64,
+        "final_metrics": {"eval/success_rate": 0.5},
+    }
+
+
+def _lineage_start(report, *, wave_index: int, input_kind, checkpoint, predecessor) -> dict:
+    return {
+        "schema_version": 1,
+        "campaign_id": report.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "launch_sha256": "d" * 64,
+        "cell_index": 3,
+        "wave_index": wave_index,
+        "array_job_id": "7000" if wave_index == 0 else "8000",
+        "array_task_id": 3,
+        "predecessor_array_job_id": "none" if wave_index == 0 else "7000",
+        "submission_authorization_sha256": "e" * 64,
+        "status": "wave_started",
+        "input_kind": input_kind,
+        "input_checkpoint_sha256": checkpoint,
+        "predecessor_evidence_sha256": predecessor,
+    }
+
+
+def _lineage_terminal(marker: dict) -> dict:
+    return {
+        key: marker[key]
+        for key in (
+            "completed_updates",
+            "checkpoint_sha256",
+            "completion_sha256",
+            "final_eval_progress_sha256",
+            "completed_results_sha256",
+            "identity_sha256",
+            "final_metrics",
+        )
+    }
+
+
+def test_report_binds_wave0_ready_to_wave1_resume_lineage(report, tmp_path):
+    task = tmp_path / "task"
+    marker = _lineage_marker(report, wave_index=1)
+    _seal_lineage_fixture(
+        task / "waves/0/START.json",
+        _lineage_start(
+            report, wave_index=0, input_kind="fresh", checkpoint=None, predecessor=None
+        ),
+    )
+    ready = {
+        **{
+            key: value
+            for key, value in _lineage_start(
+                report, wave_index=0, input_kind="fresh", checkpoint=None, predecessor=None
+            ).items()
+            if key in report.ARTIFACT_BASE_KEYS
+        },
+        "status": "continuation_ready",
+        "trainer_exit_code": 75,
+        "checkpoint_kind": "train",
+        "completed_updates": 17_518,
+        "phase": "train",
+        "pending_eval_step": None,
+        "checkpoint_sha256": "a" * 64,
+        "checkpoint_file_identity": {
+            "device": 1,
+            "inode": 2,
+            "size": 3,
+            "mtime_ns": 4,
+            "ctime_ns": 5,
+        },
+        "final_eval_progress_sha256": None,
+    }
+    ready_sha = _seal_lineage_fixture(task / "waves/0/CONTINUATION_READY.json", ready)
+    start1 = _lineage_start(
+        report,
+        wave_index=1,
+        input_kind="train",
+        checkpoint="a" * 64,
+        predecessor=ready_sha,
+    )
+    start1_path = task / "waves/1/START.json"
+    _seal_lineage_fixture(start1_path, start1)
+    _seal_lineage_fixture(task / "waves/1/WORKER_COMPLETE.json", marker)
+    _seal_lineage_fixture(task / "WORKER_COMPLETE.json", marker)
+    lineage = report.validate_worker_receipt(
+        marker,
+        index=3,
+        launch={"launch_sha256": "d" * 64},
+        submission_sha256="c" * 64,
+        wave0_array_job_id="7000",
+        wave1_array_job_id="8000",
+        submission_authorization_sha256="e" * 64,
+        task_root=task,
+        terminal=_lineage_terminal(marker),
+    )
+    assert lineage["branch"] == "wave0_ready_wave1_resume"
+    assert lineage["wave0_predecessor_evidence_sha256"] == ready_sha
+
+    bool_marker = {**marker, "schema_version": True}
+    with pytest.raises(report.ReportError, match="worker receipt schema differs"):
+        report.validate_worker_receipt(
+            bool_marker,
+            index=3,
+            launch={"launch_sha256": "d" * 64},
+            submission_sha256="c" * 64,
+            wave0_array_job_id="7000",
+            wave1_array_job_id="8000",
+            submission_authorization_sha256="e" * 64,
+            task_root=task,
+            terminal=_lineage_terminal(marker),
+        )
+
+    ready_path = task / "waves/0/CONTINUATION_READY.json"
+    ready_path.chmod(0o600)
+    bool_ready = {**ready, "wave_index": False}
+    _seal_lineage_fixture(ready_path, bool_ready)
+    with pytest.raises(report.ReportError, match="wave0 artifact base differs"):
+        report.validate_worker_receipt(
+            marker,
+            index=3,
+            launch={"launch_sha256": "d" * 64},
+            submission_sha256="c" * 64,
+            wave0_array_job_id="7000",
+            wave1_array_job_id="8000",
+            submission_authorization_sha256="e" * 64,
+            task_root=task,
+            terminal=_lineage_terminal(marker),
+        )
+    ready_path.chmod(0o600)
+    _seal_lineage_fixture(ready_path, ready)
+
+    start1_path.chmod(0o600)
+    start1["predecessor_evidence_sha256"] = "f" * 64
+    _seal_lineage_fixture(start1_path, start1)
+    with pytest.raises(report.ReportError, match="checkpoint predecessor lineage"):
+        report.validate_worker_receipt(
+            marker,
+            index=3,
+            launch={"launch_sha256": "d" * 64},
+            submission_sha256="c" * 64,
+            wave0_array_job_id="7000",
+            wave1_array_job_id="8000",
+            submission_authorization_sha256="e" * 64,
+            task_root=task,
+            terminal=_lineage_terminal(marker),
+        )
+
+
+def test_report_binds_wave0_complete_to_wave1_noop_lineage(report, tmp_path):
+    task = tmp_path / "task"
+    marker = _lineage_marker(report, wave_index=0)
+    _seal_lineage_fixture(
+        task / "waves/0/START.json",
+        _lineage_start(
+            report, wave_index=0, input_kind="fresh", checkpoint=None, predecessor=None
+        ),
+    )
+    complete_sha = _seal_lineage_fixture(task / "waves/0/WORKER_COMPLETE.json", marker)
+    _seal_lineage_fixture(task / "WORKER_COMPLETE.json", marker)
+    start1 = _lineage_start(
+        report,
+        wave_index=1,
+        input_kind="complete",
+        checkpoint=marker["checkpoint_sha256"],
+        predecessor=complete_sha,
+    )
+    _seal_lineage_fixture(task / "waves/1/START.json", start1)
+    noop = {
+        **marker,
+        "status": "wave_one_noop_after_wave_zero_complete",
+        "wave_index": 1,
+        "array_job_id": "8000",
+        "predecessor_array_job_id": "7000",
+    }
+    _seal_lineage_fixture(task / "waves/1/WORKER_COMPLETE.json", noop)
+    lineage = report.validate_worker_receipt(
+        marker,
+        index=3,
+        launch={"launch_sha256": "d" * 64},
+        submission_sha256="c" * 64,
+        wave0_array_job_id="7000",
+        wave1_array_job_id="8000",
+        submission_authorization_sha256="e" * 64,
+        task_root=task,
+        terminal=_lineage_terminal(marker),
+    )
+    assert lineage["branch"] == "wave0_complete_wave1_noop"
+    assert lineage["wave1_predecessor_evidence_sha256"] == complete_sha
+    noop_path = task / "waves/1/WORKER_COMPLETE.json"
+    noop_path.chmod(0o600)
+    _seal_lineage_fixture(noop_path, {**noop, "wave_index": True})
+    with pytest.raises(report.ReportError, match="wave-one completion no-op differs"):
+        report.validate_worker_receipt(
+            marker,
+            index=3,
+            launch={"launch_sha256": "d" * 64},
+            submission_sha256="c" * 64,
+            wave0_array_job_id="7000",
+            wave1_array_job_id="8000",
+            submission_authorization_sha256="e" * 64,
+            task_root=task,
+            terminal=_lineage_terminal(marker),
+        )
 
 
 def test_paused_submitter_excludes_recovery_until_owner_exits(submit, tmp_path):
@@ -3429,6 +5282,17 @@ def test_successful_abort_cancellation_is_idempotent_recovery_evidence(submit):
                 "stderr": "",
                 "scheduler_control_plane": {"schema_version": 1},
                 "canonical_boundary_error": None,
+                "scheduler_attempts": [
+                    {
+                        "command": ["/usr/bin/scancel", *ids],
+                        "mode": "authenticated_canonical",
+                        "returncode": 0,
+                        "stdout": "",
+                        "stderr": "",
+                        "control_plane": {"schema_version": 1},
+                        "canonical_boundary_error": None,
+                    }
+                ],
             },
         "cancellation_error": None,
     }
@@ -3785,76 +5649,460 @@ def test_report_rejects_broken_cancellation_latch(report, tmp_path):
         report.assemble_report(snapshot, submission, "a" * 64)
 
 
-def test_report_commit_and_cancel_latch_are_linearly_ordered(
-    report, cancel, tmp_path, monkeypatch
+@pytest.mark.parametrize("status", ["accepted_engineering_pilot", "rejected"])
+def test_report_and_cancel_terminal_states_are_mutually_exclusive(
+    report, cancel, tmp_path, status
 ):
     submission = tmp_path / "submission"
     submission.mkdir()
-    report_entered = threading.Event()
-    allow_report_commit = threading.Event()
+    body = {"status": status, "reason": "fixture"}
+    decision = {**body, "gate_sha256": report.stable_hash(body)}
+    report.publish_report(
+        submission,
+        "a" * 64,
+        {"schema_version": 1},
+        decision,
+        {"schema_version": 1},
+    )
+    receipt = {
+        "campaign_id": cancel.CAMPAIGN_ID,
+        "submission_sha256": "a" * 64,
+    }
+    with cancel._ReportCancelLock(submission):
+        commit = cancel._validated_published_report(submission, receipt)
+        assert commit is not None and commit["status"] == status
+        assert not os.path.lexists(submission / "CANCEL_REQUESTED.json")
+    other = tmp_path / "cancel-first"
+    other.mkdir()
+    cancel.seal_json(other / "CANCEL_REQUESTED.json", {"status": "cancel_requested"})
+    with pytest.raises(report.ReportError, match="cancelled/ambiguous"):
+        report.publish_report(other, "a" * 64, {}, decision, {})
+    assert not os.path.lexists(other / "report")
+
+
+def test_cancel_rejects_symlink_or_forged_report_terminal(report, cancel, tmp_path):
+    receipt = {"campaign_id": cancel.CAMPAIGN_ID, "submission_sha256": "a" * 64}
+    symlinked = tmp_path / "symlinked"
+    symlinked.mkdir()
+    (symlinked / "report").symlink_to(tmp_path / "missing-report")
+    with pytest.raises(cancel.CancellationError, match="symlink"):
+        cancel._validated_published_report(symlinked, receipt)
+
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    body = {"status": "rejected"}
+    decision = {**body, "gate_sha256": report.stable_hash(body)}
+    report.publish_report(forged, "a" * 64, {}, decision, {})
+    commit_path = forged / "report" / "REPORT_COMMIT.json"
+    commit = json.loads(commit_path.read_text())
+    commit["status"] = "accepted"
+    (forged / "report").chmod(0o755)
+    commit_path.chmod(0o644)
+    commit_path.write_text(json.dumps(commit, sort_keys=True, indent=2) + "\n")
+    commit_path.chmod(0o444)
+    (forged / "report").chmod(0o555)
+    with pytest.raises(cancel.CancellationError, match="commit differs"):
+        cancel._validated_published_report(forged, receipt)
+
+
+def _cancellable_submission_root(tmp_path, submit, cancel):
+    submission = tmp_path / "outputs" / "launch8" / "state" / "submission"
+    submission.mkdir(parents=True)
+    lock = submit._transaction_lock_path(submission)
+    lock.touch(mode=0o600)
+    lock.chmod(0o600)
+    assert cancel._transaction_lock_path(submission) == lock
+    return submission
+
+
+def _cancel_contract(snapshot, submit, fallback):
+    return {
+        "snapshot_root": str(snapshot),
+        "scheduler_fallback_config": fallback,
+        "scheduler_preclaim": {
+            "scheduler_control_plane": scheduler_observation(submit)
+        },
+    }
+
+
+def _cancel_squeue_stdout(submit, receipt, active_ids):
+    token = str(receipt["submission_sha256"])[:16]
+    names = {
+        str(receipt["wave0_array_job_id"]): f"exp23-launch8-{token}-wave0",
+        str(receipt["wave1_array_job_id"]): f"exp23-launch8-{token}-wave1",
+        str(receipt["report_job_id"]): f"exp23-launch8-{token}-report",
+    }
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    comment = f"treewm-exp23:{receipt['submission_sha256']}"
+    return "".join(
+        f"{job_id}|{names[job_id]}|{user}|RUNNING|{comment}\n"
+        for job_id in active_ids
+    )
+
+
+def _install_explicit_cancel_fixture(
+    tmp_path, submit, cancel, monkeypatch, *, token="f", job_ids=("300", "301", "302")
+):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    scancel = tmp_path / "scancel"
+    squeue = tmp_path / "squeue"
+    for executable in (scancel, squeue):
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+    receipt = {
+        "campaign_id": cancel.CAMPAIGN_ID,
+        "submission_sha256": token * 64,
+        "submission_authorization_sha256": "e" * 64,
+        "wave0_array_job_id": job_ids[0],
+        "wave1_array_job_id": job_ids[1],
+        "report_job_id": job_ids[2],
+    }
+    fallback = scheduler_fallback(submit)
+    contract = _cancel_contract(snapshot, submit, fallback)
+    manifest = {
+        "execution": {
+            "scancel": str(scancel),
+            "squeue": str(squeue),
+            "scheduler_control_plane": scheduler_contract(),
+        }
+    }
+    state = {
+        "active": list(job_ids),
+        "commands": [],
+        "invocations": [],
+        "scancel_returncode": 0,
+        "scancel_stdout": "cancelled\n",
+        "scancel_stderr": "",
+    }
+    monkeypatch.setattr(
+        cancel, "validate_receipt", lambda _root: (receipt, contract, manifest)
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_fallback_config",
+        lambda *_args: (fallback, scheduler_config_bytes()),
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_control_plane_observation",
+        lambda *_args: scheduler_observation(submit),
+    )
+    monkeypatch.setattr(cancel.time, "sleep", lambda _seconds: None)
+
+    def run(command, **_kwargs):
+        state["commands"].append(list(command))
+        state["invocations"].append(
+            {
+                "command": list(command),
+                "environment": dict(_kwargs["environment"]),
+                "inherited_fds": tuple(_kwargs["inherited_fds"]),
+            }
+        )
+        if command[0] == str(squeue):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=_cancel_squeue_stdout(submit, receipt, state["active"]),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            command,
+            state["scancel_returncode"],
+            stdout=state["scancel_stdout"],
+            stderr=state["scancel_stderr"],
+        )
+
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    return submission, receipt, contract, manifest, fallback, state
+
+
+def test_committed_receipt_cancel_waits_for_submit_release_linearization(
+    submit, cancel, tmp_path
+):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
+    owner_ready = threading.Event()
+    allow_release = threading.Event()
     cancel_acquired = threading.Event()
     failures = []
 
-    def fake_publish(root, *_args):
-        report_entered.set()
-        assert allow_report_commit.wait(5)
-        assert not os.path.lexists(root / "CANCEL_REQUESTED.json")
-        report.seal_json(root / "REPORT_COMMIT.test.json", {"status": "committed"})
-        return {"status": "committed"}
-
-    monkeypatch.setattr(report, "_publish_report_locked", fake_publish)
-
-    def report_thread():
+    def submit_owner():
         try:
-            report.publish_report(submission, "a" * 64, {}, {}, {})
+            with submit._TransactionLock(submission):
+                (submission / "RECEIPT_VISIBLE").touch()
+                owner_ready.set()
+                assert allow_release.wait(5)
+                (submission / "WAVE0_RELEASED").touch()
         except BaseException as exc:  # pragma: no cover - surfaced below
             failures.append(exc)
 
-    def cancel_thread():
+    def cancel_owner():
         try:
-            with cancel._ReportCancelLock(submission):
+            with cancel._CancellationTransactionLock(submission):
                 cancel_acquired.set()
-                assert (submission / "REPORT_COMMIT.test.json").is_file()
-                cancel.seal_json(
-                    submission / "CANCEL_REQUESTED.json", {"status": "cancel_requested"}
-                )
+                assert (submission / "RECEIPT_VISIBLE").is_file()
+                assert (submission / "WAVE0_RELEASED").is_file()
         except BaseException as exc:  # pragma: no cover - surfaced below
             failures.append(exc)
 
-    reporter = threading.Thread(target=report_thread)
-    canceller = threading.Thread(target=cancel_thread)
-    reporter.start()
-    assert report_entered.wait(5)
+    submitter = threading.Thread(target=submit_owner)
+    canceller = threading.Thread(target=cancel_owner)
+    submitter.start()
+    assert owner_ready.wait(5)
     canceller.start()
     assert not cancel_acquired.wait(0.1)
-    allow_report_commit.set()
-    reporter.join(5)
+    allow_release.set()
+    submitter.join(5)
     canceller.join(5)
-    assert not reporter.is_alive() and not canceller.is_alive() and not failures
-    assert (submission / "REPORT_COMMIT.test.json").is_file()
-    assert (submission / "CANCEL_REQUESTED.json").is_file()
+    assert not submitter.is_alive() and not canceller.is_alive() and not failures
 
 
-def test_cancel_latch_precedes_scheduler_and_result_is_durable(
-    submit, cancel, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "active_ids,expected_status,expected_second_call",
+    [
+        ([], "cancel_reconciled_all_exact_jobs_terminal_or_absent", False),
+        (["100"], "cancel_reconciled_active_exact_jobs_signalled", True),
+    ],
+)
+def test_cancel_hard_kill_after_accepted_call_reconciles_before_retry(
+    submit,
+    cancel,
+    tmp_path,
+    monkeypatch,
+    active_ids,
+    expected_status,
+    expected_second_call,
 ):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     scancel = tmp_path / "scancel"
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
+    squeue = tmp_path / "squeue"
+    squeue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    squeue.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+        "campaign_id": cancel.CAMPAIGN_ID,
         "submission_sha256": "c" * 64,
-        "train_array_job_id": "100",
-        "report_job_id": "101",
+        "submission_authorization_sha256": "e" * 64,
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
+    }
+    manifest = {
+        "execution": {
+            "scancel": str(scancel),
+            "squeue": str(squeue),
+            "scheduler_control_plane": scheduler_contract(),
+        }
+    }
+    fallback = scheduler_fallback(submit)
+    contract = _cancel_contract(snapshot, submit, fallback)
+    monkeypatch.setattr(cancel, "validate_receipt", lambda _root: (receipt, contract, manifest))
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_fallback_config",
+        lambda *_args: (fallback, scheduler_config_bytes()),
+    )
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_control_plane_observation",
+        lambda *_args: scheduler_observation(submit),
+    )
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        stdout = (
+            _cancel_squeue_stdout(submit, receipt, ["100", "101", "102"])
+            if command[0] == str(squeue)
+            else "accepted\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    real_seal = cancel.seal_json
+    killed = False
+
+    def kill_before_result(path, value):
+        nonlocal killed
+        if path.name == "CANCEL_RESULT.json" and not killed:
+            killed = True
+            raise OSError("injected SIGKILL boundary after accepted scancel")
+        return real_seal(path, value)
+
+    monkeypatch.setattr(cancel, "seal_json", kill_before_result)
+    with pytest.raises(OSError, match="SIGKILL boundary"):
+        cancel.explicit_cancel(submission)
+    assert calls == [
+        *[
+            [
+                str(squeue),
+                "--noheader",
+                "--jobs=100,101,102",
+                "--format=%A|%j|%u|%T|%k",
+            ]
+            for _ in range(3)
+        ],
+        [str(scancel), "100", "101", "102"],
+    ]
+    reconciliation_calls = 0
+
+    def reconcile(**kwargs):
+        nonlocal reconciliation_calls
+        reconciliation_calls += 1
+        selected = list(active_ids) if reconciliation_calls <= 3 else []
+        return selected, {
+            "kind": "intent_without_result_exact_id_reconciliation",
+            "command": [
+                str(squeue),
+                "--noheader",
+                "--jobs=100,101,102",
+                "--format=%A|%j|%u|%T|%k",
+            ],
+            "returncode": 0,
+            "stdout": _cancel_squeue_stdout(submit, receipt, selected),
+            "stderr": "",
+            "active_job_ids": selected,
+            "scheduler_mode": "canonical_root_admin_config",
+            "scheduler_control_plane_before": scheduler_observation(submit),
+            "scheduler_control_plane_after": scheduler_observation(submit),
+            "canonical_boundary_error": None,
+            "reconciled_call_records": [
+                dict(item) for item in kwargs.get("reconciled_call_records", ())
+            ],
+        }
+
+    monkeypatch.setattr(
+        cancel,
+        "_reconcile_exact_cancel_ids",
+        reconcile,
+    )
+    result = cancel.explicit_cancel(submission)
+    assert result["status"] == expected_status
+    assert result["reconciled_active_job_ids"] == active_ids
+    assert result["executed_cancel_command"] == (
+        [str(scancel), *active_ids] if active_ids else None
+    )
+    assert len(calls) == 4 + int(expected_second_call)
+    before = list(calls)
+    reused = cancel.explicit_cancel(submission)
+    assert reused["reused_durable_cancel_result"] is True
+    assert calls == before
+    assert reconciliation_calls == 6
+
+
+def test_cancel_intent_reconciliation_queries_only_exact_three_ids(
+    submit, cancel, tmp_path, monkeypatch
+):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    squeue = tmp_path / "squeue"
+    squeue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    squeue.chmod(0o755)
+    receipt = {
+        "submission_sha256": "c" * 64,
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
+    }
+    manifest = {
+        "execution": {
+            "squeue": str(squeue),
+            "scheduler_control_plane": scheduler_contract(),
+        }
+    }
+    monkeypatch.setattr(
+        cancel,
+        "scheduler_control_plane_observation",
+        lambda *_args: scheduler_observation(submit),
+    )
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    comment = "treewm-exp23:" + "c" * 64
+
+    def run(command, **kwargs):
+        assert command == [
+            str(squeue),
+            "--noheader",
+            "--jobs=100,101,102",
+            "--format=%A|%j|%u|%T|%k",
+        ]
+        assert kwargs["inherited_fds"] == ()
+        stdout = (
+            f"100|exp23-launch8-{'c' * 16}-wave0|{user}|RUNNING|{comment}\n"
+            f"102|exp23-launch8-{'c' * 16}-report|{user}|PENDING|{comment}\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    fallback = scheduler_fallback(submit)
+    lease_path = tmp_path / "cancel-lease.lock"
+    lease_path.touch(mode=0o600)
+    lease_descriptor = os.open(lease_path, os.O_RDWR)
+    try:
+        active, evidence = cancel._reconcile_exact_cancel_ids(
+            snapshot_root=snapshot,
+            receipt=receipt,
+            manifest=manifest,
+            fallback_binding=fallback,
+            fallback_payload=scheduler_config_bytes(),
+            expected_control_plane=scheduler_observation(submit),
+            transaction_lock_descriptor=lease_descriptor,
+        )
+    finally:
+        os.close(lease_descriptor)
+    assert active == ["100", "102"]
+    assert evidence["active_job_ids"] == active
+
+
+def test_durable_cancel_precedes_every_missing_wave0_release_path(submit):
+    live = inspect.getsource(submit._submit_campaign_impl)
+    receipt = live.index('"SUBMISSION_RECEIPT.json"')
+    cancel_check = live.index("_validated_committed_cancel_latch", receipt)
+    release = live.index("_release_authorized_wave0", cancel_check)
+    assert receipt < cancel_check < release
+
+    recovery = inspect.getsource(submit._recover_transaction_locked)
+    finish = recovery.index("def finish_committed_receipt")
+    cancel_check = recovery.index("_validated_committed_cancel_latch", finish)
+    cancel_return = recovery.index('"forbidden_by_durable_cancel"', cancel_check)
+    ensure_release = recovery.index("_ensure_authorized_wave0_released", cancel_return)
+    second_check = recovery.index("cancel_latch is None", cancel_return)
+    assert cancel_check < cancel_return < second_check < ensure_release
+
+
+def test_cancel_latch_precedes_scheduler_and_result_is_durable(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    scancel = tmp_path / "scancel"
+    scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    scancel.chmod(0o755)
+    squeue = tmp_path / "squeue"
+    squeue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    squeue.chmod(0o755)
+    receipt = {
+            "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+        "submission_sha256": "c" * 64,
+        "submission_authorization_sha256": "e" * 64,
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
         "snapshot_root": str(snapshot),
     }
     control_plane = scheduler_contract()
     manifest = {
-        "execution": {"scancel": str(scancel), "scheduler_control_plane": control_plane}
+        "execution": {
+            "scancel": str(scancel),
+            "squeue": str(squeue),
+            "scheduler_control_plane": control_plane,
+        }
     }
-    contract = {"scheduler_fallback_config": scheduler_fallback(submit)}
+    contract = _cancel_contract(snapshot, submit, scheduler_fallback(submit))
     monkeypatch.setattr(cancel, "validate_receipt", lambda _root: (receipt, contract, manifest))
     monkeypatch.setattr(
         cancel,
@@ -3870,53 +6118,104 @@ def test_cancel_latch_precedes_scheduler_and_result_is_durable(
     monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/hostile-libraries")
 
     def run(command, **kwargs):
-        assert (tmp_path / "CANCEL_REQUESTED.json").is_file()
-        assert list((tmp_path / "cancellation").glob("CANCEL_CALL.*.json"))
-        assert kwargs["env"] == {
+        assert (submission / "CANCEL_REQUESTED.json").is_file()
+        if command[0] == str(scancel):
+            assert list((submission / "cancellation").glob("CANCEL_CALL.*.json"))
+        assert kwargs["environment"] == {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
                 "LANG": "C",
                 "LC_ALL": "C",
                 "SLURM_CONF": control_plane["slurm_conf"],
             }
-        assert kwargs["pass_fds"] == ()
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        assert kwargs["inherited_fds"] == ()
+        assert isinstance(kwargs["transaction_lock_descriptor"], int)
+        stdout = (
+            _cancel_squeue_stdout(submit, receipt, ["100", "101", "102"])
+            if command[0] == str(squeue)
+            else "ok\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(cancel.subprocess, "run", run)
-    result = cancel.explicit_cancel(tmp_path)
-    assert result["job_ids"] == ["100", "101"]
-    result_files = list((tmp_path / "cancellation").glob("CANCEL_RESULT.*.json"))
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    result = cancel.explicit_cancel(submission)
+    assert result["job_ids"] == ["100", "101", "102"]
+    result_files = list((submission / "cancellation").glob("CANCEL_RESULT.json"))
     assert len(result_files) == 1
     sealed = json.loads(result_files[0].read_text())
-    assert sealed["returncode"] == 0 and sealed["command"][-2:] == ["100", "101"]
+    assert sealed["returncode"] == 0
+    assert sealed["executed_cancel_command"][-3:] == ["100", "101", "102"]
+    assert (submission / "cancellation" / "CANCEL_COMMIT.json").is_file()
     assert cancel.scheduler_environment(control_plane) == submit._scheduler_environment(
         control_plane
     )
 
 
+@pytest.mark.parametrize("bad_mode,bad_schema", [(0o644, 1), (0o444, True)])
+def test_cancel_latch_rejects_writable_or_bool_schema_existing_artifact(
+    cancel, tmp_path, bad_mode, bad_schema
+):
+    submission = tmp_path / f"case-{bad_mode}-{bad_schema}"
+    submission.mkdir()
+    receipt = {
+        "campaign_id": cancel.CAMPAIGN_ID,
+        "submission_sha256": "c" * 64,
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
+    }
+    value = {
+        "schema_version": bad_schema,
+        "status": "cancel_requested",
+        "campaign_id": receipt["campaign_id"],
+        "submission_sha256": receipt["submission_sha256"],
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
+    }
+    path = submission / "CANCEL_REQUESTED.json"
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    path.chmod(bad_mode)
+    with pytest.raises(cancel.CancellationError, match="existing cancellation latch differs"):
+        cancel.seal_latch(submission, receipt)
+
+
 def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
     submit, cancel, tmp_path, monkeypatch
 ):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     scancel = tmp_path / "scancel"
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
+    squeue = tmp_path / "squeue"
+    squeue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    squeue.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+            "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
         "submission_sha256": "c" * 64,
-        "train_array_job_id": "100",
-        "report_job_id": "101",
+        "submission_authorization_sha256": "e" * 64,
+        "wave0_array_job_id": "100",
+        "wave1_array_job_id": "101",
+        "report_job_id": "102",
         "snapshot_root": str(snapshot),
     }
     manifest = {
         "execution": {
             "scancel": str(scancel),
+            "squeue": str(squeue),
             "scheduler_control_plane": scheduler_contract(),
         }
     }
     fallback = scheduler_fallback(submit)
     monkeypatch.setattr(
-        cancel, "validate_receipt", lambda _root: (receipt, {"scheduler_fallback_config": fallback}, manifest)
+        cancel,
+        "validate_receipt",
+        lambda _root: (
+            receipt,
+            _cancel_contract(snapshot, submit, fallback),
+            manifest,
+        ),
     )
     monkeypatch.setattr(
         cancel,
@@ -3930,82 +6229,664 @@ def test_explicit_cancel_uses_retained_original_config_after_canonical_drift(
     )
 
     def run(command, **kwargs):
-        assert list(command)[-2:] == ["100", "101"]
-        assert kwargs["env"]["SLURM_CONF"].startswith("/proc/self/fd/")
-        assert len(kwargs["pass_fds"]) == 1
-        descriptor = kwargs["pass_fds"][0]
+        if command[0] == str(scancel):
+            assert list(command)[-3:] == ["100", "101", "102"]
+        assert kwargs["environment"]["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(kwargs["inherited_fds"]) == 1
+        descriptor = kwargs["inherited_fds"][0]
         assert os.pread(descriptor, len(scheduler_config_bytes()), 0) == scheduler_config_bytes()
-        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+        stdout = (
+            _cancel_squeue_stdout(submit, receipt, ["100", "101", "102"])
+            if command[0] == str(squeue)
+            else "ok\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(cancel.subprocess, "run", run)
-    result = cancel.explicit_cancel(tmp_path)
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    result = cancel.explicit_cancel(submission)
     assert result["scheduler_mode"] == "sealed_original_config_fallback"
     assert "critical drift" in result["canonical_boundary_error"]
-    assert result["job_ids"] == ["100", "101"]
+    assert result["job_ids"] == ["100", "101", "102"]
 
 
 def test_explicit_cancel_retries_exact_ids_when_canonical_failure_closes_on_drift(
     submit, cancel, tmp_path, monkeypatch
 ):
+    submission = _cancellable_submission_root(tmp_path, submit, cancel)
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
     scancel = tmp_path / "scancel"
     scancel.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     scancel.chmod(0o755)
+    squeue = tmp_path / "squeue"
+    squeue.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    squeue.chmod(0o755)
     receipt = {
-        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+            "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
         "submission_sha256": "d" * 64,
-        "train_array_job_id": "200",
-        "report_job_id": "201",
+        "submission_authorization_sha256": "e" * 64,
+        "wave0_array_job_id": "200",
+        "wave1_array_job_id": "201",
+        "report_job_id": "202",
         "snapshot_root": str(snapshot),
     }
     manifest = {
         "execution": {
             "scancel": str(scancel),
+            "squeue": str(squeue),
             "scheduler_control_plane": scheduler_contract(),
         }
     }
     fallback = scheduler_fallback(submit)
     monkeypatch.setattr(
-        cancel, "validate_receipt", lambda _root: (receipt, {"scheduler_fallback_config": fallback}, manifest)
+        cancel,
+        "validate_receipt",
+        lambda _root: (
+            receipt,
+            _cancel_contract(snapshot, submit, fallback),
+            manifest,
+        ),
     )
     monkeypatch.setattr(
         cancel,
         "scheduler_fallback_config",
         lambda *_args: (fallback, scheduler_config_bytes()),
     )
-    observations = iter(
-        [
-            scheduler_observation(submit),
-            cancel.CancellationError("critical drift after canonical scancel"),
-        ]
-    )
+    observation_count = 0
 
     def observe(*_args):
-        value = next(observations)
-        if isinstance(value, BaseException):
-            raise value
-        return value
+        nonlocal observation_count
+        observation_count += 1
+        if observation_count >= 8:
+            raise cancel.CancellationError("critical drift after canonical scancel")
+        return scheduler_observation(submit)
 
     calls = 0
 
     def run(command, **kwargs):
         nonlocal calls
         calls += 1
-        assert list(command)[-2:] == ["200", "201"]
-        if calls == 1:
-            assert kwargs["env"]["SLURM_CONF"] == scheduler_contract()["slurm_conf"]
-            assert kwargs["pass_fds"] == ()
+        if command[0] == str(squeue):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=_cancel_squeue_stdout(
+                    submit, receipt, ["200", "201", "202"]
+                ),
+                stderr="",
+            )
+        assert list(command)[-3:] == ["200", "201", "202"]
+        if kwargs["environment"]["SLURM_CONF"] == scheduler_contract()["slurm_conf"]:
+            assert kwargs["environment"]["SLURM_CONF"] == scheduler_contract()["slurm_conf"]
+            assert kwargs["inherited_fds"] == ()
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="config raced")
-        assert kwargs["env"]["SLURM_CONF"].startswith("/proc/self/fd/")
-        assert len(kwargs["pass_fds"]) == 1
+        assert kwargs["environment"]["SLURM_CONF"].startswith("/proc/self/fd/")
+        assert len(kwargs["inherited_fds"]) == 1
         return subprocess.CompletedProcess(command, 0, stdout="cancelled\n", stderr="")
 
     monkeypatch.setattr(cancel, "scheduler_control_plane_observation", observe)
-    monkeypatch.setattr(cancel.subprocess, "run", run)
-    result = cancel.explicit_cancel(tmp_path)
-    assert result["scheduler_calls"] == 2
-    assert result["scheduler_mode"] == "sealed_original_config_fallback_after_canonical_failure"
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    result = cancel.explicit_cancel(submission)
+    assert result["scheduler_calls"] == 8
+    assert result["scheduler_mode"] == "sealed_original_config_fallback_after_unknown_response"
     assert result["returncode"] == 0
-    assert len(result["scheduler_attempts"]) == 2
-    assert len(list((tmp_path / "cancellation").glob("CANCEL_CALL.*.json"))) == 2
+    assert len(result["scheduler_attempts"]) == 8
+    assert len(list((submission / "cancellation").glob("CANCEL_CALL.*.json"))) == 2
+
+
+@pytest.mark.parametrize("active_ids", [[], ["300"]])
+def test_explicit_cancel_first_mutation_authority_is_fresh_exact_census_only(
+    submit, cancel, tmp_path, monkeypatch, active_ids
+):
+    submission, _receipt, _contract, manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    state["active"] = list(active_ids)
+    result = cancel.explicit_cancel(submission)
+    scancel_commands = [
+        row for row in state["commands"] if Path(row[0]).name == "scancel"
+    ]
+    assert scancel_commands == (
+        [[manifest["execution"]["scancel"], *active_ids]] if active_ids else []
+    )
+    assert result["reconciled_active_job_ids"] == active_ids
+    assert result["executed_cancel_command"] == (
+        scancel_commands[0] if active_ids else None
+    )
+    assert "301" not in sum(scancel_commands, [])
+    assert "302" not in sum(scancel_commands, [])
+
+
+def test_explicit_cancel_preclaim_drift_never_uses_canonical_mutation(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    changed = json.loads(json.dumps(scheduler_observation(submit)))
+    changed["cli_filter_policy"]["tree_sha256"] = "b" * 64
+    monkeypatch.setattr(
+        cancel, "scheduler_control_plane_observation", lambda *_args: changed
+    )
+    result = cancel.explicit_cancel(submission)
+    scancel_invocations = [
+        row for row in state["invocations"] if Path(row["command"][0]).name == "scancel"
+    ]
+    assert len(scancel_invocations) == 1
+    assert scancel_invocations[0]["environment"]["SLURM_CONF"].startswith(
+        "/proc/self/fd/"
+    )
+    assert len(scancel_invocations[0]["inherited_fds"]) == 1
+    assert result["scheduler_mode"] == "sealed_original_config_fallback"
+    assert "committed cancellation preclaim" in result["canonical_boundary_error"]
+    result_path = submission / "cancellation" / "CANCEL_RESULT.json"
+    value = json.loads(result_path.read_text(encoding="utf-8"))
+    value["scheduler_attempts"][0]["canonical_boundary_error"] = ""
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="fallback binding differs"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+@pytest.mark.parametrize(
+    "mutator,error",
+    [
+        (
+            lambda value: value.update(
+                {"scheduler_attempts": [{}], "scheduler_calls": 1}
+            ),
+            "cancellation call attempt 0 differs",
+        ),
+        (
+            lambda value: value.update({"scheduler_calls": 1.0}),
+            "durable cancellation result differs",
+        ),
+        (
+            lambda value: value.update({"stdout": "forged terminal output\n"}),
+            "terminal call summary differs",
+        ),
+    ],
+)
+def test_explicit_cancel_rejects_forged_prior_result_before_fresh_scheduler_call(
+    submit, cancel, tmp_path, monkeypatch, mutator, error
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    before = len(state["commands"])
+    result_path = submission / "cancellation" / "CANCEL_RESULT.json"
+    value = json.loads(result_path.read_text(encoding="utf-8"))
+    mutator(value)
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    with pytest.raises(cancel.CancellationError, match=error):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_rejects_rehashed_call_intent_mutation(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    before = len(state["commands"])
+    call_path = next((submission / "cancellation").glob("CANCEL_CALL.*.json"))
+    value = json.loads(call_path.read_text(encoding="utf-8"))
+    value["command"] = [value["command"][0], "301"]
+    call_path.chmod(0o644)
+    call_path.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    call_path.chmod(0o444)
+    with pytest.raises(cancel.CancellationError, match="detached from its intent"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+@pytest.mark.parametrize("artifact", ["CANCEL_REQUESTED.json", "CANCEL_INTENT.json", "CALL"])
+def test_explicit_cancel_binds_raw_intent_and_call_bytes(
+    submit, cancel, tmp_path, monkeypatch, artifact
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    evidence = submission / "cancellation"
+    path = (
+        next(evidence.glob("CANCEL_CALL.*.json"))
+        if artifact == "CALL"
+        else (
+            submission / artifact
+            if artifact == "CANCEL_REQUESTED.json"
+            else evidence / artifact
+        )
+    )
+    value = json.loads(path.read_text(encoding="utf-8"))
+    path.chmod(0o644)
+    path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(
+        cancel.CancellationError,
+        match=(
+            "durable cancellation result differs"
+            if artifact in {"CANCEL_REQUESTED.json", "CANCEL_INTENT.json"}
+            else "detached from its intent"
+        ),
+    ):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+@pytest.mark.parametrize("artifact", ["CANCEL_INTENT.json", "CANCEL_COMMIT.json"])
+def test_explicit_cancel_rejects_boolean_schema_in_semantic_artifacts(
+    submit, cancel, tmp_path, monkeypatch, artifact
+):
+    submission, receipt, _contract, manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    evidence = submission / "cancellation"
+    if artifact == "CANCEL_COMMIT.json":
+        cancel.explicit_cancel(submission)
+    else:
+        evidence.mkdir(mode=0o700)
+        cancel.seal_json(
+            evidence / artifact,
+            {
+                "schema_version": True,
+                "status": "exact_cancel_intent",
+                "campaign_id": receipt["campaign_id"],
+                "submission_sha256": receipt["submission_sha256"],
+                "submission_authorization_sha256": receipt[
+                    "submission_authorization_sha256"
+                ],
+                "job_ids": ["300", "301", "302"],
+                "command": [manifest["execution"]["scancel"], "300", "301", "302"],
+            },
+        )
+    path = evidence / artifact
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["schema_version"] = True
+    path.chmod(0o644)
+    path.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="cancellation (intent|commit) differs"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_rejects_coherently_rehashed_nested_boolean_control_plane(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    evidence = submission / "cancellation"
+
+    def rewrite(path, value):
+        path.chmod(0o644)
+        path.write_text(
+            json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+        )
+        path.chmod(0o444)
+
+    call_path = next(evidence.glob("CANCEL_CALL.*.json"))
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["scheduler_control_plane"]["schema_version"] = True
+    rewrite(call_path, call)
+
+    result_path = evidence / "CANCEL_RESULT.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    call_attempt = next(
+        row for row in result["scheduler_attempts"] if row["kind"] == "exact_cancel_call"
+    )
+    call_attempt["call_intent_sha256"] = cancel.file_sha256(call_path)
+    call_attempt["scheduler_control_plane_before"]["schema_version"] = True
+    call_attempt["scheduler_control_plane_after"]["schema_version"] = True
+    result["scheduler_control_plane"]["schema_version"] = True
+    rewrite(result_path, result)
+
+    commit_path = evidence / "CANCEL_COMMIT.json"
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["result_sha256"] = cancel.file_sha256(result_path)
+    rewrite(commit_path, commit)
+
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="canonical binding differs"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_rejects_coherently_rehashed_alternate_mutation_authority(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    evidence = submission / "cancellation"
+    call_path = next(evidence.glob("CANCEL_CALL.*.json"))
+    call = json.loads(call_path.read_text(encoding="utf-8"))
+    call["command"] = [manifest["execution"]["scancel"], "301"]
+    call_path.chmod(0o644)
+    call_path.write_text(
+        json.dumps(call, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    call_path.chmod(0o444)
+    result_path = evidence / "CANCEL_RESULT.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    call_attempt = next(
+        row for row in result["scheduler_attempts"] if row["kind"] == "exact_cancel_call"
+    )
+    call_attempt["command"] = list(call["command"])
+    call_attempt["call_intent_sha256"] = cancel.file_sha256(call_path)
+    result["executed_cancel_command"] = list(call["command"])
+    result["reconciled_active_job_ids"] = ["301"]
+    result["terminal_or_absent_job_ids"] = ["300", "302"]
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    commit_path = evidence / "CANCEL_COMMIT.json"
+    commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    commit["result_sha256"] = cancel.file_sha256(result_path)
+    commit_path.chmod(0o644)
+    commit_path.write_text(
+        json.dumps(commit, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    commit_path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="settled exact census"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_prior_reappearance_appends_then_converges(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    first = cancel.explicit_cancel(submission)
+    immutable_sha = first["cancel_result_sha256"]
+    state["active"] = ["300"]
+    pending = cancel.explicit_cancel(submission)
+    assert pending["residual_continuation_chain"][-1]["status"] == (
+        "cancel_residual_signalled_pending_terminal"
+    )
+    assert pending["residual_continuation_chain"][-1]["active_job_ids"] == ["300"]
+    state["active"] = []
+    terminal = cancel.explicit_cancel(submission)
+    assert [row["generation"] for row in terminal["residual_continuation_chain"]] == [0, 1]
+    assert terminal["residual_continuation_chain"][-1]["status"] == (
+        "cancel_residual_reconciled_terminal"
+    )
+    assert cancel.file_sha256(
+        submission / "cancellation" / "CANCEL_RESULT.json"
+    ) == immutable_sha
+    before_files = sorted(
+        path.name
+        for path in (submission / "cancellation").glob("CANCEL_CONTINUATION.*.json")
+    )
+    stable = cancel.explicit_cancel(submission)
+    assert stable["fresh_active_job_ids"] == []
+    assert sorted(
+        path.name
+        for path in (submission / "cancellation").glob("CANCEL_CONTINUATION.*.json")
+    ) == before_files
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda value: value.update({"generation": 0.0}),
+        lambda value: value.update({"scheduler_calls": 7.0}),
+        lambda value: value["pre_cancel_census_rounds"][0].update({"round": 0.0}),
+        lambda value: value["cancel_call"].update({"stdout": 0}),
+        lambda value: value["cancel_call"].update({"canonical_boundary_error": ""}),
+    ],
+)
+def test_explicit_cancel_continuation_rejects_nonexact_scalars(
+    submit, cancel, tmp_path, monkeypatch, mutator
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    state["active"] = ["300"]
+    cancel.explicit_cancel(submission)
+    continuation = submission / "cancellation" / "CANCEL_CONTINUATION.0000.json"
+    value = json.loads(continuation.read_text(encoding="utf-8"))
+    mutator(value)
+    continuation.chmod(0o644)
+    continuation.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    continuation.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="cancel continuation 0"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_continuation_rejects_call_reconciled_and_executed_twice(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    state["active"] = ["300"]
+    cancel.explicit_cancel(submission)
+    continuation = submission / "cancellation" / "CANCEL_CONTINUATION.0000.json"
+    value = json.loads(continuation.read_text(encoding="utf-8"))
+    call = value["cancel_call"]
+    reconciled = {
+        "name": call["call_intent_name"],
+        "sha256": call["call_intent_sha256"],
+        "call_token": call["call_token"],
+    }
+    value["reconciled_call_records"] = [reconciled]
+    value["pre_cancel_census_rounds"][0]["evidence"][
+        "reconciled_call_records"
+    ] = [reconciled]
+    continuation.chmod(0o644)
+    continuation.write_text(
+        json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    continuation.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="residual call differs"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+
+
+def test_explicit_cancel_consumes_orphan_residual_call_after_hard_kill(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    state["active"] = ["300"]
+    real_seal = cancel.seal_json
+
+    def kill_before_continuation(path, value):
+        if path.name == "CANCEL_CONTINUATION.0000.json":
+            raise OSError("injected hard kill after residual scancel")
+        return real_seal(path, value)
+
+    monkeypatch.setattr(cancel, "seal_json", kill_before_continuation)
+    with pytest.raises(OSError, match="hard kill"):
+        cancel.explicit_cancel(submission)
+    orphan_calls = sorted(
+        path.name for path in (submission / "cancellation").glob("CANCEL_CALL.*.json")
+    )
+    assert len(orphan_calls) == 2
+    monkeypatch.setattr(cancel, "seal_json", real_seal)
+    state["active"] = []
+    recovered = cancel.explicit_cancel(submission)
+    generation = recovered["residual_continuation_chain"][-1]
+    assert generation["cancel_call"] is None
+    assert [row["name"] for row in generation["reconciled_call_records"]] == [
+        orphan_calls[-1]
+    ]
+    assert len(
+        [row for row in state["commands"] if Path(row[0]).name == "scancel"]
+    ) == 2
+
+
+def test_explicit_cancel_consumes_orphan_residual_call_before_client_return(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    cancel.explicit_cancel(submission)
+    state["active"] = ["300"]
+    real_run = cancel._run_scheduler_client_with_lock_supervisor
+    killed = False
+
+    def kill_residual(command, **kwargs):
+        nonlocal killed
+        if Path(command[0]).name == "scancel" and command[1:] == ["300"] and not killed:
+            killed = True
+            raise OSError("injected hard kill with residual CALL durable")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", kill_residual)
+    with pytest.raises(OSError, match="residual CALL durable"):
+        cancel.explicit_cancel(submission)
+    assert len(list((submission / "cancellation").glob("CANCEL_CALL.*.json"))) == 2
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", real_run)
+    state["active"] = []
+    recovered = cancel.explicit_cancel(submission)
+    assert recovered["residual_continuation_chain"][-1]["cancel_call"] is None
+    assert recovered["residual_continuation_chain"][-1][
+        "reconciled_call_records"
+    ]
+
+
+def test_explicit_cancel_nonzero_response_leaves_only_reconcilable_call_intent(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, _receipt, _contract, _manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    state["scancel_returncode"] = 1
+    state["scancel_stderr"] = "rejected\n"
+    with pytest.raises(cancel.CancellationError, match="durable CALL intent"):
+        cancel.explicit_cancel(submission)
+    evidence = submission / "cancellation"
+    assert list(evidence.glob("CANCEL_CALL.*.json"))
+    assert not list(evidence.glob("CANCEL_FAILURE.*.json"))
+    assert not (evidence / "CANCEL_RESULT.json").exists()
+    state["active"] = []
+    state["scancel_returncode"] = 0
+    recovered = cancel.explicit_cancel(submission)
+    assert recovered["status"] == "cancel_reconciled_all_exact_jobs_terminal_or_absent"
+    assert recovered["executed_cancel_command"] is None
+
+
+def test_explicit_cancel_rc0_with_unverifiable_postcondition_reconciles_not_replays(
+    submit, cancel, tmp_path, monkeypatch
+):
+    submission, receipt, _contract, manifest, _fallback, state = (
+        _install_explicit_cancel_fixture(tmp_path, submit, cancel, monkeypatch)
+    )
+    observation_count = 0
+
+    def observe(*_args):
+        nonlocal observation_count
+        observation_count += 1
+        if observation_count == 8:
+            raise cancel.CancellationError("post-scancel control plane is unavailable")
+        return scheduler_observation(submit)
+
+    def run(command, **kwargs):
+        state["commands"].append(list(command))
+        state["invocations"].append(
+            {
+                "command": list(command),
+                "environment": dict(kwargs["environment"]),
+                "inherited_fds": tuple(kwargs["inherited_fds"]),
+            }
+        )
+        if command[0] == manifest["execution"]["squeue"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=_cancel_squeue_stdout(submit, receipt, state["active"]),
+                stderr="",
+            )
+        state["active"] = []
+        return subprocess.CompletedProcess(command, 0, stdout="accepted\n", stderr="")
+
+    monkeypatch.setattr(cancel, "scheduler_control_plane_observation", observe)
+    monkeypatch.setattr(cancel, "_run_scheduler_client_with_lock_supervisor", run)
+    result = cancel.explicit_cancel(submission)
+    scancel_commands = [
+        row for row in state["commands"] if Path(row[0]).name == "scancel"
+    ]
+    assert scancel_commands == [
+        [manifest["execution"]["scancel"], "300", "301", "302"]
+    ]
+    assert result["status"] == "cancel_reconciled_all_exact_jobs_terminal_or_absent"
+    assert result["executed_cancel_command"] is None
+    assert result["scheduler_calls"] == 7
+    assert result["canonical_boundary_error"] is None
+    assert result["scheduler_attempts"][3]["postcondition_error"]
+    assert result["scheduler_attempts"][4]["reconciled_call_records"]
+    result_path = submission / "cancellation" / "CANCEL_RESULT.json"
+    valid = json.loads(result_path.read_text(encoding="utf-8"))
+    forged = copy.deepcopy(valid)
+    reconciled = forged["scheduler_attempts"][4]["reconciled_call_records"].pop()
+    forged["scheduler_attempts"][0]["reconciled_call_records"] = [reconciled]
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(forged, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(
+        cancel.CancellationError,
+        match="initial census reconciles a call that occurs later",
+    ):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(valid, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    forged = copy.deepcopy(valid)
+    reconciled = forged["scheduler_attempts"][4]["reconciled_call_records"]
+    reconciled.append(copy.deepcopy(reconciled[0]))
+    result_path.chmod(0o644)
+    result_path.write_text(
+        json.dumps(forged, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    result_path.chmod(0o444)
+    before = len(state["commands"])
+    with pytest.raises(cancel.CancellationError, match="reconciled call binding differs"):
+        cancel.explicit_cancel(submission)
+    assert len(state["commands"]) == before

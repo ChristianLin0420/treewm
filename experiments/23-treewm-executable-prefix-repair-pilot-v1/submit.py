@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 AUDITS = (
@@ -48,7 +48,7 @@ AUDIT_LOCKS = {
     "resolved_config": "resolved_config.lock.json",
     "causal_parity": "causal_parity.lock.json",
 }
-SBATCH_JOB = re.compile(r"^(?P<job_id>[0-9]+)$")
+SBATCH_JOB = re.compile(r"^(?P<job_id>[1-9][0-9]*)$")
 JOB_ID = re.compile(r"^[1-9][0-9]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA1 = re.compile(r"^[0-9a-f]{40}$")
@@ -77,9 +77,19 @@ TRAINER_BOOTSTRAP_SMOKE_FIELDS = frozenset(
 )
 RECEIPT_FIELDS = frozenset(
     {
-        "schema_version", "status", "campaign_id", "submission_root",
-        "snapshot_root", "submission_sha256", "train_array_job_id",
-        "report_job_id", "array", "dependency",
+        "schema_version", "status", "campaign_id", "submission_sha256",
+        "submission_authorization_sha256", "array", "wave0_array_job_id",
+        "wave1_array_job_id", "report_job_id", "wave1_dependency",
+        "report_dependency", "kill_on_invalid_dependency",
+        "within_wave_requeue", "wave0_submitted_held",
+    }
+)
+AUTHORIZATION_FIELDS = frozenset(
+    {
+        "schema_version", "status", "campaign_id", "submission_sha256",
+        "array", "job_ids", "dependencies", "kill_on_invalid_dependency",
+        "within_wave_requeue", "wave0_submitted_held",
+        "accepted_job_evidence_sha256", "authorized_at_utc",
     }
 )
 FORBIDDEN_DISTRIBUTED_ENVIRONMENT = frozenset(
@@ -527,6 +537,26 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def exact_json_equal(left: object, right: object) -> bool:
+    """Compare JSON values recursively without Python's bool/int coercion."""
+
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (
+            isinstance(left, Mapping)
+            and isinstance(right, Mapping)
+            and set(left) == set(right)
+            and all(exact_json_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(exact_json_equal(a, b) for a, b in zip(left, right))
+        )
+    return type(left) is type(right) and left == right
+
+
 def file_sha256(path: str | Path) -> str:
     source = Path(path)
     digest, _payload = _hash_relative_regular(
@@ -546,15 +576,7 @@ def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def read_json(path: str | Path) -> dict[str, Any]:
-    source = Path(path)
-    _digest, payload = _hash_relative_regular(
-        source.parent,
-        Path(source.name),
-        f"JSON artifact {source}",
-        capture=True,
-    )
-    assert payload is not None
+def _decode_json_payload(source: Path, payload: bytes) -> dict[str, Any]:
     try:
         value = json.loads(
             payload.decode("utf-8"),
@@ -567,6 +589,43 @@ def read_json(path: str | Path) -> dict[str, Any]:
         raise SubmissionError(f"cannot read JSON {source}: {exc}") from exc
     require(isinstance(value, dict), f"JSON root is not an object: {source}")
     return value
+
+
+def read_json(path: str | Path) -> dict[str, Any]:
+    source = Path(path)
+    _digest, payload = _hash_relative_regular(
+        source.parent,
+        Path(source.name),
+        f"JSON artifact {source}",
+        capture=True,
+    )
+    assert payload is not None
+    return _decode_json_payload(source, payload)
+
+
+def read_immutable_json(path: str | Path, label: str) -> tuple[dict[str, Any], str]:
+    """Read one exact immutable controller artifact and bind its raw encoding."""
+
+    source = Path(path)
+    info = _regular_nonsymlink(source, label)
+    require(stat.S_IMODE(info.st_mode) == 0o444, f"{label} mode differs")
+    digest, payload = _hash_relative_regular(
+        source.parent,
+        Path(source.name),
+        label,
+        capture=True,
+    )
+    assert payload is not None
+    value = _decode_json_payload(source, payload)
+    canonical_payload = (
+        json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    require(
+        payload == canonical_payload
+        and digest == hashlib.sha256(canonical_payload).hexdigest(),
+        f"{label} raw bytes differ from its sealed JSON value",
+    )
+    return value, digest
 
 
 def _regular_nonsymlink(path: Path, label: str) -> os.stat_result:
@@ -1344,6 +1403,15 @@ def load_campaign(repo_root: str | Path) -> ModuleType:
     )
 
 
+def load_dag_evidence(repo_root: str | Path) -> ModuleType:
+    root = Path(repo_root).resolve(strict=True)
+    return _load_module(
+        "dag_evidence",
+        root / PACKAGE_RELATIVE / "dag_evidence.py",
+        containment_root=root,
+    )
+
+
 def reject_inherited_environment(environ: Mapping[str, str] | None = None) -> None:
     """Reject every externally supplied TreeWM/distributed control variable.
 
@@ -1598,7 +1666,7 @@ def _ephemeral_child_environment(
 
     temporary_parent = _directory_nonsymlink(Path("/tmp"), "temporary parent")
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch7-{os.getuid()}-", dir=temporary_parent
+        prefix=f"treewm-exp23-launch8-{os.getuid()}-", dir=temporary_parent
     ) as raw_root:
         root = Path(raw_root)
         root_info = root.lstat()
@@ -2392,6 +2460,70 @@ class _TransactionLock:
             self.descriptor = None
 
 
+def _transaction_lock_binding(lock: _TransactionLock) -> dict[str, Any]:
+    require(lock.descriptor is not None, "transaction lock is not held")
+    opened = os.fstat(lock.descriptor)
+    named = lock.path.lstat()
+    require(
+        stat.S_ISREG(opened.st_mode)
+        and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+        and opened.st_uid == os.getuid()
+        and opened.st_nlink == 1,
+        "transaction lock identity changed",
+    )
+    return {
+        "path": str(lock.path),
+        "device": opened.st_dev,
+        "inode": opened.st_ino,
+        "uid": opened.st_uid,
+        "mode": stat.S_IMODE(opened.st_mode),
+    }
+
+
+def _scheduler_runner_with_lock_lease(
+    runner: SchedulerRunner, lock: _TransactionLock
+) -> SchedulerRunner:
+    """Keep the transaction flock alive until every scheduler child exits."""
+
+    binding = _transaction_lock_binding(lock)
+    descriptor = lock.descriptor
+    assert descriptor is not None
+
+    def leased(
+        command: Sequence[str],
+        cwd: Path,
+        environment: Mapping[str, str],
+        inherited_fds: Sequence[int] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        require(
+            exact_json_equal(_transaction_lock_binding(lock), binding),
+            "scheduler call transaction-lock lease differs",
+        )
+        descriptors = tuple(dict.fromkeys([*inherited_fds, descriptor]))
+        return runner(command, cwd, environment, descriptors)
+
+    setattr(leased, "transaction_lock_binding", binding)
+    return leased
+
+
+def _leased_transaction_lock_binding(runner: SchedulerRunner) -> dict[str, Any]:
+    binding = getattr(runner, "transaction_lock_binding", None)
+    require(
+        isinstance(binding, Mapping)
+        and set(binding) == {"path", "device", "inode", "uid", "mode"}
+        and type(binding.get("uid")) is int
+        and binding.get("uid") == os.getuid()
+        and type(binding.get("mode")) is int
+        and binding.get("mode") == 0o600
+        and all(
+            type(binding.get(key)) is int and binding[key] >= 0
+            for key in ("device", "inode")
+        ),
+        "scheduler runner lacks an authenticated transaction-lock lease",
+    )
+    return dict(binding)
+
+
 def _mkdir_chain_no_symlinks(path: Path, *, leaf_mode: int = 0o700) -> Path:
     destination = path.absolute()
     require(not _lexical_exists(destination), f"directory claim already exists: {destination}")
@@ -2646,9 +2778,15 @@ SCHEDULER_REQUIRED_POLICY_MODULES = frozenset(
         "cli_filter_checks_stale_data.lua",
     }
 )
-REPORT_DEPENDENCY_TEST_REQUIREMENT = {
-    "phase": "after_train_reconciliation_before_report_submission",
-    "dependency": "afterok:<accepted_train_array_job_id>",
+DEPENDENCY_TEST_REQUIREMENT = {
+    "phases": [
+        "after_wave0_reconciliation_before_wave1_submission",
+        "after_wave1_reconciliation_before_report_submission",
+    ],
+    "dependencies": [
+        "afterok:<accepted_wave0_array_job_id>",
+        "afterok:<accepted_wave1_array_job_id>",
+    ],
     "kill_on_invalid_dep": "yes",
     "required": True,
 }
@@ -2823,8 +2961,9 @@ def _scheduler_contract(value: object) -> dict[str, Any]:
         "scheduler control-plane fields differ",
     )
     require(
-        contract
-        == {
+        exact_json_equal(
+            contract,
+            {
             "slurm_conf": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
             "cluster_name": "cs-oci-ord",
             "slurmctld_hosts": ["cs-oci-ord-a", "cs-oci-ord-b"],
@@ -2834,7 +2973,8 @@ def _scheduler_contract(value: object) -> dict[str, Any]:
             "cli_filter_plugins": ["lua"],
             "job_submit_plugins": ["lua"],
             "trust_model": SCHEDULER_TRUST_MODEL,
-        },
+            },
+        ),
         "scheduler control-plane contract differs",
     )
     return contract
@@ -2980,8 +3120,8 @@ def _scheduler_control_plane_capture(
     policy_after = _scheduler_policy_observation(config_path)
     require(
         payload_after == payload_before
-        and config_after == config_before
-        and policy_after == policy_before,
+        and exact_json_equal(config_after, config_before)
+        and exact_json_equal(policy_after, policy_before),
         "scheduler control plane changed while authenticating",
     )
     return payload_before, {
@@ -3002,7 +3142,7 @@ def _scheduler_fallback_config(contract_value: object) -> dict[str, Any]:
     """Capture the authenticated original cluster config for accepted-job control.
 
     The fallback never authorizes sbatch.  Its only consumers are exact-name squeue,
-    exact-ID scancel, and the sealed worker's exact array-element requeue.  Keeping
+    exact-ID scancel, accepted dependency verification, and held-wave release.  Keeping
     the preclaim bytes in the sealed submission contract prevents later critical
     controller/config drift from redirecting or stranding an accepted job ID.
     """
@@ -3011,8 +3151,8 @@ def _scheduler_fallback_config(contract_value: object) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "purpose": (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         ),
         "encoding": "base64",
         "payload_base64": base64.b64encode(payload).decode("ascii"),
@@ -3043,16 +3183,17 @@ def _validated_scheduler_fallback(
         "scheduler fallback config fields differ",
     )
     require(
-        result["schema_version"] == 1
+        type(result["schema_version"]) is int
+        and result["schema_version"] == 1
         and result["purpose"]
         == (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         )
         and result["encoding"] == "base64"
         and isinstance(result["payload_base64"], str)
         and SHA256.fullmatch(str(result["sha256"])) is not None
-        and isinstance(result["size"], int)
+        and type(result["size"]) is int
         and 0 < result["size"] <= 16 * 1024 * 1024,
         "scheduler fallback config metadata differs",
     )
@@ -3069,9 +3210,10 @@ def _validated_scheduler_fallback(
     source = result["source_control_plane"]
     require(
         isinstance(source, Mapping)
+        and type(source.get("schema_version")) is int
         and source.get("schema_version") == 1
         and source.get("trust_model") == SCHEDULER_TRUST_MODEL
-        and source.get("critical") == critical
+        and exact_json_equal(source.get("critical"), critical)
         and isinstance(source.get("config"), Mapping)
         and source["config"].get("sha256") == result["sha256"]
         and isinstance(source["config"].get("identity"), Mapping)
@@ -3080,7 +3222,7 @@ def _validated_scheduler_fallback(
     )
     if expected_source_observation is not None:
         require(
-            source == expected_source_observation,
+            exact_json_equal(source, expected_source_observation),
             "scheduler control plane changed after the exact preclaim",
         )
     return result, payload
@@ -3128,8 +3270,31 @@ def _default_scheduler_runner(
     environment: Mapping[str, str],
     inherited_fds: Sequence[int] = (),
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(command),
+    exact_command = list(command)
+    guard_source = (
+        "import os,subprocess,sys;"
+        "fds=tuple(int(v) for v in sys.argv[1].split(',') if v);"
+        "p=subprocess.run(sys.argv[2:],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,"
+        "stderr=subprocess.PIPE,pass_fds=fds,close_fds=True);"
+        "os.write(1,p.stdout);os.write(2,p.stderr);raise SystemExit(p.returncode)"
+    )
+    outer_command = exact_command
+    if inherited_fds:
+        # This authenticated wrapper, rather than the Slurm client, owns the
+        # inherited flock lease.  It retains every descriptor while synchronously
+        # waiting for the real client, even if that client closes unknown FDs.
+        outer_command = [
+            sys.executable,
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            guard_source,
+            ",".join(map(str, inherited_fds)),
+            *exact_command,
+        ]
+    completed = subprocess.run(
+        outer_command,
         cwd=cwd,
         env=dict(environment),
         check=False,
@@ -3137,6 +3302,12 @@ def _default_scheduler_runner(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         pass_fds=tuple(inherited_fds),
+    )
+    return subprocess.CompletedProcess(
+        exact_command,
+        completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
     )
 
 
@@ -3169,7 +3340,9 @@ def _scheduler_call(
             completed=None,
             observation=None,
         ) from exc
-    if expected_observation is not None and before != expected_observation:
+    if expected_observation is not None and not exact_json_equal(
+        before, expected_observation
+    ):
         raise SchedulerBoundaryError(
             "scheduler control plane differs from the exact preclaim authorization",
             completed=None,
@@ -3186,7 +3359,10 @@ def _scheduler_call(
     except BaseException as exc:
         try:
             after = _scheduler_control_plane_observation(control_plane)
-            require(after == before, "scheduler control plane changed during failed client call")
+            require(
+                exact_json_equal(after, before),
+                "scheduler control plane changed during failed client call",
+            )
         except BaseException as boundary_exc:
             raise SchedulerBoundaryError(
                 f"scheduler client and post-call authentication both failed: {exc}; {boundary_exc}",
@@ -3202,7 +3378,7 @@ def _scheduler_call(
             completed=completed,
             observation=before,
         ) from exc
-    if after != before:
+    if not exact_json_equal(after, before):
         raise SchedulerBoundaryError(
             "scheduler control plane changed during client call",
             completed=completed,
@@ -3257,6 +3433,8 @@ def _reconcile_job_ids(
 ) -> list[str]:
     command = [squeue, "--noheader", f"--name={job_name}", "--format=%A|%j|%u|%T|%k"]
     boundary_error: str | None = None
+    canonical_completed: subprocess.CompletedProcess[str] | None = None
+    canonical_observation: Mapping[str, Any] | None = None
     try:
         completed, observation = _scheduler_call(
             command,
@@ -3265,10 +3443,26 @@ def _reconcile_job_ids(
             runner,
             expected_observation,
         )
+        canonical_completed = completed
+        canonical_observation = observation
     except SchedulerBoundaryError as exc:
         if fallback is None:
             raise
         boundary_error = repr(exc)
+        canonical_completed = exc.completed
+        canonical_observation = exc.observation
+        if observations is not None and canonical_completed is not None:
+            observations.append(
+                {
+                    "command": command,
+                    "mode": "canonical_postcondition_failure",
+                    "returncode": canonical_completed.returncode,
+                    "stdout": canonical_completed.stdout,
+                    "stderr": canonical_completed.stderr,
+                    "control_plane": canonical_observation,
+                    "canonical_boundary_error": boundary_error,
+                }
+            )
         completed, observation = _fallback_scheduler_call(
             command, cwd, control_plane, fallback, runner
         )
@@ -3276,6 +3470,14 @@ def _reconcile_job_ids(
         observations.append(
             {
                 "command": command,
+                "mode": (
+                    "sealed_original_config_fallback"
+                    if boundary_error is not None
+                    else "authenticated_canonical"
+                ),
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
                 "control_plane": observation,
                 "canonical_boundary_error": boundary_error,
             }
@@ -3463,35 +3665,74 @@ def _cancel_exact(
     runner: SchedulerRunner,
     control_plane: object,
     fallback: object,
+    expected_observation: Mapping[str, Any],
     observations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     exact = sorted(set(job_ids), key=int)
     require(exact and all(JOB_ID.fullmatch(value) for value in exact), "refusing non-exact cancellation target")
     command = [scancel, *exact]
     boundary_error: str | None = None
+    attempts: list[dict[str, Any]] = []
     try:
-        completed, observation = _scheduler_call(command, cwd, control_plane, runner)
+        completed, observation = _scheduler_call(
+            command,
+            cwd,
+            control_plane,
+            runner,
+            expected_observation,
+        )
+        attempts.append(
+            {
+                "command": command,
+                "mode": "authenticated_canonical",
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+                "control_plane": observation,
+                "canonical_boundary_error": None,
+            }
+        )
     except SchedulerBoundaryError as exc:
         boundary_error = repr(exc)
+        if exc.completed is not None:
+            attempts.append(
+                {
+                    "command": command,
+                    "mode": "canonical_postcondition_failure",
+                    "returncode": exc.completed.returncode,
+                    "stdout": exc.completed.stdout,
+                    "stderr": exc.completed.stderr,
+                    "control_plane": exc.observation,
+                    "canonical_boundary_error": boundary_error,
+                }
+            )
         if exc.completed is not None and exc.completed.returncode == 0:
-            completed = exc.completed
-            observation = {
-                "schema_version": 1,
-                "mode": "authenticated_canonical_call_with_postcondition_failure",
-                "pre_call": exc.observation,
-            }
+            if observations is not None:
+                observations.extend(attempts)
+            raise SchedulerBoundaryError(
+                "exact cancellation response cannot be authenticated after the "
+                "scheduler control plane changed",
+                completed=exc.completed,
+                observation=exc.observation,
+            ) from exc
         else:
             completed, observation = _fallback_scheduler_call(
                 command, cwd, control_plane, fallback, runner
             )
+            attempts.append(
+                {
+                    "command": command,
+                    "mode": "sealed_original_config_fallback",
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                    "control_plane": observation,
+                    "canonical_boundary_error": boundary_error,
+                }
+            )
     if observations is not None:
-        observations.append(
-            {
-                "command": command,
-                "control_plane": observation,
-                "canonical_boundary_error": boundary_error,
-            }
-        )
+        observations.extend(attempts)
+    require(attempts, "exact cancellation has no scheduler-call evidence")
     require(completed.returncode == 0, f"partial-submission cancellation failed: {completed.stderr.strip()}")
     return {
         "job_ids": exact,
@@ -3500,6 +3741,7 @@ def _cancel_exact(
         "stderr": completed.stderr,
         "scheduler_control_plane": observation,
         "canonical_boundary_error": boundary_error,
+        "scheduler_attempts": attempts,
     }
 
 
@@ -3598,7 +3840,7 @@ def _parse_sbatch_test_only(
         "parsable": "set",
         "partition": (
             str(execution["gpu_partitions"])
-            if role == "train"
+            if role in {"wave0", "wave1"}
             else str(execution["cpu_partition"])
         ),
         "qos": "normal",
@@ -3606,17 +3848,22 @@ def _parse_sbatch_test_only(
         "time": str(execution["walltime"]),
         "verbose": "3",
     }
-    if role == "train":
+    if role in {"wave0", "wave1"}:
         expected.update(
             {
                 "array": "0-19%20",
                 "gpus-per-node": str(execution["gpus_per_task"]),
-                "requeue": "requeue",
+                "no-requeue": "no-requeue",
                 "signal": f"B:USR1@{execution['signal_seconds_before_end']}",
             }
         )
+        if role == "wave0":
+            expected["hold"] = "set"
     if dependency is not None:
-        require(role == "report", "only report may carry a scheduler-test dependency")
+        require(
+            role in {"wave1", "report"},
+            "only dependent DAG roles may carry a scheduler-test dependency",
+        )
         expected.update(
             {
                 "dependency": dependency,
@@ -3639,10 +3886,10 @@ def _parse_sbatch_test_only(
         int(processors) == int(execution["cpus_per_task"]),
         f"{role} scheduler-test processor decision differs",
     )
-    if role == "train":
+    if role in {"wave0", "wave1"}:
         require(
             partition in str(execution["gpu_partitions"]).split(","),
-            "train scheduler-test partition decision differs",
+            f"{role} scheduler-test partition decision differs",
         )
     else:
         require(partition == execution["cpu_partition"], "report scheduler-test partition differs")
@@ -3672,12 +3919,13 @@ def _scontrol_oneliner_field(stdout: str, name: str) -> str:
     return values[0]
 
 
-def _accepted_report_dependency_evidence(
+def _accepted_dependency_evidence(
     *,
     scontrol: str,
-    report_id: str,
-    train_id: str,
-    report_name: str,
+    job_id: str,
+    predecessor_id: str,
+    job_name: str,
+    role: str,
     comment: str,
     cwd: Path,
     runner: SchedulerRunner,
@@ -3685,7 +3933,8 @@ def _accepted_report_dependency_evidence(
     expected_observation: Mapping[str, Any],
     observations: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    command = [scontrol, "show", "job", report_id, "--oneliner"]
+    require(role in {"wave1", "report"}, "accepted dependency role differs")
+    command = [scontrol, "show", "job", job_id, "--oneliner"]
     completed, observation = _scheduler_call(
         command,
         cwd,
@@ -3696,31 +3945,31 @@ def _accepted_report_dependency_evidence(
     observations.append({"command": command, "control_plane": observation})
     require(
         completed.returncode == 0,
-        f"cannot verify accepted report dependency: {completed.stderr.strip()}",
+        f"cannot verify accepted {role} dependency: {completed.stderr.strip()}",
     )
     require(
         len(completed.stdout) <= 1024 * 1024
         and len(completed.stderr) <= 1024 * 1024,
-        "accepted report dependency response is oversized",
+        f"accepted {role} dependency response is oversized",
     )
     require(
-        _scontrol_oneliner_field(completed.stdout, "JobId") == report_id
-        and _scontrol_oneliner_field(completed.stdout, "JobName") == report_name
+        _scontrol_oneliner_field(completed.stdout, "JobId") == job_id
+        and _scontrol_oneliner_field(completed.stdout, "JobName") == job_name
         and _scontrol_oneliner_field(completed.stdout, "Comment") == comment
         and _scontrol_oneliner_field(completed.stdout, "JobState") == "PENDING",
-        "accepted report scheduler identity differs",
+        f"accepted {role} scheduler identity differs",
     )
     dependency = _scontrol_oneliner_field(completed.stdout, "Dependency")
     require(
-        dependency == f"afterok:{train_id}_*(unfulfilled)",
-        "accepted report dependency differs",
+        dependency == f"afterok:{predecessor_id}_*(unfulfilled)",
+        f"accepted {role} dependency differs",
     )
     kill_on_invalid_dependency = _scontrol_oneliner_field(
         completed.stdout, "KillOInInvalidDependent"
     )
     require(
         kill_on_invalid_dependency == "Yes",
-        "accepted report invalid-dependency policy differs",
+        f"accepted {role} invalid-dependency policy differs",
     )
     return {
         "command": command,
@@ -3728,8 +3977,259 @@ def _accepted_report_dependency_evidence(
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "dependency": dependency,
+        "role": role,
         "kill_on_invalid_dependency": kill_on_invalid_dependency,
         "scheduler_control_plane": observation,
+    }
+
+
+def _accepted_wave0_hold_evidence(
+    *,
+    scontrol: str,
+    job_id: str,
+    job_name: str,
+    comment: str,
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    command = [scontrol, "show", "job", job_id, "--oneliner"]
+    completed, observation = _scheduler_call(
+        command, cwd, control_plane, runner, expected_observation
+    )
+    observations.append({"command": command, "control_plane": observation})
+    require(
+        completed.returncode == 0
+        and len(completed.stdout) <= 1024 * 1024
+        and len(completed.stderr) <= 1024 * 1024,
+        f"cannot verify accepted held wave zero: {completed.stderr.strip()}",
+    )
+    require(
+        _scontrol_oneliner_field(completed.stdout, "JobId") == job_id
+        and _scontrol_oneliner_field(completed.stdout, "JobName") == job_name
+        and _scontrol_oneliner_field(completed.stdout, "Comment") == comment
+        and _scontrol_oneliner_field(completed.stdout, "JobState") == "PENDING"
+        and _scontrol_oneliner_field(completed.stdout, "Reason") == "JobHeldUser",
+        "accepted wave zero is not the exact held array",
+    )
+    return {
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "state": "PENDING",
+        "reason": "JobHeldUser",
+        "scheduler_control_plane": observation,
+    }
+
+
+def _release_authorized_wave0(
+    *,
+    scontrol: str,
+    job_id: str,
+    job_name: str,
+    comment: str,
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    release_command = [scontrol, "release", job_id]
+    released, release_observation = _scheduler_call(
+        release_command, cwd, control_plane, runner, expected_observation
+    )
+    observations.append(
+        {"command": release_command, "control_plane": release_observation}
+    )
+    require(
+        released.returncode == 0
+        and len(released.stdout) <= 1024 * 1024
+        and len(released.stderr) <= 1024 * 1024,
+        f"cannot release authorized wave zero: {released.stderr.strip()}",
+    )
+    show_command = [scontrol, "show", "job", job_id, "--oneliner"]
+    shown, show_observation = _scheduler_call(
+        show_command, cwd, control_plane, runner, expected_observation
+    )
+    observations.append({"command": show_command, "control_plane": show_observation})
+    require(
+        shown.returncode == 0
+        and len(shown.stdout) <= 1024 * 1024
+        and len(shown.stderr) <= 1024 * 1024,
+        f"cannot verify released wave zero: {shown.stderr.strip()}",
+    )
+    state = _scontrol_oneliner_field(shown.stdout, "JobState")
+    reason = _scontrol_oneliner_field(shown.stdout, "Reason")
+    require(
+        _scontrol_oneliner_field(shown.stdout, "JobId") == job_id
+        and _scontrol_oneliner_field(shown.stdout, "JobName") == job_name
+        and _scontrol_oneliner_field(shown.stdout, "Comment") == comment
+        and state in {"PENDING", "RUNNING", "COMPLETING", "COMPLETED"}
+        and reason != "JobHeldUser",
+        "wave zero remained held or changed identity after release",
+    )
+    return {
+        "release_command": release_command,
+        "release_returncode": released.returncode,
+        "release_stdout": released.stdout,
+        "release_stderr": released.stderr,
+        "show_command": show_command,
+        "show_returncode": shown.returncode,
+        "show_stdout": shown.stdout,
+        "show_stderr": shown.stderr,
+        "state": state,
+        "reason": reason,
+        "release_scheduler_control_plane": release_observation,
+        "show_scheduler_control_plane": show_observation,
+    }
+
+
+def _validated_wave0_release_evidence(
+    value: object,
+    *,
+    scontrol: str,
+    job_id: str,
+    job_name: str,
+    comment: str,
+    expected_observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate a durable release record before recovery trusts it."""
+
+    require(isinstance(value, Mapping), "wave-zero release evidence is absent")
+    result = dict(value)
+    require(
+        set(result)
+        == {
+            "release_command",
+            "release_returncode",
+            "release_stdout",
+            "release_stderr",
+            "show_command",
+            "show_returncode",
+            "show_stdout",
+            "show_stderr",
+            "state",
+            "reason",
+            "release_scheduler_control_plane",
+            "show_scheduler_control_plane",
+        },
+        "wave-zero release evidence fields differ",
+    )
+    release_performed = result["release_command"] is not None
+    require(
+        (
+            (
+                result["release_command"] == [scontrol, "release", job_id]
+                and type(result["release_returncode"]) is int
+                and result["release_returncode"] == 0
+                and isinstance(result["release_stdout"], str)
+                and isinstance(result["release_stderr"], str)
+                and exact_json_equal(
+                    result["release_scheduler_control_plane"], expected_observation
+                )
+            )
+            if release_performed
+            else (
+                result["release_command"] is None
+                and result["release_returncode"] is None
+                and result["release_stdout"] == ""
+                and result["release_stderr"] == ""
+                and result["release_scheduler_control_plane"] is None
+            )
+        )
+        and result["show_command"]
+        == [scontrol, "show", "job", job_id, "--oneliner"]
+        and type(result["show_returncode"]) is int
+        and result["show_returncode"] == 0
+        and isinstance(result["show_stdout"], str)
+        and isinstance(result["show_stderr"], str)
+        and len(result["release_stdout"]) <= 1024 * 1024
+        and len(result["release_stderr"]) <= 1024 * 1024
+        and len(result["show_stdout"]) <= 1024 * 1024
+        and len(result["show_stderr"]) <= 1024 * 1024,
+        "wave-zero release command/result differs",
+    )
+    state = _scontrol_oneliner_field(result["show_stdout"], "JobState")
+    reason = _scontrol_oneliner_field(result["show_stdout"], "Reason")
+    require(
+        _scontrol_oneliner_field(result["show_stdout"], "JobId") == job_id
+        and _scontrol_oneliner_field(result["show_stdout"], "JobName") == job_name
+        and _scontrol_oneliner_field(result["show_stdout"], "Comment") == comment
+        and state == result["state"]
+        and state in {"PENDING", "RUNNING", "COMPLETING", "COMPLETED"}
+        and reason == result["reason"]
+        and reason != "JobHeldUser"
+        and exact_json_equal(
+            result["show_scheduler_control_plane"], expected_observation
+        ),
+        "wave-zero release identity/state differs",
+    )
+    return result
+
+
+def _ensure_authorized_wave0_released(
+    *,
+    scontrol: str,
+    job_id: str,
+    job_name: str,
+    comment: str,
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    show_command = [scontrol, "show", "job", job_id, "--oneliner"]
+    shown, observation = _scheduler_call(
+        show_command, cwd, control_plane, runner, expected_observation
+    )
+    observations.append({"command": show_command, "control_plane": observation})
+    require(
+        shown.returncode == 0
+        and len(shown.stdout) <= 1024 * 1024
+        and len(shown.stderr) <= 1024 * 1024,
+        f"cannot inspect committed wave zero: {shown.stderr.strip()}",
+    )
+    state = _scontrol_oneliner_field(shown.stdout, "JobState")
+    reason = _scontrol_oneliner_field(shown.stdout, "Reason")
+    require(
+        _scontrol_oneliner_field(shown.stdout, "JobId") == job_id
+        and _scontrol_oneliner_field(shown.stdout, "JobName") == job_name
+        and _scontrol_oneliner_field(shown.stdout, "Comment") == comment,
+        "committed wave-zero identity differs",
+    )
+    if reason == "JobHeldUser":
+        return _release_authorized_wave0(
+            scontrol=scontrol,
+            job_id=job_id,
+            job_name=job_name,
+            comment=comment,
+            cwd=cwd,
+            runner=runner,
+            control_plane=control_plane,
+            expected_observation=expected_observation,
+            observations=observations,
+        )
+    require(
+        state in {"PENDING", "RUNNING", "COMPLETING", "COMPLETED"},
+        "committed wave zero is neither held nor runnable",
+    )
+    return {
+        "release_command": None,
+        "release_returncode": None,
+        "release_stdout": "",
+        "release_stderr": "",
+        "show_command": show_command,
+        "show_returncode": shown.returncode,
+        "show_stdout": shown.stdout,
+        "show_stderr": shown.stderr,
+        "state": state,
+        "reason": reason,
+        "release_scheduler_control_plane": None,
+        "show_scheduler_control_plane": observation,
     }
 
 
@@ -3753,17 +4253,20 @@ def scheduler_preclaim_test(
         path = Path(raw_path)
         _regular_nonsymlink(path, f"scheduler-test {label}")
         require(path.is_absolute() and os.access(path, os.X_OK), f"scheduler-test {label} is not executable")
-    scripts = {
-        "train": _contained_regular_no_symlinks(
+    train_script = _contained_regular_no_symlinks(
             root, PACKAGE_RELATIVE / "train.slurm", "scheduler-test training script"
-        ),
+        )
+    scripts = {
+        "wave0": train_script,
+        "wave1": train_script,
         "report": _contained_regular_no_symlinks(
             root, PACKAGE_RELATIVE / "report.slurm", "scheduler-test report script"
         ),
     }
     job_names = {
-        "train": f"exp23-launch7-scheduler-test-train",
-        "report": f"exp23-launch7-scheduler-test-report",
+        "wave0": "exp23-launch8-scheduler-test-wave0",
+        "wave1": "exp23-launch8-scheduler-test-wave1",
+        "report": "exp23-launch8-scheduler-test-report",
     }
     observations: list[dict[str, Any]] = []
     commands: list[list[str]] = []
@@ -3778,7 +4281,7 @@ def scheduler_preclaim_test(
     require(controller.returncode == 0, f"scontrol show config failed: {controller.stderr.strip()}")
     controller_contract = _parse_controller_configuration(controller.stdout, control_plane)
     expected_user = pwd.getpwuid(os.getuid()).pw_name
-    for role in ("train", "report"):
+    for role in ("wave0", "wave1", "report"):
         queried = call(
             [
                 clients["squeue"],
@@ -3796,10 +4299,11 @@ def scheduler_preclaim_test(
     dummy_logs = dummy_submission / "logs"
     scheduler_comment = f"treewm-exp23:{'0' * 64}"
     outputs = {
-        "train": str(dummy_logs / "train_%A_%a.out"),
+        "wave0": str(dummy_logs / "wave0_%A_%a.out"),
+        "wave1": str(dummy_logs / "wave1_%A_%a.out"),
         "report": str(dummy_logs / "report_%j.out"),
     }
-    for role in ("train", "report"):
+    for role in ("wave0", "wave1", "report"):
         command = [
             clients["sbatch"],
             "-vvv",
@@ -3810,14 +4314,17 @@ def scheduler_preclaim_test(
             f"--comment={scheduler_comment}",
             f"--output={outputs[role]}",
         ]
-        if role == "train":
+        if role in {"wave0", "wave1"}:
             command.append("--array=0-19%20")
+        if role == "wave0":
+            command.append("--hold")
         command.extend(
             [
                 str(scripts[role]),
                 str(root),
                 str(dummy_submission),
                 "0" * 64,
+                *(["0", "none"] if role == "wave0" else (["1", "1"] if role == "wave1" else [])),
             ]
         )
         decisions[role] = _parse_sbatch_test_only(
@@ -3829,7 +4336,7 @@ def scheduler_preclaim_test(
             manifest=manifest,
         )
 
-    for role in ("train", "report"):
+    for role in ("wave0", "wave1", "report"):
         queried = call(
             [
                 clients["squeue"],
@@ -3841,7 +4348,11 @@ def scheduler_preclaim_test(
         )
         require(queried.returncode == 0, f"scheduler-test {role} post-query failed: {queried.stderr.strip()}")
         require(not queried.stdout.strip(), f"sbatch --test-only created a scheduler job: {job_names[role]}")
-    require(observations and all(value == observations[0] for value in observations), "scheduler control plane changed during preclaim test")
+    require(
+        observations
+        and all(exact_json_equal(value, observations[0]) for value in observations),
+        "scheduler control plane changed during preclaim test",
+    )
     return {
         "schema_version": 1,
         "status": "scheduler_preclaim_verified",
@@ -3849,12 +4360,12 @@ def scheduler_preclaim_test(
         "scheduler_control_plane": observations[0],
         "controller_configuration": controller_contract,
         "sbatch_test_only": decisions,
-        "report_dependency_test": REPORT_DEPENDENCY_TEST_REQUIREMENT,
+        "dependency_tests": DEPENDENCY_TEST_REQUIREMENT,
         "scheduler_probe_commands": commands,
         "zero_job_proof": {
             "job_names": job_names,
-            "pre_queries": 2,
-            "post_queries": 2,
+            "pre_queries": 3,
+            "post_queries": 3,
             "matching_jobs_before": 0,
             "matching_jobs_after": 0,
         },
@@ -3878,7 +4389,7 @@ def _validated_scheduler_preclaim(
             "scheduler_control_plane",
             "controller_configuration",
             "sbatch_test_only",
-            "report_dependency_test",
+            "dependency_tests",
             "scheduler_probe_commands",
             "zero_job_proof",
             "scheduler_calls",
@@ -3888,11 +4399,15 @@ def _validated_scheduler_preclaim(
         "scheduler preclaim evidence fields differ",
     )
     require(
-        result["schema_version"] == 1
+        type(result["schema_version"]) is int
+        and result["schema_version"] == 1
         and result["status"] == "scheduler_preclaim_verified"
         and result["campaign_id"] == manifest["campaign_id"]
-        and result["scheduler_calls"] == 7
+        and type(result["scheduler_calls"]) is int
+        and result["scheduler_calls"] == 10
+        and type(result["scheduler_mutation_calls"]) is int
         and result["scheduler_mutation_calls"] == 0
+        and type(result["persistent_writes_performed"]) is int
         and result["persistent_writes_performed"] == 0,
         "scheduler preclaim status differs",
     )
@@ -3900,21 +4415,24 @@ def _validated_scheduler_preclaim(
     observation = result["scheduler_control_plane"]
     require(
         isinstance(observation, Mapping)
+        and type(observation.get("schema_version")) is int
         and observation.get("schema_version") == 1
         and observation.get("trust_model") == SCHEDULER_TRUST_MODEL
-        and observation.get("critical")
-        == {
-            key: control[key]
-            for key in (
-                "cluster_name",
-                "slurmctld_hosts",
-                "slurmctld_port",
-                "auth_type",
-                "gres_types",
-                "cli_filter_plugins",
-                "job_submit_plugins",
-            )
-        }
+        and exact_json_equal(
+            observation.get("critical"),
+            {
+                key: control[key]
+                for key in (
+                    "cluster_name",
+                    "slurmctld_hosts",
+                    "slurmctld_port",
+                    "auth_type",
+                    "gres_types",
+                    "cli_filter_plugins",
+                    "job_submit_plugins",
+                )
+            },
+        )
         and isinstance(observation.get("config"), Mapping)
         and observation["config"].get("path") == control["slurm_conf"]
         and SHA256.fullmatch(str(observation["config"].get("sha256", ""))) is not None
@@ -3926,31 +4444,35 @@ def _validated_scheduler_preclaim(
         "scheduler preclaim control-plane observation differs",
     )
     require(
-        result["controller_configuration"] == observation["critical"],
+        exact_json_equal(
+            result["controller_configuration"], observation["critical"]
+        ),
         "scheduler preclaim controller/config identity differs",
     )
     decisions = result["sbatch_test_only"]
     require(
         isinstance(decisions, Mapping)
-        and set(decisions) == {"train", "report"}
+        and set(decisions) == {"wave0", "wave1", "report"}
         and all(
             isinstance(decisions[role], Mapping)
             and decisions[role].get("role") == role
             and isinstance(decisions[role].get("defined_options"), Mapping)
             and isinstance(decisions[role].get("decision"), Mapping)
             and isinstance(decisions[role].get("warnings"), list)
-            for role in ("train", "report")
+            for role in ("wave0", "wave1", "report")
         ),
         "scheduler preclaim sbatch evidence differs",
     )
     require(
-        result["report_dependency_test"] == REPORT_DEPENDENCY_TEST_REQUIREMENT,
-        "scheduler preclaim report dependency-test requirement differs",
+        exact_json_equal(
+            result["dependency_tests"], DEPENDENCY_TEST_REQUIREMENT
+        ),
+        "scheduler preclaim dependency-test requirement differs",
     )
     commands = result["scheduler_probe_commands"]
     require(
         isinstance(commands, list)
-        and len(commands) == 7
+        and len(commands) == 10
         and all(
             isinstance(command, list)
             and command
@@ -3958,7 +4480,12 @@ def _validated_scheduler_preclaim(
             for command in commands
         )
         and [Path(command[0]).name for command in commands]
-        == ["scontrol", "squeue", "squeue", "sbatch", "sbatch", "squeue", "squeue"]
+        == [
+            "scontrol",
+            "squeue", "squeue", "squeue",
+            "sbatch", "sbatch", "sbatch",
+            "squeue", "squeue", "squeue",
+        ]
         and all(
             Path(command[0]).name != "sbatch" or "--test-only" in command
             for command in commands
@@ -3968,9 +4495,9 @@ def _validated_scheduler_preclaim(
     sbatch_commands = [
         command for command in commands if Path(command[0]).name == "sbatch"
     ]
-    require(len(sbatch_commands) == 2, "scheduler preclaim sbatch command count differs")
+    require(len(sbatch_commands) == 3, "scheduler preclaim sbatch command count differs")
     expected_comment = f"--comment=treewm-exp23:{'0' * 64}"
-    for role, command in zip(("train", "report"), sbatch_commands, strict=True):
+    for role, command in zip(("wave0", "wave1", "report"), sbatch_commands, strict=True):
         output_options = [item for item in command if item.startswith("--output=")]
         require(
             "-vvv" in command
@@ -3981,7 +4508,7 @@ def _validated_scheduler_preclaim(
             and len(output_options) == 1
             and output_options[0].endswith(
                 "scheduler-test-never-executed/logs/"
-                + ("train_%A_%a.out" if role == "train" else "report_%j.out")
+                + (f"{role}_%A_%a.out" if role != "report" else "report_%j.out")
             )
             and decisions[role]["defined_options"].get("comment")
             == expected_comment.split("=", 1)[1]
@@ -3994,23 +4521,33 @@ def _validated_scheduler_preclaim(
             f"scheduler preclaim {role} safe-option parity differs",
         )
     require(
-        "--array=0-19%20" in sbatch_commands[0]
-        and decisions["train"]["defined_options"].get("array") == "0-19%20"
-        and not any(item.startswith("--array=") for item in sbatch_commands[1]),
-        "scheduler preclaim train array parity differs",
+        all(
+            "--array=0-19%20" in sbatch_commands[index]
+            and decisions[role]["defined_options"].get("array") == "0-19%20"
+            and decisions[role]["defined_options"].get("no-requeue") == "no-requeue"
+            for index, role in enumerate(("wave0", "wave1"))
+        )
+        and "--hold" in sbatch_commands[0]
+        and decisions["wave0"]["defined_options"].get("hold") == "set"
+        and "--hold" not in sbatch_commands[1]
+        and not any(item.startswith("--array=") for item in sbatch_commands[2]),
+        "scheduler preclaim two-wave array parity differs",
     )
     require(
-        result["zero_job_proof"]
-        == {
+        exact_json_equal(
+            result["zero_job_proof"],
+            {
             "job_names": {
-                "train": "exp23-launch7-scheduler-test-train",
-                "report": "exp23-launch7-scheduler-test-report",
+                "wave0": "exp23-launch8-scheduler-test-wave0",
+                "wave1": "exp23-launch8-scheduler-test-wave1",
+                "report": "exp23-launch8-scheduler-test-report",
             },
-            "pre_queries": 2,
-            "post_queries": 2,
+            "pre_queries": 3,
+            "post_queries": 3,
             "matching_jobs_before": 0,
             "matching_jobs_after": 0,
-        },
+            },
+        ),
         "scheduler preclaim zero-job evidence differs",
     )
     return result
@@ -4027,11 +4564,220 @@ def _assert_live_transaction(submission_root: Path, *, ready: bool = False) -> N
         submission_root / "journal" / "9998_OUTER_ABORTED.json",
     ]
     if not ready:
-        forbidden.append(submission_root / "journal" / "0005_READY_TO_COMMIT.json")
+        forbidden.append(submission_root / "journal" / "0007_READY_TO_COMMIT.json")
     require(
         not any(_lexical_exists(path) for path in forbidden),
         "submission transaction acquired a terminal/cancellation marker",
     )
+
+
+def _initial_exception_reconcile_and_cancel(
+    *,
+    exception_job_ids: Sequence[str],
+    active_role: str,
+    prior_claimed_ids_by_role: Mapping[str, Sequence[str]],
+    role_names: Mapping[str, str],
+    squeue: str,
+    scancel: str,
+    scheduler_comment: str,
+    cancel_directory: Path,
+    cancel_calling_prefix: str,
+    cancel_result_prefix: str,
+    snapshot_root: Path,
+    scheduler_runner: SchedulerRunner,
+    control_plane: object,
+    scheduler_fallback: object,
+    expected_observation: Mapping[str, Any],
+    scheduler_observations: list[dict[str, Any]],
+    cancel_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Cancel only IDs freshly proven by exact scheduler identity.
+
+    Parsed client/error IDs and previously accepted IDs remain useful provenance
+    claims, but neither is scheduler-mutation authority after an exception.  Every
+    scancel target must appear in the current exact name/comment/owner census.
+    """
+
+    roles = ("wave0", "wave1", "report")
+    require(
+        active_role in roles
+        and set(prior_claimed_ids_by_role) == set(roles)
+        and set(role_names) == set(roles),
+        "initial-abort role mapping differs",
+    )
+    prior_claims = {
+        role: list(prior_claimed_ids_by_role[role]) for role in roles
+    }
+    require(
+        all(
+            all(
+                isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                for item in values
+            )
+            and values == sorted(set(values), key=int)
+            for values in prior_claims.values()
+        )
+        and len(
+            {
+                item
+                for values in prior_claims.values()
+                for item in values
+            }
+        )
+        == sum(len(values) for values in prior_claims.values()),
+        "initial-abort prior claim IDs differ",
+    )
+    parsed_claims = list(exception_job_ids)
+    require(
+        all(
+            isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+            for item in parsed_claims
+        ),
+        "initial-abort exception ID claim differs",
+    )
+    authority: dict[str, list[str]] = {role: [] for role in roles}
+    reconciliation_errors: list[str] = []
+    for role in roles:
+        try:
+            reconciled = _reconcile_job_ids(
+                squeue,
+                role_names[role],
+                scheduler_comment,
+                snapshot_root,
+                scheduler_runner,
+                control_plane,
+                fallback=scheduler_fallback,
+                expected_observation=expected_observation,
+                observations=scheduler_observations,
+            )
+            authority[role].extend(reconciled)
+        except BaseException as reconcile_exc:
+            reconciliation_errors.append(
+                f"{role_names[role]}: {reconcile_exc}"
+            )
+    authority_by_role = {
+        role: sorted(set(values), key=int) for role, values in authority.items()
+    }
+    require(
+        all(len(values) <= 1 for values in authority_by_role.values())
+        and len(
+            {
+                item
+                for values in authority_by_role.values()
+                for item in values
+            }
+        )
+        == sum(len(values) for values in authority_by_role.values()),
+        "initial-abort fresh scheduler authority differs",
+    )
+
+    # Role attribution is globally injective.  Fresh exact-name census has priority,
+    # then previously accepted identities, then untrusted parsed response claims.
+    # Thus a stale wave-zero stdout ID observed while submitting wave one remains a
+    # single wave-zero provenance claim instead of making the abort self-invalid.
+    claimed_by_role: dict[str, list[str]] = {role: [] for role in roles}
+    assigned: dict[str, str] = {}
+    for role in roles:
+        for job_id in authority_by_role[role]:
+            assigned[job_id] = role
+            claimed_by_role[role].append(job_id)
+    for role in roles:
+        for job_id in prior_claims[role]:
+            if job_id not in assigned:
+                assigned[job_id] = role
+                claimed_by_role[role].append(job_id)
+    for job_id in parsed_claims:
+        if job_id not in assigned:
+            assigned[job_id] = active_role
+            claimed_by_role[active_role].append(job_id)
+    claimed_by_role = {
+        role: sorted(values, key=int) for role, values in claimed_by_role.items()
+    }
+    claimed_ids = sorted(
+        {item for values in claimed_by_role.values() for item in values}, key=int
+    )
+    authority_ids = sorted(
+        {item for values in authority_by_role.values() for item in values}, key=int
+    )
+    require(
+        set(authority_ids).issubset(claimed_ids),
+        "initial-abort cancellation authority escaped its provenance claims",
+    )
+    cancellation: Mapping[str, Any] | None = None
+    cancellation_error: str | None = None
+    cancel_history = _validated_recovery_cancel_history(
+        cancel_directory,
+        calling_prefix=cancel_calling_prefix,
+        result_prefix=cancel_result_prefix,
+        context=cancel_context,
+        scancel=scancel,
+        expected_control_plane=expected_observation,
+        fallback=scheduler_fallback,
+    )
+    if authority_ids:
+        try:
+            cancel_history, cancellation = _append_recovery_cancel_attempt(
+                cancel_directory,
+                calling_prefix=cancel_calling_prefix,
+                result_prefix=cancel_result_prefix,
+                context=cancel_context,
+                scancel=scancel,
+                job_ids=authority_ids,
+                cwd=snapshot_root,
+                runner=scheduler_runner,
+                control_plane=control_plane,
+                fallback=scheduler_fallback,
+                expected_observation=expected_observation,
+                observations=scheduler_observations,
+            )
+        except BaseException as cancel_exc:
+            cancellation_error = repr(cancel_exc)
+            cancel_history = _validated_recovery_cancel_history(
+                cancel_directory,
+                calling_prefix=cancel_calling_prefix,
+                result_prefix=cancel_result_prefix,
+                context=cancel_context,
+                scancel=scancel,
+                expected_control_plane=expected_observation,
+                fallback=scheduler_fallback,
+            )
+    return {
+        "known_job_ids": claimed_ids,
+        "job_ids_by_role": claimed_by_role,
+        "cancellation_authority_job_ids": authority_ids,
+        "cancellation_authority_job_ids_by_role": authority_by_role,
+        "reconciliation_errors": reconciliation_errors,
+        "cancellation": cancellation,
+        "cancellation_error": cancellation_error,
+        "cancel_attempt_history": cancel_history,
+    }
+
+
+def _validated_committed_cancel_latch(
+    submission_root: Path, receipt: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Authenticate a committed-receipt cancel latch without ever following it."""
+
+    path = submission_root / "CANCEL_REQUESTED.json"
+    if not _lexical_exists(path):
+        return None
+    value, _latch_sha256 = read_immutable_json(
+        path, "committed cancellation latch"
+    )
+    expected = {
+        "schema_version": 1,
+        "status": "cancel_requested",
+        "campaign_id": receipt["campaign_id"],
+        "submission_sha256": receipt["submission_sha256"],
+        "wave0_array_job_id": receipt["wave0_array_job_id"],
+        "wave1_array_job_id": receipt["wave1_array_job_id"],
+        "report_job_id": receipt["report_job_id"],
+    }
+    require(
+        exact_json_equal(value, expected),
+        "committed cancellation latch differs",
+    )
+    return value
 
 
 def _snapshot_preflight_in_process(
@@ -4230,7 +4976,7 @@ def _restore_snapshot_test_permissions(task_root: Path) -> None:
     root = task_root.absolute()
     require(
         root.parent == temporary_parent
-        and root.name.startswith(f"treewm-exp23-launch7-snapshot-test-{os.getuid()}-"),
+        and root.name.startswith(f"treewm-exp23-launch8-snapshot-test-{os.getuid()}-"),
         "refusing to restore permissions outside a snapshot-test temporary tree",
     )
     if not _lexical_exists(root):
@@ -4284,7 +5030,7 @@ def snapshot_test(
     task_root: Path | None = None
     copied: dict[str, Any] | None = None
     with tempfile.TemporaryDirectory(
-        prefix=f"treewm-exp23-launch7-snapshot-test-{os.getuid()}-",
+        prefix=f"treewm-exp23-launch8-snapshot-test-{os.getuid()}-",
         dir=temporary_parent,
     ) as raw_task_root:
         task_root = Path(raw_task_root)
@@ -4676,59 +5422,73 @@ def _submit_campaign_impl(
         _regular_nonsymlink(Path(path), label)
         require(os.access(path, os.X_OK), f"{label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch7-{token}-train"
-    report_name = f"exp23-launch7-{token}-report"
+    wave0_name = f"exp23-launch8-{token}-wave0"
+    wave1_name = f"exp23-launch8-{token}-wave1"
+    report_name = f"exp23-launch8-{token}-report"
     scheduler_comment = f"treewm-exp23:{submission_sha256}"
     train_script = snapshot_root / PACKAGE_RELATIVE / "train.slurm"
     report_script = snapshot_root / PACKAGE_RELATIVE / "report.slurm"
     _regular_nonsymlink(train_script, "snapshot training Slurm")
     _regular_nonsymlink(report_script, "snapshot report Slurm")
-    train_command = [
+    wave0_command = [
         sbatch,
         "--parsable",
         "--export=NONE",
+        "--hold",
         "--array=0-19%20",
-        f"--job-name={train_name}",
+        f"--job-name={wave0_name}",
         f"--comment={scheduler_comment}",
-        f"--output={logs / 'train_%A_%a.out'}",
+        f"--output={logs / 'wave0_%A_%a.out'}",
         str(train_script),
         str(snapshot_root),
         str(submission_root),
         submission_sha256,
+        "0",
+        "none",
     ]
     known_ids: list[str] = []
-    known_ids_by_role: dict[str, list[str]] = {"train": [], "report": []}
-    active_role = "train"
+    known_ids_by_role: dict[str, list[str]] = {
+        "wave0": [],
+        "wave1": [],
+        "report": [],
+    }
+    active_role = "wave0"
     ready_to_commit = False
     records: dict[str, Any] = {}
     scheduler_observations: list[dict[str, Any]] = []
+    transaction_lock_binding = _leased_transaction_lock_binding(scheduler_runner)
     try:
         _assert_live_transaction(submission_root)
-        _assert_job_absent(
-            squeue,
-            train_name,
-            scheduler_comment,
-            snapshot_root,
-            scheduler_runner,
-            control_plane,
-            scheduler_fallback,
-            submission_authorization,
-            scheduler_observations,
+        for name in (wave0_name, wave1_name, report_name):
+            _assert_job_absent(
+                squeue,
+                name,
+                scheduler_comment,
+                snapshot_root,
+                scheduler_runner,
+                control_plane,
+                scheduler_fallback,
+                submission_authorization,
+                scheduler_observations,
+            )
+        wave0_calling_sha256 = exclusive_json(
+            submission_root / "journal" / "CALLING_WAVE0.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": manifest["campaign_id"],
+                "submission_sha256": submission_sha256,
+                "claim_token": claim_token,
+                "role": "wave0",
+                "job_name": wave0_name,
+                "scheduler_comment": scheduler_comment,
+                "command": wave0_command,
+                "transaction_lock": transaction_lock_binding,
+            },
         )
-        _assert_job_absent(
-            squeue,
-            report_name,
-            scheduler_comment,
-            snapshot_root,
-            scheduler_runner,
-            control_plane,
-            scheduler_fallback,
-            submission_authorization,
-            scheduler_observations,
-        )
-        train_id, train_record = _submit_one(
-            train_command,
-            job_name=train_name,
+        wave0_id, wave0_record = _submit_one(
+            wave0_command,
+            job_name=wave0_name,
             comment=scheduler_comment,
             squeue=squeue,
             cwd=snapshot_root,
@@ -4738,16 +5498,169 @@ def _submit_campaign_impl(
             expected_observation=submission_authorization,
             observations=scheduler_observations,
         )
-        known_ids.append(train_id)
-        known_ids_by_role["train"].append(train_id)
-        records["train"] = train_record
-        append_journal(submission_root, 3, "TRAIN_SUBMITTED", {"job_id": train_id, **train_record})
+        known_ids.append(wave0_id)
+        known_ids_by_role["wave0"].append(wave0_id)
+        wave0_hold = _accepted_wave0_hold_evidence(
+            scontrol=scontrol,
+            job_id=wave0_id,
+            job_name=wave0_name,
+            comment=scheduler_comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
+        )
+        wave0_record = {
+            **wave0_record,
+            "calling_sha256": wave0_calling_sha256,
+            "accepted_hold": wave0_hold,
+        }
+        records["wave0"] = wave0_record
+        append_journal(
+            submission_root, 3, "WAVE0_SUBMITTED", {"job_id": wave0_id, **wave0_record}
+        )
+        _assert_live_transaction(submission_root)
+        wave1_command = [
+            sbatch,
+            "--parsable",
+            "--export=NONE",
+            "--array=0-19%20",
+            f"--dependency=afterok:{wave0_id}",
+            "--kill-on-invalid-dep=yes",
+            f"--job-name={wave1_name}",
+            f"--comment={scheduler_comment}",
+            f"--output={logs / 'wave1_%A_%a.out'}",
+            str(train_script),
+            str(snapshot_root),
+            str(submission_root),
+            submission_sha256,
+            "1",
+            wave0_id,
+        ]
+        active_role = "wave1"
+        wave1_test_command = [
+            sbatch,
+            "-vvv",
+            "--test-only",
+            "--parsable",
+            "--export=NONE",
+            "--array=0-19%20",
+            f"--dependency=afterok:{wave0_id}",
+            "--kill-on-invalid-dep=yes",
+            f"--job-name={wave1_name}",
+            f"--comment={scheduler_comment}",
+            f"--output={logs / 'wave1_%A_%a.out'}",
+            str(train_script),
+            str(snapshot_root),
+            str(submission_root),
+            submission_sha256,
+            "1",
+            wave0_id,
+        ]
+        wave1_test_completed, wave1_test_observation = _scheduler_call(
+            wave1_test_command,
+            snapshot_root,
+            control_plane,
+            scheduler_runner,
+            submission_authorization,
+        )
+        scheduler_observations.append(
+            {
+                "command": wave1_test_command,
+                "control_plane": wave1_test_observation,
+            }
+        )
+        parsed_wave1_test = _parse_sbatch_test_only(
+            wave1_test_completed,
+            role="wave1",
+            job_name=wave1_name,
+            comment=scheduler_comment,
+            output=str(logs / "wave1_%A_%a.out"),
+            manifest=manifest,
+            dependency=f"afterok:{wave0_id}",
+        )
+        _assert_job_absent(
+            squeue,
+            wave1_name,
+            scheduler_comment,
+            snapshot_root,
+            scheduler_runner,
+            control_plane,
+            scheduler_fallback,
+            submission_authorization,
+            scheduler_observations,
+        )
+        wave1_test_evidence = {
+            "command": wave1_test_command,
+            "returncode": wave1_test_completed.returncode,
+            "stdout": wave1_test_completed.stdout,
+            "stderr": wave1_test_completed.stderr,
+            "parsed": parsed_wave1_test,
+            "scheduler_control_plane": wave1_test_observation,
+            "zero_job_after_test": True,
+        }
+        wave1_calling_sha256 = exclusive_json(
+            submission_root / "journal" / "CALLING_WAVE1.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": manifest["campaign_id"],
+                "submission_sha256": submission_sha256,
+                "claim_token": claim_token,
+                "role": "wave1",
+                "job_name": wave1_name,
+                "scheduler_comment": scheduler_comment,
+                "command": wave1_command,
+                "transaction_lock": transaction_lock_binding,
+            },
+        )
+        wave1_id, wave1_record = _submit_one(
+            wave1_command,
+            job_name=wave1_name,
+            comment=scheduler_comment,
+            squeue=squeue,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
+        )
+        known_ids.append(wave1_id)
+        known_ids_by_role["wave1"].append(wave1_id)
+        wave1_dependency_evidence = _accepted_dependency_evidence(
+            scontrol=scontrol,
+            job_id=wave1_id,
+            predecessor_id=wave0_id,
+            job_name=wave1_name,
+            role="wave1",
+            comment=scheduler_comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
+        )
+        wave1_record = {
+            **wave1_record,
+            "calling_sha256": wave1_calling_sha256,
+            "exact_dependency_test_only": wave1_test_evidence,
+            "accepted_dependency": wave1_dependency_evidence,
+        }
+        records["wave1"] = wave1_record
+        append_journal(
+            submission_root,
+            4,
+            "WAVE1_SUBMITTED",
+            {"job_id": wave1_id, **wave1_record},
+        )
         _assert_live_transaction(submission_root)
         report_command = [
             sbatch,
             "--parsable",
             "--export=NONE",
-            f"--dependency=afterok:{train_id}",
+            f"--dependency=afterok:{wave1_id}",
             "--kill-on-invalid-dep=yes",
             f"--job-name={report_name}",
             f"--comment={scheduler_comment}",
@@ -4764,7 +5677,7 @@ def _submit_campaign_impl(
             "--test-only",
             "--parsable",
             "--export=NONE",
-            f"--dependency=afterok:{train_id}",
+            f"--dependency=afterok:{wave1_id}",
             "--kill-on-invalid-dep=yes",
             f"--job-name={report_name}",
             f"--comment={scheduler_comment}",
@@ -4782,10 +5695,7 @@ def _submit_campaign_impl(
             submission_authorization,
         )
         scheduler_observations.append(
-            {
-                "command": report_test_command,
-                "control_plane": report_test_observation,
-            }
+            {"command": report_test_command, "control_plane": report_test_observation}
         )
         parsed_report_test = _parse_sbatch_test_only(
             report_test_completed,
@@ -4794,7 +5704,7 @@ def _submit_campaign_impl(
             comment=scheduler_comment,
             output=str(logs / "report_%j.out"),
             manifest=manifest,
-            dependency=f"afterok:{train_id}",
+            dependency=f"afterok:{wave1_id}",
         )
         _assert_job_absent(
             squeue,
@@ -4816,6 +5726,21 @@ def _submit_campaign_impl(
             "scheduler_control_plane": report_test_observation,
             "zero_job_after_test": True,
         }
+        report_calling_sha256 = exclusive_json(
+            submission_root / "journal" / "CALLING_REPORT.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": manifest["campaign_id"],
+                "submission_sha256": submission_sha256,
+                "claim_token": claim_token,
+                "role": "report",
+                "job_name": report_name,
+                "scheduler_comment": scheduler_comment,
+                "command": report_command,
+                "transaction_lock": transaction_lock_binding,
+            },
+        )
         report_id, report_record = _submit_one(
             report_command,
             job_name=report_name,
@@ -4830,11 +5755,12 @@ def _submit_campaign_impl(
         )
         known_ids.append(report_id)
         known_ids_by_role["report"].append(report_id)
-        dependency_evidence = _accepted_report_dependency_evidence(
+        report_dependency_evidence = _accepted_dependency_evidence(
             scontrol=scontrol,
-            report_id=report_id,
-            train_id=train_id,
-            report_name=report_name,
+            job_id=report_id,
+            predecessor_id=wave1_id,
+            job_name=report_name,
+            role="report",
             comment=scheduler_comment,
             cwd=snapshot_root,
             runner=scheduler_runner,
@@ -4844,39 +5770,167 @@ def _submit_campaign_impl(
         )
         report_record = {
             **report_record,
+            "calling_sha256": report_calling_sha256,
             "exact_dependency_test_only": report_test_evidence,
-            "accepted_dependency": dependency_evidence,
+            "accepted_dependency": report_dependency_evidence,
         }
         records["report"] = report_record
         append_journal(
-            submission_root,
-            4,
-            "REPORT_SUBMITTED",
-            {"job_id": report_id, **report_record},
+            submission_root, 5, "REPORT_SUBMITTED", {"job_id": report_id, **report_record}
         )
         _assert_live_transaction(submission_root)
+        dag_evidence = load_dag_evidence(snapshot_root)
+        try:
+            accepted_job_evidence_sha256 = dag_evidence.validate_dag_records(
+                records,
+                {
+                    "wave0": read_json(
+                        submission_root / "journal" / "CALLING_WAVE0.json"
+                    ),
+                    "wave1": read_json(
+                        submission_root / "journal" / "CALLING_WAVE1.json"
+                    ),
+                    "report": read_json(
+                        submission_root / "journal" / "CALLING_REPORT.json"
+                    ),
+                },
+                {
+                    "wave0": file_sha256(
+                        submission_root / "journal" / "CALLING_WAVE0.json"
+                    ),
+                    "wave1": file_sha256(
+                        submission_root / "journal" / "CALLING_WAVE1.json"
+                    ),
+                    "report": file_sha256(
+                        submission_root / "journal" / "CALLING_REPORT.json"
+                    ),
+                },
+                manifest=manifest,
+                snapshot_root=snapshot_root,
+                submission_root=submission_root,
+                submission_sha256=submission_sha256,
+                claim_token=claim_token,
+                job_ids={
+                    "wave0": wave0_id,
+                    "wave1": wave1_id,
+                    "report": report_id,
+                },
+                expected_control_plane=submission_authorization,
+                expected_lock=transaction_lock_binding,
+            )
+        except BaseException as evidence_exc:
+            raise SubmissionError(
+                f"accepted DAG scheduler evidence differs: {evidence_exc}"
+            ) from evidence_exc
+        authorization = {
+            "schema_version": 1,
+            "status": "authorized_two_wave_dag",
+            "campaign_id": manifest["campaign_id"],
+            "submission_sha256": submission_sha256,
+            "array": "0-19%20",
+            "job_ids": {"wave0": wave0_id, "wave1": wave1_id, "report": report_id},
+            "dependencies": {
+                "wave0": "none",
+                "wave1": f"afterok:{wave0_id}",
+                "report": f"afterok:{wave1_id}",
+            },
+            "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+            "within_wave_requeue": False,
+            "wave0_submitted_held": True,
+            "accepted_job_evidence_sha256": accepted_job_evidence_sha256,
+            "authorized_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        require(set(authorization) == AUTHORIZATION_FIELDS, "DAG authorization fields differ")
+        authorization_sha256 = exclusive_json(
+            submission_root / "SUBMISSION_AUTHORIZATION.json", authorization
+        )
+        append_journal(
+            submission_root,
+            6,
+            "DAG_AUTHORIZED",
+            {
+                "submission_authorization_sha256": authorization_sha256,
+                "accepted_job_evidence_sha256": accepted_job_evidence_sha256,
+                "job_ids": authorization["job_ids"],
+                "dependencies": authorization["dependencies"],
+            },
+        )
         receipt = {
             "schema_version": 1,
-            "status": "submitted",
+            "status": "committed_two_wave_dag",
             "campaign_id": manifest["campaign_id"],
-            "submission_root": str(submission_root),
-            "snapshot_root": str(snapshot_root),
             "submission_sha256": submission_sha256,
-            "train_array_job_id": train_id,
-            "report_job_id": report_id,
+            "submission_authorization_sha256": authorization_sha256,
             "array": "0-19%20",
-            "dependency": f"afterok:{train_id}",
+            "wave0_array_job_id": wave0_id,
+            "wave1_array_job_id": wave1_id,
+            "report_job_id": report_id,
+            "wave1_dependency": f"afterok:{wave0_id}",
+            "report_dependency": f"afterok:{wave1_id}",
+            "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+            "within_wave_requeue": False,
+            "wave0_submitted_held": True,
         }
-        append_journal(submission_root, 5, "READY_TO_COMMIT", receipt)
+        require(set(receipt) == RECEIPT_FIELDS, "DAG receipt fields differ")
+        append_journal(submission_root, 7, "READY_TO_COMMIT", receipt)
         ready_to_commit = True
         _assert_live_transaction(submission_root, ready=True)
-        # The receipt is the transaction's final atomic commit point.  No fallible
-        # journal write follows it.
         exclusive_json(submission_root / "SUBMISSION_RECEIPT.json", receipt)
+        require(
+            _validated_committed_cancel_latch(submission_root, receipt) is None,
+            "durable cancellation forbids wave-zero release",
+        )
+        release_calling_sha256 = exclusive_json(
+            submission_root / "journal" / "CALLING_WAVE0_RELEASE.json",
+            {
+                "schema_version": 1,
+                "status": "scheduler_calling",
+                "campaign_id": manifest["campaign_id"],
+                "submission_sha256": submission_sha256,
+                "claim_token": claim_token,
+                "role": "wave0_release",
+                "job_name": wave0_name,
+                "scheduler_comment": scheduler_comment,
+                "command": [scontrol, "release", wave0_id],
+                "transaction_lock": transaction_lock_binding,
+            },
+        )
+        release_evidence = _release_authorized_wave0(
+            scontrol=scontrol,
+            job_id=wave0_id,
+            job_name=wave0_name,
+            comment=scheduler_comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            expected_observation=submission_authorization,
+            observations=scheduler_observations,
+        )
+        _validated_wave0_release_evidence(
+            release_evidence,
+            scontrol=scontrol,
+            job_id=wave0_id,
+            job_name=wave0_name,
+            comment=scheduler_comment,
+            expected_observation=submission_authorization,
+        )
+        append_journal(
+            submission_root,
+            8,
+            "WAVE0_RELEASED",
+            {
+                "wave0_array_job_id": wave0_id,
+                "submission_authorization_sha256": authorization_sha256,
+                "calling_sha256": release_calling_sha256,
+                "release_evidence": release_evidence,
+            },
+        )
         return {
             **receipt,
-            "scheduler_calls": 9 + int(scheduler_preclaim["scheduler_calls"]),
-            "scheduler_mutation_calls": 2,
+            "wave0_release": "verified",
+            "scheduler_calls": len(scheduler_observations)
+            + int(scheduler_preclaim["scheduler_calls"]),
+            "scheduler_mutation_calls": 4,
             "snapshot_files": len(inventory),
         }
     except BaseException as exc:
@@ -4885,43 +5939,38 @@ def _submit_campaign_impl(
                 f"receipt commit failed after durable READY_TO_COMMIT: {exc}",
                 sorted(set(known_ids), key=int),
             ) from exc
-        # The response itself may have been lost after Slurm accepted a job.  Reconcile
-        # both transaction-unique names, then cancel only the resulting exact IDs.
-        known_ids.extend(getattr(exc, "job_ids", ()))
-        known_ids_by_role[active_role].extend(getattr(exc, "job_ids", ()))
-        reconciliation_errors: list[str] = []
-        for role, name in (("train", train_name), ("report", report_name)):
-            try:
-                reconciled = _reconcile_job_ids(
-                    squeue,
-                    name,
-                    scheduler_comment,
-                    snapshot_root,
-                    scheduler_runner,
-                    control_plane,
-                    fallback=scheduler_fallback,
-                    expected_observation=submission_authorization,
-                    observations=scheduler_observations,
-                )
-                known_ids.extend(reconciled)
-                known_ids_by_role[role].extend(reconciled)
-            except BaseException as reconcile_exc:
-                reconciliation_errors.append(f"{name}: {reconcile_exc}")
-        cancellation: Mapping[str, Any] | None = None
-        cancellation_error: str | None = None
-        if known_ids:
-            try:
-                cancellation = _cancel_exact(
-                    scancel,
-                    sorted(set(known_ids), key=int),
-                    snapshot_root,
-                    scheduler_runner,
-                    control_plane,
-                    scheduler_fallback,
-                    scheduler_observations,
-                )
-            except BaseException as cancel_exc:
-                cancellation_error = repr(cancel_exc)
+        cancel_context = {
+            "schema_version": 1,
+            "status": "scheduler_calling",
+            "campaign_id": CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "claim_token": claim_token,
+            "role": "recovery_cancel",
+            "transaction_lock": transaction_lock_binding,
+        }
+        abort_evidence = _initial_exception_reconcile_and_cancel(
+            exception_job_ids=getattr(exc, "job_ids", ()),
+            active_role=active_role,
+            prior_claimed_ids_by_role=known_ids_by_role,
+            role_names={
+                "wave0": wave0_name,
+                "wave1": wave1_name,
+                "report": report_name,
+            },
+            squeue=squeue,
+            scancel=scancel,
+            scheduler_comment=scheduler_comment,
+            cancel_directory=submission_root / "journal",
+            cancel_calling_prefix="CALLING_RECOVERY_CANCEL",
+            cancel_result_prefix="RECOVERY_CANCEL_RESULT",
+            snapshot_root=snapshot_root,
+            scheduler_runner=scheduler_runner,
+            control_plane=control_plane,
+            scheduler_fallback=scheduler_fallback,
+            expected_observation=submission_authorization,
+            scheduler_observations=scheduler_observations,
+            cancel_context=cancel_context,
+        )
         try:
             append_journal(
                 submission_root,
@@ -4929,32 +5978,39 @@ def _submit_campaign_impl(
                 "ABORTED",
                 {
                     "error": repr(exc),
-                    "known_job_ids": sorted(set(known_ids), key=int),
-                    "job_ids_by_role": {
-                        role: sorted(set(values), key=int)
-                        for role, values in known_ids_by_role.items()
-                    },
+                    "known_job_ids": abort_evidence["known_job_ids"],
+                    "job_ids_by_role": abort_evidence["job_ids_by_role"],
+                    "cancellation_authority_job_ids": abort_evidence[
+                        "cancellation_authority_job_ids"
+                    ],
+                    "cancellation_authority_job_ids_by_role": abort_evidence[
+                        "cancellation_authority_job_ids_by_role"
+                    ],
                     "submission_sha256": submission_sha256,
-                    "reconciliation_errors": reconciliation_errors,
-                    "cancellation": cancellation,
-                    "cancellation_error": cancellation_error,
+                    "reconciliation_errors": abort_evidence[
+                        "reconciliation_errors"
+                    ],
+                    "cancellation": abort_evidence["cancellation"],
+                    "cancellation_error": abort_evidence["cancellation_error"],
+                    "cancel_attempt_history": abort_evidence[
+                        "cancel_attempt_history"
+                    ],
                     "scheduler_control_plane_observations": scheduler_observations,
                 },
             )
         except BaseException:
             pass
         detail = repr(exc)
-        if reconciliation_errors:
-            detail += "; reconciliation=" + "; ".join(reconciliation_errors)
-        if cancellation_error:
-            detail += "; cancellation=" + cancellation_error
+        if abort_evidence["reconciliation_errors"]:
+            detail += "; reconciliation=" + "; ".join(
+                abort_evidence["reconciliation_errors"]
+            )
+        if abort_evidence["cancellation_error"]:
+            detail += "; cancellation=" + abort_evidence["cancellation_error"]
         raise SchedulerSubmissionError(
             f"submission transaction aborted: {detail}",
-            sorted(set(known_ids), key=int),
-            {
-                role: sorted(set(values), key=int)
-                for role, values in known_ids_by_role.items()
-            },
+            abort_evidence["known_job_ids"],
+            abort_evidence["job_ids_by_role"],
         ) from exc
 
 
@@ -4996,10 +6052,18 @@ def _submit_campaign_locked(
                 receipt = submission_root / "SUBMISSION_RECEIPT.json"
                 abort_path = submission_root / "journal" / "9998_OUTER_ABORTED.json"
                 role_values = getattr(exc, "job_ids_by_role", {})
-                role_ids = {
-                    role: sorted(set(map(str, role_values.get(role, ()))), key=int)
-                    for role in ("train", "report")
-                }
+                role_ids: dict[str, list[str]] = {}
+                for role in ("wave0", "wave1", "report"):
+                    raw_role_ids = list(role_values.get(role, ()))
+                    require(
+                        all(
+                            isinstance(item, str)
+                            and JOB_ID.fullmatch(item) is not None
+                            for item in raw_role_ids
+                        ),
+                        f"outer abort {role} ID claims differ",
+                    )
+                    role_ids[role] = sorted(set(raw_role_ids), key=int)
                 contract_path = submission_root / "SUBMISSION_CONTRACT.json"
                 contract_sha256 = (
                     file_sha256(contract_path)
@@ -5018,7 +6082,10 @@ def _submit_campaign_locked(
                     "submission_sha256": contract_sha256,
                 }
                 if _lexical_exists(abort_path):
-                    require(read_json(abort_path) == value, "outer abort journal differs")
+                    require(
+                        exact_json_equal(read_json(abort_path), value),
+                        "outer abort journal differs",
+                    )
                 elif not _lexical_exists(receipt):
                     exclusive_json(abort_path, value)
             except BaseException:
@@ -5048,13 +6115,16 @@ def submit_campaign(
         "scheduler preclaim changed the submission namespace",
     )
     verified_preflight = {**dict(preflight), "scheduler_preclaim": scheduler_preclaim}
-    with _TransactionLock(submission_root):
+    with _TransactionLock(submission_root) as transaction_lock:
+        leased_scheduler_runner = _scheduler_runner_with_lock_lease(
+            scheduler_runner, transaction_lock
+        )
         return _submit_campaign_locked(
             repo_root,
             submission_root,
             verified_preflight,
             audit_runner=audit_runner,
-            scheduler_runner=scheduler_runner,
+            scheduler_runner=leased_scheduler_runner,
         )
 
 
@@ -5063,51 +6133,273 @@ def _receipt_from_ready_record(value: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version",
         "status",
         "campaign_id",
-        "submission_root",
-        "snapshot_root",
         "submission_sha256",
-        "train_array_job_id",
-        "report_job_id",
+        "submission_authorization_sha256",
         "array",
-        "dependency",
+        "wave0_array_job_id",
+        "wave1_array_job_id",
+        "report_job_id",
+        "wave1_dependency",
+        "report_dependency",
+        "kill_on_invalid_dependency",
+        "within_wave_requeue",
+        "wave0_submitted_held",
     )
     require(value.get("record") == "ready_to_commit", "recovery journal is not ready-to-commit")
     require(set(value) == RECEIPT_FIELDS | {"record"}, "recovery READY schema differs")
     receipt = {key: value[key] for key in keys}
-    require(receipt["schema_version"] == 1 and receipt["status"] == "submitted", "recovery receipt state differs")
-    require(JOB_ID.fullmatch(str(receipt["train_array_job_id"])) is not None, "recovery train ID differs")
-    require(JOB_ID.fullmatch(str(receipt["report_job_id"])) is not None, "recovery report ID differs")
-    require(receipt["train_array_job_id"] != receipt["report_job_id"], "recovery job IDs are not distinct")
+    require(
+        type(receipt["schema_version"]) is int
+        and receipt["schema_version"] == 1
+        and receipt["status"] == "committed_two_wave_dag",
+        "recovery receipt state differs",
+    )
+    ids = [
+        receipt[key]
+        for key in ("wave0_array_job_id", "wave1_array_job_id", "report_job_id")
+    ]
+    require(
+        all(
+            isinstance(value, str) and JOB_ID.fullmatch(value) is not None
+            for value in ids
+        ),
+        "recovery job IDs differ",
+    )
+    require(len(set(ids)) == 3, "recovery job IDs are not distinct")
     require(receipt["campaign_id"] == CAMPAIGN_ID and receipt["array"] == "0-19%20", "recovery campaign/array differs")
-    require(receipt["dependency"] == f"afterok:{receipt['train_array_job_id']}", "recovery dependency differs")
+    require(
+        SHA256.fullmatch(str(receipt["submission_authorization_sha256"])) is not None
+        and receipt["wave1_dependency"] == f"afterok:{ids[0]}"
+        and receipt["report_dependency"] == f"afterok:{ids[1]}"
+        and exact_json_equal(
+            receipt["kill_on_invalid_dependency"],
+            {"wave1": "yes", "report": "yes"},
+        )
+        and receipt["within_wave_requeue"] is False
+        and receipt["wave0_submitted_held"] is True,
+        "recovery DAG receipt differs",
+    )
     return receipt
 
 
-def _validated_abort_role_ids(value: Mapping[str, Any], label: str) -> dict[str, list[str]]:
-    raw_roles = value.get("job_ids_by_role")
+def _validated_dag_authorization(
+    submission_root: Path,
+    submission_sha256: str,
+    receipt: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    path = submission_root / "SUBMISSION_AUTHORIZATION.json"
+    authorization, authorization_sha256 = read_immutable_json(
+        path, "submission DAG authorization"
+    )
+    require(set(authorization) == AUTHORIZATION_FIELDS, "DAG authorization schema differs")
+    job_ids = authorization.get("job_ids")
+    dependencies = authorization.get("dependencies")
     require(
-        isinstance(raw_roles, Mapping) and set(raw_roles) == {"train", "report"},
+        type(authorization.get("schema_version")) is int
+        and authorization.get("schema_version") == 1
+        and authorization.get("status") == "authorized_two_wave_dag"
+        and authorization.get("campaign_id") == CAMPAIGN_ID
+        and authorization.get("submission_sha256") == submission_sha256
+        and authorization.get("array") == "0-19%20"
+        and authorization.get("within_wave_requeue") is False
+        and authorization.get("wave0_submitted_held") is True
+        and exact_json_equal(
+            authorization.get("kill_on_invalid_dependency"),
+            {"wave1": "yes", "report": "yes"},
+        )
+        and SHA256.fullmatch(str(authorization.get("accepted_job_evidence_sha256", "")))
+        is not None
+        and isinstance(authorization.get("authorized_at_utc"), str)
+        and bool(authorization["authorized_at_utc"]),
+        "DAG authorization contract differs",
+    )
+    require(
+        isinstance(job_ids, Mapping)
+        and set(job_ids) == {"wave0", "wave1", "report"}
+        and all(
+            isinstance(job_ids[role], str)
+            and JOB_ID.fullmatch(job_ids[role]) is not None
+            for role in job_ids
+        )
+        and len(set(job_ids.values())) == 3,
+        "DAG authorization job IDs differ",
+    )
+    require(
+        exact_json_equal(
+            dependencies,
+            {
+            "wave0": "none",
+            "wave1": f"afterok:{job_ids['wave0']}",
+            "report": f"afterok:{job_ids['wave1']}",
+            },
+        ),
+        "DAG authorization dependencies differ",
+    )
+    receipt_expected = {
+        "submission_authorization_sha256": authorization_sha256,
+        "wave0_array_job_id": job_ids["wave0"],
+        "wave1_array_job_id": job_ids["wave1"],
+        "report_job_id": job_ids["report"],
+        "wave1_dependency": dependencies["wave1"],
+        "report_dependency": dependencies["report"],
+    }
+    for key, expected in receipt_expected.items():
+        require(receipt.get(key) == expected, f"receipt/authorization differs: {key}")
+    records: dict[str, Any] = {}
+    for role, ordinal in (("wave0", 3), ("wave1", 4), ("report", 5)):
+        journal, _journal_sha256 = read_immutable_json(
+            submission_root
+            / "journal"
+            / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json",
+            f"DAG {role} submission journal",
+        )
+        require(
+            type(journal.get("schema_version")) is int
+            and journal.get("schema_version") == 1
+            and journal.get("record") == f"{role}_submitted"
+            and isinstance(journal.get("job_id"), str)
+            and journal.get("job_id") == job_ids[role],
+            f"DAG {role} submission journal differs",
+        )
+        records[role] = {
+            key: value
+            for key, value in journal.items()
+            if key not in {"schema_version", "record", "job_id"}
+        }
+    contract, _contract_sha256 = read_immutable_json(
+        submission_root / "SUBMISSION_CONTRACT.json", "submission contract"
+    )
+    snapshot_root = Path(str(contract.get("snapshot_root", "")))
+    manifest = read_json(snapshot_root / PACKAGE_RELATIVE / "manifest.json")
+    claim, _claim_sha256 = read_immutable_json(
+        submission_root / "journal" / "0000_CLAIMED.json",
+        "DAG transaction claim",
+    )
+    require(
+        set(claim)
+        == {
+            "schema_version",
+            "record",
+            "campaign_id",
+            "submission_root",
+            "claim_token",
+            "scientific_output_fingerprint",
+        }
+        and type(claim.get("schema_version")) is int
+        and claim.get("schema_version") == 1
+        and claim.get("record") == "claimed"
+        and claim.get("campaign_id") == CAMPAIGN_ID
+        and claim.get("submission_root") == str(submission_root)
+        and SHA256.fullmatch(str(claim.get("claim_token", ""))) is not None
+        and SHA256.fullmatch(
+            str(claim.get("scientific_output_fingerprint", ""))
+        )
+        is not None,
+        "DAG transaction claim differs",
+    )
+    calling_records = {}
+    calling_sha256_by_role = {}
+    for role in ("wave0", "wave1", "report"):
+        calling_records[role], calling_sha256_by_role[role] = read_immutable_json(
+            submission_root / "journal" / f"CALLING_{role.upper()}.json",
+            f"DAG {role} scheduler calling intent",
+        )
+    dag_evidence = load_dag_evidence(snapshot_root)
+    try:
+        semantic_hash = dag_evidence.validate_dag_records(
+            records,
+            calling_records,
+            calling_sha256_by_role,
+            manifest=manifest,
+            snapshot_root=snapshot_root,
+            submission_root=submission_root,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim.get("claim_token", "")),
+            job_ids={role: job_ids[role] for role in job_ids},
+            expected_control_plane=contract["scheduler_preclaim"][
+                "scheduler_control_plane"
+            ],
+        )
+    except BaseException as evidence_exc:
+        raise SubmissionError(
+            f"DAG accepted-job semantic evidence differs: {evidence_exc}"
+        ) from evidence_exc
+    require(
+        semantic_hash == authorization["accepted_job_evidence_sha256"],
+        "DAG accepted-job evidence hash differs",
+    )
+    authorized, _authorized_sha256 = read_immutable_json(
+        submission_root / "journal" / "0006_DAG_AUTHORIZED.json",
+        "durable DAG authorization journal",
+    )
+    require(
+        exact_json_equal(
+            authorized,
+            {
+            "schema_version": 1,
+            "record": "dag_authorized",
+            "submission_authorization_sha256": authorization_sha256,
+            "accepted_job_evidence_sha256": authorization[
+                "accepted_job_evidence_sha256"
+            ],
+            "job_ids": dict(job_ids),
+            "dependencies": dict(dependencies),
+            },
+        ),
+        "durable DAG authorization journal differs",
+    )
+    return dict(authorization), authorization_sha256
+
+
+def _validated_abort_role_ids(
+    value: Mapping[str, Any],
+    label: str,
+    *,
+    role_key: str = "job_ids_by_role",
+    flat_key: str = "known_job_ids",
+) -> dict[str, list[str]]:
+    raw_roles = value.get(role_key)
+    require(
+        isinstance(raw_roles, Mapping)
+        and set(raw_roles) == {"wave0", "wave1", "report"},
         f"{label} role-ID mapping differs",
     )
     result: dict[str, list[str]] = {}
-    for role in ("train", "report"):
+    for role in ("wave0", "wave1", "report"):
         raw_values = raw_roles[role]
         require(isinstance(raw_values, list), f"{label} {role} IDs are not a list")
-        values = [str(item) for item in raw_values]
         require(
-            all(JOB_ID.fullmatch(item) is not None for item in values)
-            and values == sorted(set(values), key=int),
+            all(
+                isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                for item in raw_values
+            ),
+            f"{label} {role} IDs differ",
+        )
+        values = list(raw_values)
+        require(
+            values == sorted(set(values), key=int),
             f"{label} {role} IDs differ",
         )
         result[role] = values
     require(
-        not set(result["train"]).intersection(result["report"]),
+        not set(result["wave0"]).intersection(result["wave1"])
+        and not set(result["wave0"]).intersection(result["report"])
+        and not set(result["wave1"]).intersection(result["report"]),
         f"{label} assigns one scheduler ID to both roles",
     )
-    raw_flat = value.get("known_job_ids")
+    raw_flat = value.get(flat_key)
     require(isinstance(raw_flat, list), f"{label} flat IDs are not a list")
-    flat = [str(item) for item in raw_flat]
-    expected = sorted(set(result["train"] + result["report"]), key=int)
+    require(
+        all(
+            isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+            for item in raw_flat
+        ),
+        f"{label} flat IDs differ",
+    )
+    flat = list(raw_flat)
+    expected = sorted(
+        set(result["wave0"] + result["wave1"] + result["report"]), key=int
+    )
     require(flat == expected, f"{label} flat and role-specific IDs differ")
     return result
 
@@ -5140,20 +6432,31 @@ def _validated_successful_cancellation(
             "stderr",
             "scheduler_control_plane",
             "canonical_boundary_error",
+            "scheduler_attempts",
         },
         "abort cancellation evidence schema differs",
     )
     raw_ids = cancellation["job_ids"]
     require(isinstance(raw_ids, list), "abort cancellation IDs are not a list")
-    ids = [str(item) for item in raw_ids]
+    require(
+        all(
+            isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+            for item in raw_ids
+        ),
+        "abort cancellation IDs differ",
+    )
+    ids = list(raw_ids)
     require(
         ids
-        and ids == sorted(set(ids), key=int)
-        and all(JOB_ID.fullmatch(item) is not None for item in ids),
+        and ids == sorted(set(ids), key=int),
         "abort cancellation IDs differ",
     )
     require(
-        ids == sorted(set(map(str, known_ids)), key=int),
+        all(
+            isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+            for item in known_ids
+        )
+        and ids == sorted(set(known_ids), key=int),
         "abort successful cancellation does not cover every known ID",
     )
     require(cancellation["command"] == [scancel, *ids], "abort cancellation command differs")
@@ -5163,6 +6466,8 @@ def _validated_successful_cancellation(
     )
     require(
         isinstance(cancellation["scheduler_control_plane"], Mapping)
+        and isinstance(cancellation["scheduler_attempts"], list)
+        and bool(cancellation["scheduler_attempts"])
         and (
             cancellation["canonical_boundary_error"] is None
             or isinstance(cancellation["canonical_boundary_error"], str)
@@ -5170,6 +6475,1193 @@ def _validated_successful_cancellation(
         "abort cancellation scheduler evidence differs",
     )
     return set(ids)
+
+
+def _recovery_census_rounds(
+    *,
+    squeue: str,
+    role_names: Mapping[str, str],
+    comment: str,
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    fallback: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+    rounds: int = 3,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Require two consecutive identical exact-name censuses after client quiescence."""
+
+    require(rounds >= 3, "recovery census round count is too small")
+    evidence: list[dict[str, Any]] = []
+    for round_index in range(rounds):
+        ids_by_role: dict[str, list[str]] = {}
+        spans_by_role: dict[str, dict[str, int]] = {}
+        for role in ("wave0", "wave1", "report"):
+            attempt_start = len(observations)
+            values = _reconcile_job_ids(
+                squeue,
+                role_names[role],
+                comment,
+                cwd,
+                runner,
+                control_plane,
+                fallback=fallback,
+                expected_observation=expected_observation,
+                observations=observations,
+            )
+            require(
+                len(values) <= 1,
+                f"recovery found multiple exact scheduler identities for {role}",
+            )
+            attempt_stop = len(observations)
+            require(
+                attempt_stop > attempt_start,
+                f"recovery {role} census did not preserve its scheduler attempt",
+            )
+            ids_by_role[role] = values
+            spans_by_role[role] = {
+                "start": attempt_start,
+                "stop": attempt_stop,
+            }
+        require(
+            len({item for values in ids_by_role.values() for item in values})
+            == sum(len(values) for values in ids_by_role.values()),
+            "recovery census assigns one scheduler ID to multiple roles",
+        )
+        evidence.append(
+            {
+                "round": round_index,
+                "job_ids_by_role": ids_by_role,
+                "scheduler_attempt_spans_by_role": spans_by_role,
+            }
+        )
+        if round_index + 1 < rounds:
+            time.sleep(0.25)
+    require(
+        evidence[-2]["job_ids_by_role"] == evidence[-1]["job_ids_by_role"],
+        "recovery scheduler identity did not settle across the final censuses",
+    )
+    return evidence, dict(evidence[-1]["job_ids_by_role"])
+
+
+def _expected_fallback_attempt_control_plane(
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = fallback.get("source_control_plane")
+    require(
+        type(fallback.get("schema_version")) is int
+        and fallback.get("schema_version") == 1
+        and SHA256.fullmatch(str(fallback.get("sha256", ""))) is not None
+        and type(fallback.get("size")) is int
+        and fallback["size"] > 0
+        and isinstance(source, Mapping)
+        and isinstance(source.get("critical"), Mapping),
+        "scheduler fallback attempt binding differs",
+    )
+    return {
+        "schema_version": 1,
+        "mode": "sealed_original_config_fallback",
+        "sha256": fallback["sha256"],
+        "size": fallback["size"],
+        "critical": dict(source["critical"]),
+    }
+
+
+def _validated_scheduler_attempt_ledger(
+    value: object,
+    *,
+    expected_control_plane: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    require(isinstance(value, list), "recovery scheduler-attempt ledger is absent")
+    require(
+        isinstance(expected_control_plane, Mapping),
+        "scheduler attempt canonical control-plane binding is absent",
+    )
+    fallback_control_plane: dict[str, Any] | None = None
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        require(
+            isinstance(raw, Mapping)
+            and set(raw)
+            == {
+                "command",
+                "mode",
+                "returncode",
+                "stdout",
+                "stderr",
+                "control_plane",
+                "canonical_boundary_error",
+            }
+            and isinstance(raw.get("command"), list)
+            and bool(raw["command"])
+            and all(isinstance(item, str) for item in raw["command"])
+            and raw.get("mode")
+            in {
+                "authenticated_canonical",
+                "canonical_postcondition_failure",
+                "sealed_original_config_fallback",
+            }
+            and type(raw.get("returncode")) is int
+            and isinstance(raw.get("stdout"), str)
+            and isinstance(raw.get("stderr"), str)
+            and isinstance(raw.get("control_plane"), Mapping)
+            and (
+                raw.get("canonical_boundary_error") is None
+                or isinstance(raw["canonical_boundary_error"], str)
+            ),
+            f"recovery scheduler attempt {index} differs",
+        )
+        mode = str(raw["mode"])
+        if mode == "authenticated_canonical":
+            require(
+                exact_json_equal(raw["control_plane"], expected_control_plane)
+                and raw["canonical_boundary_error"] is None,
+                f"recovery scheduler attempt {index} canonical binding differs",
+            )
+        elif mode == "canonical_postcondition_failure":
+            require(
+                exact_json_equal(raw["control_plane"], expected_control_plane)
+                and isinstance(raw["canonical_boundary_error"], str)
+                and bool(raw["canonical_boundary_error"]),
+                f"recovery scheduler attempt {index} failed-call binding differs",
+            )
+        else:
+            if fallback_control_plane is None:
+                fallback_control_plane = _expected_fallback_attempt_control_plane(
+                    fallback
+                )
+            require(
+                exact_json_equal(raw["control_plane"], fallback_control_plane)
+                and isinstance(raw["canonical_boundary_error"], str)
+                and bool(raw["canonical_boundary_error"]),
+                f"recovery scheduler attempt {index} fallback binding differs",
+            )
+        result.append(dict(raw))
+    return result
+
+
+def _validated_recovery_cancel_history(
+    directory: Path,
+    *,
+    calling_prefix: str,
+    result_prefix: str,
+    context: Mapping[str, Any],
+    scancel: str,
+    expected_control_plane: Mapping[str, Any],
+    fallback: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate an append-only sequence of exact cancellation call/result pairs."""
+
+    _directory_nonsymlink(directory, "recovery cancellation journal directory")
+    calling_pattern = re.compile(rf"{re.escape(calling_prefix)}_([0-9]{{4}})\.json")
+    result_pattern = re.compile(rf"{re.escape(result_prefix)}_([0-9]{{4}})\.json")
+    calling_indices: set[int] = set()
+    result_indices: set[int] = set()
+    for entry in os.scandir(directory):
+        match = calling_pattern.fullmatch(entry.name)
+        if match is not None:
+            calling_indices.add(int(match.group(1)))
+        match = result_pattern.fullmatch(entry.name)
+        if match is not None:
+            result_indices.add(int(match.group(1)))
+    require(
+        calling_indices == set(range(len(calling_indices)))
+        and result_indices.issubset(calling_indices),
+        "recovery cancellation attempts are not an append-only prefix",
+    )
+    history: list[dict[str, Any]] = []
+    for index in range(len(calling_indices)):
+        calling_name = f"{calling_prefix}_{index:04d}.json"
+        calling_path = directory / calling_name
+        _regular_nonsymlink(calling_path, f"recovery cancellation intent {index}")
+        require(
+            stat.S_IMODE(calling_path.lstat().st_mode) == 0o444,
+            f"recovery cancellation intent {index} mode differs",
+        )
+        calling = read_json(calling_path)
+        raw_ids = calling.get("job_ids")
+        require(
+            isinstance(raw_ids, list)
+            and raw_ids
+            and all(
+                isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                for item in raw_ids
+            )
+            and raw_ids == sorted(set(raw_ids), key=int),
+            f"recovery cancellation intent {index} IDs differ",
+        )
+        job_ids = list(raw_ids)
+        require(
+            exact_json_equal(
+                calling,
+                {
+                **dict(context),
+                "attempt_index": index,
+                "job_ids": job_ids,
+                "command": [scancel, *job_ids],
+                },
+            ),
+            f"recovery cancellation intent {index} differs",
+        )
+        calling_sha256 = file_sha256(calling_path)
+        result_name: str | None = None
+        result_sha256: str | None = None
+        cancellation: dict[str, Any] | None = None
+        if index in result_indices:
+            result_name = f"{result_prefix}_{index:04d}.json"
+            result_path = directory / result_name
+            _regular_nonsymlink(result_path, f"recovery cancellation result {index}")
+            require(
+                stat.S_IMODE(result_path.lstat().st_mode) == 0o444,
+                f"recovery cancellation result {index} mode differs",
+            )
+            result = read_json(result_path)
+            require(
+                set(result)
+                == {
+                    "schema_version",
+                    "status",
+                    "attempt_index",
+                    "calling_sha256",
+                    "cancellation",
+                }
+                and type(result.get("schema_version")) is int
+                and result.get("schema_version") == 1
+                and result.get("status") == "scheduler_cancel_completed"
+                and type(result.get("attempt_index")) is int
+                and result.get("attempt_index") == index
+                and result.get("calling_sha256") == calling_sha256
+                and isinstance(result.get("cancellation"), Mapping),
+                f"recovery cancellation result {index} differs",
+            )
+            raw_cancellation = result["cancellation"]
+            require(
+                set(raw_cancellation)
+                == {
+                    "job_ids",
+                    "command",
+                    "stdout",
+                    "stderr",
+                    "scheduler_control_plane",
+                    "canonical_boundary_error",
+                    "scheduler_attempts",
+                }
+                and raw_cancellation.get("job_ids") == job_ids
+                and raw_cancellation.get("command") == [scancel, *job_ids]
+                and isinstance(raw_cancellation.get("stdout"), str)
+                and isinstance(raw_cancellation.get("stderr"), str)
+                and isinstance(raw_cancellation.get("scheduler_control_plane"), Mapping)
+                and (
+                    raw_cancellation.get("canonical_boundary_error") is None
+                    or isinstance(raw_cancellation["canonical_boundary_error"], str)
+                ),
+                f"recovery cancellation result {index} evidence differs",
+            )
+            scheduler_attempts = _validated_scheduler_attempt_ledger(
+                raw_cancellation.get("scheduler_attempts"),
+                expected_control_plane=expected_control_plane,
+                fallback=fallback,
+            )
+            require(
+                scheduler_attempts
+                and all(
+                    attempt["command"] == [scancel, *job_ids]
+                    for attempt in scheduler_attempts
+                )
+                and scheduler_attempts[-1]["returncode"] == 0,
+                f"recovery cancellation result {index} scheduler attempts differ",
+            )
+            require(
+                (
+                    len(scheduler_attempts) == 1
+                    and scheduler_attempts[0]["mode"]
+                    in {"authenticated_canonical", "sealed_original_config_fallback"}
+                )
+                or (
+                    len(scheduler_attempts) == 2
+                    and scheduler_attempts[0]["mode"]
+                    == "canonical_postcondition_failure"
+                    and scheduler_attempts[0]["returncode"] != 0
+                    and scheduler_attempts[1]["mode"]
+                    == "sealed_original_config_fallback"
+                ),
+                f"recovery cancellation result {index} attempt lineage differs",
+            )
+            terminal_attempt = scheduler_attempts[-1]
+            require(
+                raw_cancellation["stdout"] == terminal_attempt["stdout"]
+                and raw_cancellation["stderr"] == terminal_attempt["stderr"]
+                and exact_json_equal(
+                    raw_cancellation["scheduler_control_plane"],
+                    terminal_attempt["control_plane"],
+                )
+                and raw_cancellation["canonical_boundary_error"]
+                == terminal_attempt["canonical_boundary_error"],
+                f"recovery cancellation result {index} terminal summary differs",
+            )
+            cancellation = dict(raw_cancellation)
+            result_sha256 = file_sha256(result_path)
+        history.append(
+            {
+                "attempt_index": index,
+                "calling_name": calling_name,
+                "calling_sha256": calling_sha256,
+                "job_ids": job_ids,
+                "result_name": result_name,
+                "result_sha256": result_sha256,
+                "cancellation": cancellation,
+            }
+        )
+    return history
+
+
+def _append_recovery_cancel_attempt(
+    directory: Path,
+    *,
+    calling_prefix: str,
+    result_prefix: str,
+    context: Mapping[str, Any],
+    scancel: str,
+    job_ids: Sequence[str],
+    cwd: Path,
+    runner: SchedulerRunner,
+    control_plane: object,
+    fallback: object,
+    expected_observation: Mapping[str, Any],
+    observations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    history = _validated_recovery_cancel_history(
+        directory,
+        calling_prefix=calling_prefix,
+        result_prefix=result_prefix,
+        context=context,
+        scancel=scancel,
+        expected_control_plane=expected_observation,
+        fallback=fallback,
+    )
+    index = len(history)
+    require(
+        all(
+            isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+            for item in job_ids
+        ),
+        "recovery cancellation IDs differ",
+    )
+    exact = sorted(set(job_ids), key=int)
+    require(exact, "recovery cancellation attempt has no exact target")
+    calling_path = directory / f"{calling_prefix}_{index:04d}.json"
+    calling_sha256 = exclusive_json(
+        calling_path,
+        {
+            **dict(context),
+            "attempt_index": index,
+            "job_ids": exact,
+            "command": [scancel, *exact],
+        },
+    )
+    cancellation = _cancel_exact(
+        scancel,
+        exact,
+        cwd,
+        runner,
+        control_plane,
+        fallback,
+        expected_observation,
+        observations,
+    )
+    exclusive_json(
+        directory / f"{result_prefix}_{index:04d}.json",
+        {
+            "schema_version": 1,
+            "status": "scheduler_cancel_completed",
+            "attempt_index": index,
+            "calling_sha256": calling_sha256,
+            "cancellation": cancellation,
+        },
+    )
+    validated = _validated_recovery_cancel_history(
+        directory,
+        calling_prefix=calling_prefix,
+        result_prefix=result_prefix,
+        context=context,
+        scancel=scancel,
+        expected_control_plane=expected_observation,
+        fallback=fallback,
+    )
+    require(
+        len(validated) == index + 1
+        and validated[-1]["cancellation"] == cancellation,
+        "recovery cancellation attempt did not seal exactly",
+    )
+    return validated, cancellation
+
+
+def _validated_recovery_census_rounds(
+    value: object,
+    *,
+    attempts: Sequence[Mapping[str, Any]],
+    role_names: Mapping[str, str],
+    squeue: str,
+    comment: str,
+    label: str,
+    expected_start: int,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]], int]:
+    """Reconstruct every stored census value from its exact successful squeue row."""
+
+    require(isinstance(value, list) and len(value) == 3, f"{label} census differs")
+    expected_user = pwd.getpwuid(os.getuid()).pw_name
+    cursor = expected_start
+    normalized_rounds: list[dict[str, Any]] = []
+    for round_index, raw_round in enumerate(value):
+        require(
+            isinstance(raw_round, Mapping)
+            and set(raw_round)
+            == {
+                "round",
+                "job_ids_by_role",
+                "scheduler_attempt_spans_by_role",
+            }
+            and type(raw_round.get("round")) is int
+            and raw_round.get("round") == round_index,
+            f"{label} census round {round_index} differs",
+        )
+        raw_ids = raw_round["job_ids_by_role"]
+        raw_spans = raw_round["scheduler_attempt_spans_by_role"]
+        require(
+            isinstance(raw_ids, Mapping)
+            and isinstance(raw_spans, Mapping)
+            and set(raw_ids) == set(raw_spans) == {"wave0", "wave1", "report"},
+            f"{label} census role maps differ",
+        )
+        ids_by_role: dict[str, list[str]] = {}
+        spans_by_role: dict[str, dict[str, int]] = {}
+        for role in ("wave0", "wave1", "report"):
+            span = raw_spans[role]
+            require(
+                isinstance(span, Mapping)
+                and set(span) == {"start", "stop"}
+                and type(span.get("start")) is int
+                and type(span.get("stop")) is int
+                and span["start"] == cursor
+                and span["start"] < span["stop"] <= len(attempts),
+                f"{label} {role} scheduler-attempt span differs",
+            )
+            selected = list(attempts[span["start"] : span["stop"]])
+            require(
+                len(selected) in {1, 2},
+                f"{label} {role} scheduler-attempt cardinality differs",
+            )
+            expected_command = [
+                squeue,
+                "--noheader",
+                f"--name={role_names[role]}",
+                "--format=%A|%j|%u|%T|%k",
+            ]
+            require(
+                all(attempt.get("command") == expected_command for attempt in selected)
+                and (
+                    (
+                        len(selected) == 1
+                        and selected[0].get("mode")
+                        in {"authenticated_canonical", "sealed_original_config_fallback"}
+                    )
+                    or (
+                        len(selected) == 2
+                        and selected[0].get("mode")
+                        == "canonical_postcondition_failure"
+                        and selected[1].get("mode")
+                        == "sealed_original_config_fallback"
+                    )
+                ),
+                f"{label} {role} scheduler-attempt lineage differs",
+            )
+            terminal = selected[-1]
+            require(
+                terminal.get("returncode") == 0,
+                f"{label} {role} scheduler census did not succeed",
+            )
+            parsed: set[str] = set()
+            for raw_line in str(terminal.get("stdout", "")).splitlines():
+                if not raw_line.strip():
+                    continue
+                fields = [field.strip() for field in raw_line.strip().split("|", 4)]
+                require(
+                    len(fields) == 5,
+                    f"{label} {role} scheduler census output is malformed",
+                )
+                job_id, actual_name, user, state, actual_comment = fields
+                require(
+                    JOB_ID.fullmatch(job_id) is not None
+                    and actual_name == role_names[role]
+                    and user == expected_user
+                    and bool(state)
+                    and actual_comment == comment,
+                    f"{label} {role} scheduler census identity differs",
+                )
+                parsed.add(job_id)
+            normalized_ids = sorted(parsed, key=int)
+            require(
+                len(normalized_ids) <= 1 and raw_ids[role] == normalized_ids,
+                f"{label} {role} census map was not derived from scheduler stdout",
+            )
+            ids_by_role[role] = normalized_ids
+            spans_by_role[role] = {"start": span["start"], "stop": span["stop"]}
+            cursor = span["stop"]
+        require(
+            len({item for values in ids_by_role.values() for item in values})
+            == sum(len(values) for values in ids_by_role.values()),
+            f"{label} census assigns one scheduler ID to multiple roles",
+        )
+        normalized_rounds.append(
+            {
+                "round": round_index,
+                "job_ids_by_role": ids_by_role,
+                "scheduler_attempt_spans_by_role": spans_by_role,
+            }
+        )
+    require(
+        normalized_rounds[-2]["job_ids_by_role"]
+        == normalized_rounds[-1]["job_ids_by_role"],
+        f"{label} scheduler identity did not settle",
+    )
+    return normalized_rounds, dict(normalized_rounds[-1]["job_ids_by_role"]), cursor
+
+
+def _validated_recovery_cancel_latch(
+    value: object,
+    *,
+    submission_sha256: str,
+    claim_token: str,
+    transaction_lock: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate the historical recovery latch before any scheduler call."""
+
+    require(isinstance(value, Mapping), "recovery cancellation latch is absent")
+    result = dict(value)
+    require(
+        set(result)
+        == {
+            "schema_version",
+            "status",
+            "campaign_id",
+            "submission_sha256",
+            "claim_token",
+            "wave0_array_job_id",
+            "wave1_array_job_id",
+            "report_job_id",
+            "job_ids_by_role",
+            "transaction_lock",
+            "recovery",
+            "scheduler_id_authority",
+        }
+        and type(result.get("schema_version")) is int
+        and result.get("schema_version") == 1
+        and result.get("status") == "cancel_requested"
+        and result.get("campaign_id") == CAMPAIGN_ID
+        and result.get("submission_sha256") == submission_sha256
+        and result.get("claim_token") == claim_token
+        and exact_json_equal(result.get("transaction_lock"), transaction_lock)
+        and result.get("recovery") is True
+        and result.get("scheduler_id_authority")
+        == "fresh_settled_exact_name_census_only",
+        "recovery cancellation latch identity differs",
+    )
+    raw_roles = result.get("job_ids_by_role")
+    require(
+        isinstance(raw_roles, Mapping)
+        and set(raw_roles) == {"wave0", "wave1", "report"},
+        "recovery cancellation latch role map differs",
+    )
+    roles: dict[str, list[str]] = {}
+    for role in ("wave0", "wave1", "report"):
+        raw = raw_roles[role]
+        require(isinstance(raw, list), f"recovery cancellation latch {role} differs")
+        require(
+            all(
+                isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                for item in raw
+            ),
+            f"recovery cancellation latch {role} differs",
+        )
+        normalized = list(raw)
+        require(
+            normalized == sorted(set(normalized), key=int)
+            and len(normalized) <= 1,
+            f"recovery cancellation latch {role} differs",
+        )
+        roles[role] = normalized
+    require(
+        len({item for values in roles.values() for item in values})
+        == sum(len(values) for values in roles.values()),
+        "recovery cancellation latch assigns one scheduler ID to multiple roles",
+    )
+    for role, scalar_key in (
+        ("wave0", "wave0_array_job_id"),
+        ("wave1", "wave1_array_job_id"),
+        ("report", "report_job_id"),
+    ):
+        require(
+            result.get(scalar_key) == (roles[role][0] if roles[role] else None),
+            f"recovery cancellation latch historical {role} fields differ",
+        )
+    return result
+
+
+def _validated_recovery_terminal_record(
+    value: Mapping[str, Any],
+    *,
+    submission_root: Path,
+    submission_sha256: str,
+    claim_token: str,
+    package_protocol_sha256: str,
+    role_names: Mapping[str, str],
+    comment: str,
+    squeue: str,
+    scancel: str,
+    transaction_lock: Mapping[str, Any],
+    expected_control_plane: Mapping[str, Any],
+    scheduler_fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "schema_version",
+        "record",
+        "submission_sha256",
+        "submission_root",
+        "claim_token",
+        "package_protocol_sha256",
+        "status",
+        "durable_claimed_job_ids",
+        "durable_claimed_job_ids_by_role",
+        "live_verified_job_ids",
+        "live_verified_job_ids_by_role",
+        "calling_intent_sha256_by_role",
+        "pre_cancel_census_rounds",
+        "cancelled_live_job_ids",
+        "cancel_latch_sha256",
+        "cancel_calling_sha256",
+        "cancellation",
+        "cancel_attempt_history",
+        "post_cancel_census_rounds",
+        "post_cancel_active_job_ids_by_role",
+        "scheduler_control_plane_observations",
+        "scheduler_calls",
+        "transaction_lock",
+        "new_jobs_created",
+    }
+    require(set(value) == expected_fields, "recovery terminal record fields differ")
+    require(
+        type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and value.get("record") == "recovery_cancelled"
+        and value.get("submission_sha256") == submission_sha256
+        and value.get("submission_root") == str(submission_root)
+        and value.get("claim_token") == claim_token
+        and value.get("package_protocol_sha256") == package_protocol_sha256
+        and type(value.get("new_jobs_created")) is int
+        and value.get("new_jobs_created") == 0
+        and exact_json_equal(value.get("transaction_lock"), transaction_lock),
+        "recovery terminal identity differs",
+    )
+
+    def role_map(
+        raw: object,
+        label: str,
+        *,
+        require_single_current: bool,
+    ) -> dict[str, list[str]]:
+        require(
+            isinstance(raw, Mapping)
+            and set(raw) == {"wave0", "wave1", "report"},
+            f"{label} role map differs",
+        )
+        normalized: dict[str, list[str]] = {}
+        for role in ("wave0", "wave1", "report"):
+            values = raw[role]
+            require(isinstance(values, list), f"{label} {role} IDs differ")
+            require(
+                all(
+                    isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                    for item in values
+                ),
+                f"{label} {role} IDs differ",
+            )
+            converted = list(values)
+            require(
+                converted == sorted(set(converted), key=int)
+                and (not require_single_current or len(converted) <= 1),
+                f"{label} {role} IDs differ",
+            )
+            normalized[role] = converted
+        require(
+            len({item for values in normalized.values() for item in values})
+            == sum(len(values) for values in normalized.values()),
+            f"{label} assigns one scheduler ID to multiple roles",
+        )
+        return normalized
+
+    durable = role_map(
+        value.get("durable_claimed_job_ids_by_role"),
+        "durable claimed",
+        require_single_current=False,
+    )
+    live = role_map(
+        value.get("live_verified_job_ids_by_role"),
+        "live verified",
+        require_single_current=True,
+    )
+    post = role_map(
+        value.get("post_cancel_active_job_ids_by_role"),
+        "post-cancel active",
+        require_single_current=True,
+    )
+    durable_flat = sorted({item for ids in durable.values() for item in ids}, key=int)
+    live_flat = sorted({item for ids in live.values() for item in ids}, key=int)
+    require(
+        value.get("durable_claimed_job_ids") == durable_flat
+        and value.get("live_verified_job_ids") == live_flat,
+        "recovery flat/role job-ID evidence differs",
+    )
+    calling = value.get("calling_intent_sha256_by_role")
+    require(
+        isinstance(calling, Mapping)
+        and set(calling).issubset({"wave0", "wave1", "report"})
+        and all(
+            isinstance(digest, str) and SHA256.fullmatch(digest) is not None
+            for digest in calling.values()
+        ),
+        "recovery calling-intent hashes differ",
+    )
+    attempts = _validated_scheduler_attempt_ledger(
+        value.get("scheduler_control_plane_observations"),
+        expected_control_plane=expected_control_plane,
+        fallback=scheduler_fallback,
+    )
+    pre_rounds, reconstructed_live, attempt_cursor = (
+        _validated_recovery_census_rounds(
+            value.get("pre_cancel_census_rounds"),
+            attempts=attempts,
+            role_names=role_names,
+            squeue=squeue,
+            comment=comment,
+            label="recovery pre-cancel",
+            expected_start=0,
+        )
+    )
+    require(
+        exact_json_equal(reconstructed_live, live),
+        "recovery pre-cancel census differs",
+    )
+    latch_path = submission_root / "CANCEL_REQUESTED.json"
+    _regular_nonsymlink(latch_path, "recovery cancellation latch")
+    require(
+        stat.S_IMODE(latch_path.lstat().st_mode) == 0o444
+        and value.get("cancel_latch_sha256") == file_sha256(latch_path),
+        "recovery cancellation latch bytes differ",
+    )
+    _validated_recovery_cancel_latch(
+        read_json(latch_path),
+        submission_sha256=submission_sha256,
+        claim_token=claim_token,
+        transaction_lock=transaction_lock,
+    )
+    # The latch linearizes cancellation precedence.  Its IDs are a historical
+    # observation only: delayed scheduler visibility may make a later settled
+    # exact-name census nonempty or different.  No scheduler mutation is ever
+    # authorized from these latch fields.
+    cancel_context = {
+        "schema_version": 1,
+        "status": "scheduler_calling",
+        "campaign_id": CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "claim_token": claim_token,
+        "role": "recovery_cancel",
+        "transaction_lock": dict(transaction_lock),
+    }
+    disk_history = _validated_recovery_cancel_history(
+        submission_root / "journal",
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=cancel_context,
+        scancel=scancel,
+        expected_control_plane=expected_control_plane,
+        fallback=scheduler_fallback,
+    )
+    stored_history = value.get("cancel_attempt_history")
+    require(
+        isinstance(stored_history, list)
+        and len(stored_history) <= len(disk_history)
+        and exact_json_equal(stored_history, disk_history[: len(stored_history)]),
+        "recovery cancellation attempt history differs",
+    )
+    last_attempt = stored_history[-1] if stored_history else None
+    require(
+        value.get("cancel_calling_sha256")
+        == (last_attempt["calling_sha256"] if last_attempt else None)
+        and exact_json_equal(
+            value.get("cancellation"),
+            last_attempt["cancellation"] if last_attempt else None,
+        ),
+        "recovery terminal cancellation mirrors differ",
+    )
+    cancelled = value.get("cancelled_live_job_ids")
+    require(cancelled == live_flat, "recovery cancellation targets differ")
+    cancellation = value.get("cancellation")
+    if live_flat:
+        require(
+            last_attempt is not None
+            and last_attempt["job_ids"] == live_flat
+            and last_attempt["cancellation"] is not None,
+            "recovery cancellation calling record differs",
+        )
+        require(
+            value.get("status") == "recovered_terminal_after_cancel_attempts"
+            and isinstance(value.get("cancel_calling_sha256"), str)
+            and SHA256.fullmatch(value["cancel_calling_sha256"]) is not None
+            and isinstance(cancellation, Mapping)
+            and cancellation.get("job_ids") == live_flat
+            and cancellation.get("command") == [scancel, *live_flat]
+            and exact_json_equal(
+                cancellation.get("scheduler_attempts"),
+                [
+                    row
+                    for row in value["scheduler_control_plane_observations"]
+                    if row.get("command") == [scancel, *live_flat]
+                ],
+            ),
+            "recovery exact cancellation evidence differs",
+        )
+        cancellation_attempts = _validated_scheduler_attempt_ledger(
+            cancellation.get("scheduler_attempts"),
+            expected_control_plane=expected_control_plane,
+            fallback=scheduler_fallback,
+        )
+        require(
+            exact_json_equal(
+                attempts[
+                    attempt_cursor : attempt_cursor + len(cancellation_attempts)
+                ],
+                cancellation_attempts,
+            ),
+            "recovery cancellation attempts are not in the scheduler ledger",
+        )
+        attempt_cursor += len(cancellation_attempts)
+        post_rounds, reconstructed_post, attempt_cursor = (
+            _validated_recovery_census_rounds(
+                value.get("post_cancel_census_rounds"),
+                attempts=attempts,
+                role_names=role_names,
+                squeue=squeue,
+                comment=comment,
+                label="recovery post-cancel",
+                expected_start=attempt_cursor,
+            )
+        )
+        require(
+            exact_json_equal(reconstructed_post, post)
+            and exact_json_equal(
+                post, {"wave0": [], "wave1": [], "report": []}
+            ),
+            "recovery post-cancel terminal census differs",
+        )
+    else:
+        require(
+            value.get("status")
+            == (
+                "recovered_terminal_after_cancel_attempts"
+                if stored_history
+                else "recovered_terminal_no_active_jobs"
+            )
+            and value.get("post_cancel_census_rounds") == []
+            and exact_json_equal(
+                post, {"wave0": [], "wave1": [], "report": []}
+            ),
+            "recovery no-active terminal evidence differs",
+        )
+    require(
+        attempt_cursor == len(attempts)
+        and type(value.get("scheduler_calls")) is int
+        and value.get("scheduler_calls") == len(attempts),
+        "recovery scheduler-call count differs",
+    )
+    allowed_queries = {
+        (
+            squeue,
+            "--noheader",
+            f"--name={role_names[role]}",
+            "--format=%A|%j|%u|%T|%k",
+        )
+        for role in ("wave0", "wave1", "report")
+    }
+    require(
+        all(
+            tuple(attempt["command"]) in allowed_queries
+            or attempt["command"] == [scancel, *live_flat]
+            for attempt in attempts
+        ),
+        "recovery scheduler-attempt command escaped exact identities",
+    )
+    return dict(value)
+
+
+def _validated_residual_recovery_chain(
+    directory: Path,
+    *,
+    filename_prefix: str,
+    initial_terminal_path: Path,
+    initial_cancel_history_length: int,
+    identity: Mapping[str, Any],
+    status_prefix: str,
+    cancel_directory: Path,
+    cancel_calling_prefix: str,
+    cancel_result_prefix: str,
+    cancel_context: Mapping[str, Any],
+    role_names: Mapping[str, str],
+    comment: str,
+    squeue: str,
+    scancel: str,
+    expected_control_plane: Mapping[str, Any],
+    scheduler_fallback: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate gap-free immutable residual recovery generations.
+
+    The original terminal record remains generation zero.  A later exact-name job
+    can reappear only through an append-only generation that binds the previous
+    terminal's raw bytes, a fresh census, the exact cancellation history delta,
+    and a terminal empty census.  This avoids both overwriting old evidence and a
+    permanent dead end on delayed scheduler visibility.
+    """
+
+    _directory_nonsymlink(directory, "residual recovery journal directory")
+    _regular_nonsymlink(initial_terminal_path, "initial recovery terminal")
+    require(
+        stat.S_IMODE(initial_terminal_path.lstat().st_mode) == 0o444
+        and type(initial_cancel_history_length) is int
+        and initial_cancel_history_length >= 0,
+        "initial recovery terminal binding differs",
+    )
+    pattern = re.compile(
+        rf"{re.escape(filename_prefix)}_([0-9]{{4}})\.json"
+    )
+    indices: set[int] = set()
+    for entry in os.scandir(directory):
+        match = pattern.fullmatch(entry.name)
+        if match is not None:
+            indices.add(int(match.group(1)))
+    require(
+        indices == set(range(len(indices))),
+        "residual recovery generations are not an append-only prefix",
+    )
+    disk_history = _validated_recovery_cancel_history(
+        cancel_directory,
+        calling_prefix=cancel_calling_prefix,
+        result_prefix=cancel_result_prefix,
+        context=cancel_context,
+        scancel=scancel,
+        expected_control_plane=expected_control_plane,
+        fallback=scheduler_fallback,
+    )
+    previous_name = initial_terminal_path.name
+    previous_sha256 = file_sha256(initial_terminal_path)
+    previous_history_length = initial_cancel_history_length
+    expected_fields = {
+        *identity,
+        "schema_version",
+        "record",
+        "generation",
+        "previous_terminal_name",
+        "previous_terminal_sha256",
+        "status",
+        "live_verified_job_ids",
+        "live_verified_job_ids_by_role",
+        "pre_cancel_census_rounds",
+        "cancelled_live_job_ids",
+        "cancel_history_length_before",
+        "cancel_attempt_history",
+        "cancel_calling_sha256",
+        "cancellation",
+        "post_cancel_census_rounds",
+        "post_cancel_active_job_ids_by_role",
+        "scheduler_control_plane_observations",
+        "scheduler_calls",
+        "new_jobs_created",
+    }
+
+    def role_map(raw: object, label: str) -> dict[str, list[str]]:
+        require(
+            isinstance(raw, Mapping)
+            and set(raw) == {"wave0", "wave1", "report"},
+            f"{label} role map differs",
+        )
+        result: dict[str, list[str]] = {}
+        for role in ("wave0", "wave1", "report"):
+            values = raw[role]
+            require(isinstance(values, list), f"{label} {role} IDs differ")
+            require(
+                all(
+                    isinstance(item, str) and JOB_ID.fullmatch(item) is not None
+                    for item in values
+                ),
+                f"{label} {role} IDs differ",
+            )
+            normalized = list(values)
+            require(
+                len(normalized) <= 1
+                and normalized == sorted(set(normalized), key=int),
+                f"{label} {role} IDs differ",
+            )
+            result[role] = normalized
+        require(
+            len({item for values in result.values() for item in values})
+            == sum(len(values) for values in result.values()),
+            f"{label} assigns one scheduler ID to multiple roles",
+        )
+        return result
+
+    chain: list[dict[str, Any]] = []
+    for generation in range(len(indices)):
+        name = f"{filename_prefix}_{generation:04d}.json"
+        path = directory / name
+        _regular_nonsymlink(path, f"residual recovery generation {generation}")
+        require(
+            stat.S_IMODE(path.lstat().st_mode) == 0o444,
+            f"residual recovery generation {generation} mode differs",
+        )
+        value = read_json(path)
+        require(
+            set(value) == expected_fields
+            and type(value.get("schema_version")) is int
+            and value.get("schema_version") == 1
+            and value.get("record") == "residual_reconciliation"
+            and type(value.get("generation")) is int
+            and value.get("generation") == generation
+            and all(
+                exact_json_equal(value.get(key), expected)
+                for key, expected in identity.items()
+            )
+            and value.get("previous_terminal_name") == previous_name
+            and value.get("previous_terminal_sha256") == previous_sha256
+            and type(value.get("new_jobs_created")) is int
+            and value.get("new_jobs_created") == 0,
+            f"residual recovery generation {generation} identity differs",
+        )
+        attempts = _validated_scheduler_attempt_ledger(
+            value.get("scheduler_control_plane_observations"),
+            expected_control_plane=expected_control_plane,
+            fallback=scheduler_fallback,
+        )
+        live = role_map(
+            value.get("live_verified_job_ids_by_role"),
+            f"residual recovery generation {generation} live",
+        )
+        live_flat = sorted(
+            {item for values in live.values() for item in values}, key=int
+        )
+        require(
+            value.get("live_verified_job_ids") == live_flat
+            and value.get("cancelled_live_job_ids") == live_flat,
+            f"residual recovery generation {generation} flat IDs differ",
+        )
+        _pre, reconstructed_live, cursor = _validated_recovery_census_rounds(
+            value.get("pre_cancel_census_rounds"),
+            attempts=attempts,
+            role_names=role_names,
+            squeue=squeue,
+            comment=comment,
+            label=f"residual recovery generation {generation} pre-cancel",
+            expected_start=0,
+        )
+        require(
+            exact_json_equal(reconstructed_live, live),
+            f"residual recovery generation {generation} census differs",
+        )
+        stored_history = value.get("cancel_attempt_history")
+        require(
+            type(value.get("cancel_history_length_before")) is int
+            and value["cancel_history_length_before"] == previous_history_length
+            and isinstance(stored_history, list)
+            and previous_history_length <= len(stored_history) <= len(disk_history)
+            and exact_json_equal(
+                stored_history, disk_history[: len(stored_history)]
+            ),
+            f"residual recovery generation {generation} cancellation history differs",
+        )
+        post = role_map(
+            value.get("post_cancel_active_job_ids_by_role"),
+            f"residual recovery generation {generation} post-cancel",
+        )
+        if live_flat:
+            require(
+                len(stored_history) > previous_history_length,
+                f"residual recovery generation {generation} lacks a new cancel attempt",
+            )
+            last_attempt = stored_history[-1]
+            cancellation = last_attempt.get("cancellation")
+            require(
+                last_attempt.get("job_ids") == live_flat
+                and isinstance(cancellation, Mapping)
+                and value.get("cancel_calling_sha256")
+                == last_attempt.get("calling_sha256")
+                and exact_json_equal(value.get("cancellation"), cancellation)
+                and value.get("status")
+                == f"{status_prefix}_terminal_after_residual_cancel",
+                f"residual recovery generation {generation} cancellation differs",
+            )
+            cancellation_attempts = _validated_scheduler_attempt_ledger(
+                cancellation.get("scheduler_attempts"),
+                expected_control_plane=expected_control_plane,
+                fallback=scheduler_fallback,
+            )
+            require(
+                exact_json_equal(
+                    attempts[cursor : cursor + len(cancellation_attempts)],
+                    cancellation_attempts,
+                ),
+                f"residual recovery generation {generation} cancel ledger differs",
+            )
+            cursor += len(cancellation_attempts)
+            _post_rounds, reconstructed_post, cursor = (
+                _validated_recovery_census_rounds(
+                    value.get("post_cancel_census_rounds"),
+                    attempts=attempts,
+                    role_names=role_names,
+                    squeue=squeue,
+                    comment=comment,
+                    label=f"residual recovery generation {generation} post-cancel",
+                    expected_start=cursor,
+                )
+            )
+            require(
+                exact_json_equal(reconstructed_post, post)
+                and exact_json_equal(
+                    post, {"wave0": [], "wave1": [], "report": []}
+                ),
+                f"residual recovery generation {generation} is not terminal",
+            )
+        else:
+            require(
+                value.get("status")
+                == f"{status_prefix}_terminal_no_active_jobs"
+                and value.get("cancel_calling_sha256") is None
+                and value.get("cancellation") is None
+                and value.get("post_cancel_census_rounds") == []
+                and exact_json_equal(
+                    post, {"wave0": [], "wave1": [], "report": []}
+                ),
+                f"residual recovery generation {generation} no-active evidence differs",
+            )
+        require(
+            cursor == len(attempts)
+            and type(value.get("scheduler_calls")) is int
+            and value["scheduler_calls"] == len(attempts),
+            f"residual recovery generation {generation} scheduler ledger differs",
+        )
+        chain.append(dict(value))
+        previous_name = name
+        previous_sha256 = file_sha256(path)
+        previous_history_length = len(stored_history)
+    return chain
 
 
 def _recover_transaction_locked(
@@ -5184,24 +7676,29 @@ def _recover_transaction_locked(
     _directory_nonsymlink(repo_root, "repository root")
     submission_root = _directory_nonsymlink(submission_root, "existing submission root")
     contract_path = submission_root / "SUBMISSION_CONTRACT.json"
-    _regular_nonsymlink(contract_path, "recovery submission contract")
-    submission_sha256 = file_sha256(contract_path)
+    contract, submission_sha256 = read_immutable_json(
+        contract_path, "recovery submission contract"
+    )
     seal_path = submission_root / "journal" / "0002_CONTRACT_SEALED.json"
-    _regular_nonsymlink(seal_path, "durable contract-seal journal")
-    seal = read_json(seal_path)
+    seal, _seal_sha256 = read_immutable_json(
+        seal_path, "durable contract-seal journal"
+    )
     require(
-        seal
-        == {
+        exact_json_equal(
+            seal,
+            {
             "schema_version": 1,
             "record": "contract_sealed",
             "submission_sha256": submission_sha256,
             "launch_count": 20,
-        },
+            },
+        ),
         "recovery contract does not match its durable seal journal",
     )
     claim_path = submission_root / "journal" / "0000_CLAIMED.json"
-    _regular_nonsymlink(claim_path, "durable transaction claim")
-    claim = read_json(claim_path)
+    claim, _claim_sha256 = read_immutable_json(
+        claim_path, "durable transaction claim"
+    )
     require(
         set(claim)
         == {
@@ -5212,6 +7709,7 @@ def _recover_transaction_locked(
             "claim_token",
             "scientific_output_fingerprint",
         }
+        and type(claim.get("schema_version")) is int
         and claim.get("schema_version") == 1
         and claim.get("record") == "claimed"
         and claim.get("campaign_id") == CAMPAIGN_ID
@@ -5220,8 +7718,12 @@ def _recover_transaction_locked(
         and SHA256.fullmatch(str(claim.get("scientific_output_fingerprint", ""))) is not None,
         "durable transaction claim differs",
     )
-    contract = read_json(contract_path)
-    require(contract.get("schema_version") == 1 and contract.get("status") == "sealed_for_submission", "recovery contract is not sealed")
+    require(
+        type(contract.get("schema_version")) is int
+        and contract.get("schema_version") == 1
+        and contract.get("status") == "sealed_for_submission",
+        "recovery contract is not sealed",
+    )
     require(contract.get("submission_root") == str(submission_root), "recovery submission root differs")
     snapshot_root = Path(str(contract.get("snapshot_root", "")))
     snapshot_resolved = _directory_nonsymlink(snapshot_root, "recovery snapshot root")
@@ -5258,7 +7760,9 @@ def _recover_transaction_locked(
         "recovery source/runtime contract differs",
     )
     require(
-        contract.get("orchestration_interpreter") == recovered_interpreter,
+        exact_json_equal(
+            contract.get("orchestration_interpreter"), recovered_interpreter
+        ),
         "recovery interpreter contract differs",
     )
     audit_bindings = {
@@ -5275,7 +7779,9 @@ def _recover_transaction_locked(
         manifest["execution"].get("scheduler_control_plane")
     )
     require(
-        contract.get("scheduler_control_plane_contract") == control_plane,
+        exact_json_equal(
+            contract.get("scheduler_control_plane_contract"), control_plane
+        ),
         "recovery scheduler control-plane contract differs",
     )
     verified_scheduler_preclaim = _validated_scheduler_preclaim(
@@ -5287,26 +7793,200 @@ def _recover_transaction_locked(
         verified_scheduler_preclaim["scheduler_control_plane"],
     )[0]
 
+    execution = manifest["execution"]
+    scontrol = str(execution["scontrol"])
+    _regular_nonsymlink(Path(scontrol), "recovery scontrol")
+    require(os.access(scontrol, os.X_OK), "recovery scontrol is not executable")
+    token = submission_sha256[:16]
+    wave0_name = f"exp23-launch8-{token}-wave0"
+    comment = f"treewm-exp23:{submission_sha256}"
+
+    def finish_committed_receipt(
+        receipt: dict[str, Any], recovery_status: str
+    ) -> dict[str, Any]:
+        durable_ready, _durable_ready_sha256 = read_immutable_json(
+            submission_root / "journal" / "0007_READY_TO_COMMIT.json",
+            "durable ready-to-commit journal",
+        )
+        require(
+            exact_json_equal(_receipt_from_ready_record(durable_ready), receipt),
+            "durable READY differs from committed submission receipt",
+        )
+        authorization, authorization_sha256 = _validated_dag_authorization(
+            submission_root, submission_sha256, receipt
+        )
+        cancel_latch = _validated_committed_cancel_latch(submission_root, receipt)
+        committed_receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
+        if _lexical_exists(committed_receipt_path):
+            committed_receipt, _committed_receipt_sha256 = read_immutable_json(
+                committed_receipt_path,
+                "committed submission receipt",
+            )
+            require(
+                exact_json_equal(committed_receipt, receipt),
+                "committed submission receipt bytes differ from recovery authority",
+            )
+        else:
+            require(
+                cancel_latch is not None,
+                "durable READY lacks its committed submission receipt",
+            )
+        release_path = submission_root / "journal" / "0008_WAVE0_RELEASED.json"
+        release_calling_path = (
+            submission_root / "journal" / "CALLING_WAVE0_RELEASE.json"
+        )
+        release_calling_value = {
+            "schema_version": 1,
+            "status": "scheduler_calling",
+            "campaign_id": CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "claim_token": claim["claim_token"],
+            "role": "wave0_release",
+            "job_name": wave0_name,
+            "scheduler_comment": comment,
+            "command": [scontrol, "release", receipt["wave0_array_job_id"]],
+            "transaction_lock": _leased_transaction_lock_binding(
+                scheduler_runner
+            ),
+        }
+        scheduler_observations: list[dict[str, Any]] = []
+        scheduler_calls = 0
+        if cancel_latch is not None and not _lexical_exists(release_path):
+            return {
+                **receipt,
+                "status": "committed_two_wave_dag_cancel_requested",
+                "recovery": recovery_status,
+                "wave0_release": "forbidden_by_durable_cancel",
+                "scheduler_calls": 0,
+                "authorization": authorization,
+                "cancellation": cancel_latch,
+            }
+        if _lexical_exists(release_path):
+            require(
+                _lexical_exists(release_calling_path),
+                "durable wave-zero release calling record is absent",
+            )
+            release_calling, release_calling_sha256 = read_immutable_json(
+                release_calling_path, "durable wave-zero release calling record"
+            )
+            require(
+                exact_json_equal(release_calling, release_calling_value),
+                "durable wave-zero release calling record differs",
+            )
+            released, _released_sha256 = read_immutable_json(
+                release_path, "durable wave-zero release journal"
+            )
+            require(
+                set(released)
+                == {
+                    "schema_version",
+                    "record",
+                    "wave0_array_job_id",
+                    "submission_authorization_sha256",
+                    "calling_sha256",
+                    "release_evidence",
+                }
+                and type(released.get("schema_version")) is int
+                and released.get("schema_version") == 1
+                and released.get("record") == "wave0_released"
+                and released.get("wave0_array_job_id")
+                == receipt["wave0_array_job_id"]
+                and released.get("submission_authorization_sha256")
+                == authorization_sha256
+                and released.get("calling_sha256") == release_calling_sha256
+                and isinstance(released.get("release_evidence"), Mapping),
+                "durable wave-zero release journal differs",
+            )
+            _validated_wave0_release_evidence(
+                released["release_evidence"],
+                scontrol=scontrol,
+                job_id=receipt["wave0_array_job_id"],
+                job_name=wave0_name,
+                comment=comment,
+                expected_observation=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+            )
+        else:
+            require(
+                cancel_latch is None,
+                "durable cancellation forbids recovery wave-zero release",
+            )
+            if _lexical_exists(release_calling_path):
+                release_calling, release_calling_sha256 = read_immutable_json(
+                    release_calling_path,
+                    "recovery wave-zero release calling record",
+                )
+                require(
+                    exact_json_equal(release_calling, release_calling_value),
+                    "recovery wave-zero release calling record differs",
+                )
+            else:
+                release_calling_sha256 = exclusive_json(
+                    release_calling_path, release_calling_value
+                )
+            release_evidence = _ensure_authorized_wave0_released(
+                scontrol=scontrol,
+                job_id=receipt["wave0_array_job_id"],
+                job_name=wave0_name,
+                comment=comment,
+                cwd=snapshot_root,
+                runner=scheduler_runner,
+                control_plane=control_plane,
+                expected_observation=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+                observations=scheduler_observations,
+            )
+            _validated_wave0_release_evidence(
+                release_evidence,
+                scontrol=scontrol,
+                job_id=receipt["wave0_array_job_id"],
+                job_name=wave0_name,
+                comment=comment,
+                expected_observation=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+            )
+            append_journal(
+                submission_root,
+                8,
+                "WAVE0_RELEASED",
+                {
+                    "wave0_array_job_id": receipt["wave0_array_job_id"],
+                    "submission_authorization_sha256": authorization_sha256,
+                    "calling_sha256": release_calling_sha256,
+                    "release_evidence": release_evidence,
+                },
+            )
+            scheduler_calls = len(scheduler_observations)
+        return {
+            **receipt,
+            "status": (
+                "committed_two_wave_dag_cancel_requested_after_release"
+                if cancel_latch is not None
+                else "committed_two_wave_dag"
+            ),
+            "recovery": recovery_status,
+            "wave0_release": "verified",
+            "scheduler_calls": scheduler_calls,
+            "authorization": authorization,
+            **({"cancellation": cancel_latch} if cancel_latch is not None else {}),
+        }
+
     receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
     if _lexical_exists(receipt_path):
-        _regular_nonsymlink(receipt_path, "committed submission receipt")
-        receipt = read_json(receipt_path)
-        require(set(receipt) == RECEIPT_FIELDS, "committed receipt schema differs")
-        require(receipt.get("schema_version") == 1 and receipt.get("status") == "submitted", "committed receipt status differs")
-        require(receipt.get("campaign_id") == CAMPAIGN_ID, "committed receipt campaign differs")
-        require(receipt.get("submission_root") == str(submission_root), "committed receipt root differs")
-        require(receipt.get("snapshot_root") == str(snapshot_root), "committed receipt snapshot differs")
-        require(receipt.get("submission_sha256") == submission_sha256, "committed receipt submission differs")
-        train_id = str(receipt.get("train_array_job_id", ""))
-        report_id = str(receipt.get("report_job_id", ""))
-        require(JOB_ID.fullmatch(train_id) is not None and JOB_ID.fullmatch(report_id) is not None and train_id != report_id, "committed receipt job IDs differ")
-        require(receipt.get("array") == "0-19%20" and receipt.get("dependency") == f"afterok:{train_id}", "committed receipt scheduling contract differs")
-        for role, ordinal, expected_id in (("train", 3, train_id), ("report", 4, report_id)):
-            submitted = read_json(submission_root / "journal" / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json")
-            require(submitted.get("record") == f"{role}_submitted" and str(submitted.get("job_id")) == expected_id, f"committed receipt {role} journal differs")
-        return {**receipt, "status": "submitted", "recovery": "already_committed", "scheduler_calls": 0}
+        receipt, _receipt_sha256 = read_immutable_json(
+            receipt_path, "committed submission receipt"
+        )
+        validated = _receipt_from_ready_record({"record": "ready_to_commit", **receipt})
+        require(
+            validated["submission_sha256"] == submission_sha256,
+            "committed receipt submission differs",
+        )
+        return finish_committed_receipt(validated, "already_committed")
 
-    ready_path = submission_root / "journal" / "0005_READY_TO_COMMIT.json"
+    ready_path = submission_root / "journal" / "0007_READY_TO_COMMIT.json"
     if _lexical_exists(ready_path):
         require(
             not any(
@@ -5315,40 +7995,20 @@ def _recover_transaction_locked(
             ),
             "durable READY conflicts with an aborted/cancelled transaction",
         )
-        ready = read_json(ready_path)
+        ready, _ready_sha256 = read_immutable_json(
+            ready_path, "durable ready-to-commit journal"
+        )
         receipt = _receipt_from_ready_record(ready)
         require(receipt["submission_sha256"] == submission_sha256, "ready receipt submission differs")
-        require(receipt["submission_root"] == str(submission_root), "ready receipt root differs")
-        require(receipt["snapshot_root"] == str(snapshot_root), "ready receipt snapshot differs")
-        for role, ordinal, receipt_key in (
-            ("train", 3, "train_array_job_id"),
-            ("report", 4, "report_job_id"),
-        ):
-            submitted = read_json(
-                submission_root / "journal" / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json"
+        if _validated_committed_cancel_latch(submission_root, receipt) is not None:
+            return finish_committed_receipt(
+                receipt, "durable_ready_cancel_precedence"
             )
-            require(
-                submitted.get("record") == f"{role}_submitted"
-                and str(submitted.get("job_id")) == str(receipt[receipt_key]),
-                f"ready receipt {role} ID differs from durable submission journal",
-            )
-        require(not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"), "cancelled transaction cannot be committed")
+        _validated_dag_authorization(submission_root, submission_sha256, receipt)
         exclusive_json(receipt_path, receipt)
-        return {**receipt, "recovery": "committed_from_durable_ready_record", "scheduler_calls": 0}
-
-    prior_recovery_path = submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
-    if _lexical_exists(prior_recovery_path):
-        prior = read_json(prior_recovery_path)
-        require(
-            prior.get("record") == "recovery_cancelled"
-            and prior.get("submission_sha256") == submission_sha256
-            and prior.get("status") == "recovered_cancelled_transaction"
-            and prior.get("new_jobs_created") == 0,
-            "durable recovery-cancellation record differs",
+        return finish_committed_receipt(
+            receipt, "committed_from_durable_ready_record"
         )
-        require(not prior.get("cancellation_error"), "prior exact cancellation failed")
-        require(not prior.get("reconciliation_errors"), "prior recovery had unresolved role reconciliation")
-        return {**prior, "scheduler_calls": 0}
 
     execution = manifest["execution"]
     sbatch = str(execution["sbatch"])
@@ -5358,18 +8018,73 @@ def _recover_transaction_locked(
         _regular_nonsymlink(Path(path), f"recovery {label}")
         require(os.access(path, os.X_OK), f"recovery {label} is not executable")
     token = submission_sha256[:16]
-    train_name = f"exp23-launch7-{token}-train"
-    report_name = f"exp23-launch7-{token}-report"
+    wave0_name = f"exp23-launch8-{token}-wave0"
+    wave1_name = f"exp23-launch8-{token}-wave1"
+    report_name = f"exp23-launch8-{token}-report"
     comment = f"treewm-exp23:{submission_sha256}"
-    role_names = {"train": train_name, "report": report_name}
+    role_names = {"wave0": wave0_name, "wave1": wave1_name, "report": report_name}
     journal_paths = {
-        "train": submission_root / "journal" / "0003_TRAIN_SUBMITTED.json",
-        "report": submission_root / "journal" / "0004_REPORT_SUBMITTED.json",
+        "wave0": submission_root / "journal" / "0003_WAVE0_SUBMITTED.json",
+        "wave1": submission_root / "journal" / "0004_WAVE1_SUBMITTED.json",
+        "report": submission_root / "journal" / "0005_REPORT_SUBMITTED.json",
     }
-    aborted_ids_by_role: dict[str, list[str]] = {"train": [], "report": []}
+    transaction_lock_binding = _leased_transaction_lock_binding(scheduler_runner)
+    cancel_context = {
+        "schema_version": 1,
+        "status": "scheduler_calling",
+        "campaign_id": CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "claim_token": claim["claim_token"],
+        "role": "recovery_cancel",
+        "transaction_lock": transaction_lock_binding,
+    }
+    existing_cancel_history = _validated_recovery_cancel_history(
+        submission_root / "journal",
+        calling_prefix="CALLING_RECOVERY_CANCEL",
+        result_prefix="RECOVERY_CANCEL_RESULT",
+        context=cancel_context,
+        scancel=scancel,
+        expected_control_plane=verified_scheduler_preclaim[
+            "scheduler_control_plane"
+        ],
+        fallback=scheduler_fallback,
+    )
+    prior_recovery_path = submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
+    prior_recovery: dict[str, Any] | None = None
+    if _lexical_exists(prior_recovery_path):
+        _regular_nonsymlink(prior_recovery_path, "terminal recovery journal")
+        require(
+            stat.S_IMODE(prior_recovery_path.lstat().st_mode) == 0o444,
+            "terminal recovery journal mode differs",
+        )
+        prior_recovery = _validated_recovery_terminal_record(
+            read_json(prior_recovery_path),
+            submission_root=submission_root,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim["claim_token"]),
+            package_protocol_sha256=recovered_protocol,
+            role_names=role_names,
+            comment=comment,
+            squeue=squeue,
+            scancel=scancel,
+            transaction_lock=transaction_lock_binding,
+            expected_control_plane=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            scheduler_fallback=scheduler_fallback,
+        )
+
+    aborted_ids_by_role: dict[str, list[str]] = {
+        "wave0": [], "wave1": [], "report": []
+    }
     aborted: dict[str, Any] | None = None
     aborted_path = submission_root / "journal" / "9999_ABORTED.json"
     if _lexical_exists(aborted_path):
+        _regular_nonsymlink(aborted_path, "initial abort journal")
+        require(
+            stat.S_IMODE(aborted_path.lstat().st_mode) == 0o444,
+            "initial abort journal mode differs",
+        )
         aborted = read_json(aborted_path)
         require(
             set(aborted)
@@ -5379,12 +8094,16 @@ def _recover_transaction_locked(
                 "error",
                 "known_job_ids",
                 "job_ids_by_role",
+                "cancellation_authority_job_ids",
+                "cancellation_authority_job_ids_by_role",
                 "submission_sha256",
                 "reconciliation_errors",
                 "cancellation",
                 "cancellation_error",
+                "cancel_attempt_history",
                 "scheduler_control_plane_observations",
             }
+            and type(aborted.get("schema_version")) is int
             and aborted.get("schema_version") == 1
             and aborted.get("record") == "aborted"
             and aborted.get("submission_sha256") == submission_sha256,
@@ -5397,8 +8116,42 @@ def _recover_transaction_locked(
             "abort error evidence differs",
         )
         aborted_ids_by_role = _validated_abort_role_ids(aborted, "abort")
+        abort_authority_by_role = _validated_abort_role_ids(
+            aborted,
+            "abort cancellation authority",
+            role_key="cancellation_authority_job_ids_by_role",
+            flat_key="cancellation_authority_job_ids",
+        )
+        require(
+            all(
+                set(abort_authority_by_role[role]).issubset(
+                    aborted_ids_by_role[role]
+                )
+                for role in ("wave0", "wave1", "report")
+            ),
+            "abort cancellation authority escaped the claimed role identity",
+        )
+        aborted_history = aborted.get("cancel_attempt_history")
+        require(
+            isinstance(aborted_history, list)
+            and len(aborted_history) <= len(existing_cancel_history)
+            and exact_json_equal(
+                aborted_history,
+                existing_cancel_history[: len(aborted_history)],
+            )
+            and exact_json_equal(
+                aborted.get("cancellation"),
+                aborted_history[-1]["cancellation"] if aborted_history else None,
+            ),
+            "abort cancellation attempt history differs",
+        )
     outer_path = submission_root / "journal" / "9998_OUTER_ABORTED.json"
     if _lexical_exists(outer_path):
+        _regular_nonsymlink(outer_path, "outer abort journal")
+        require(
+            stat.S_IMODE(outer_path.lstat().st_mode) == 0o444,
+            "outer abort journal mode differs",
+        )
         outer = read_json(outer_path)
         require(
             set(outer)
@@ -5412,6 +8165,7 @@ def _recover_transaction_locked(
                 "claim_token",
                 "submission_sha256",
             }
+            and type(outer.get("schema_version")) is int
             and outer.get("schema_version") == 1
             and outer.get("record") == "outer_aborted"
             and outer.get("receipt_committed") is False
@@ -5421,104 +8175,495 @@ def _recover_transaction_locked(
             "outer-abort journal is not authenticated to the recovery contract",
         )
         outer_roles = _validated_abort_role_ids(outer, "outer abort")
-        for role in ("train", "report"):
+        for role in ("wave0", "wave1", "report"):
             aborted_ids_by_role[role] = sorted(
                 set(aborted_ids_by_role[role] + outer_roles[role]), key=int
             )
-    ids_by_role: dict[str, list[str]] = {}
-    reconciliation_errors: dict[str, str] = {}
-    scheduler_observations: list[dict[str, Any]] = []
-    for role, name in role_names.items():
-        known: list[str] = list(aborted_ids_by_role[role])
+
+    dag_evidence = load_dag_evidence(snapshot_root)
+    records: dict[str, Any] = {}
+    calling_records: dict[str, Any] = {}
+    journal_ids: dict[str, str] = {}
+    found_gap = False
+    for role in ("wave0", "wave1", "report"):
         journal_path = journal_paths[role]
-        if _lexical_exists(journal_path):
-            record = read_json(journal_path)
-            expected_record = f"{role}_submitted"
-            require(record.get("record") == expected_record, f"recovery {role} journal record differs")
-            journal_id = str(record.get("job_id", ""))
-            require(JOB_ID.fullmatch(journal_id) is not None, f"recovery {role} journal ID differs")
-            known.append(journal_id)
+        if not _lexical_exists(journal_path):
+            found_gap = True
+            continue
+        require(not found_gap, "recovery submission journals are not a contiguous prefix")
+        _regular_nonsymlink(journal_path, f"recovery {role} submitted journal")
+        require(
+            stat.S_IMODE(journal_path.lstat().st_mode) == 0o444,
+            f"recovery {role} submitted journal mode differs",
+        )
+        journal = read_json(journal_path)
+        require(
+            type(journal.get("schema_version")) is int
+            and journal.get("schema_version") == 1
+            and journal.get("record") == f"{role}_submitted",
+            f"recovery {role} journal record differs",
+        )
+        journal_id = journal.get("job_id")
+        require(
+            isinstance(journal_id, str)
+            and JOB_ID.fullmatch(journal_id) is not None,
+            f"recovery {role} journal ID differs",
+        )
+        journal_ids[role] = journal_id
+        records[role] = {
+            key: item
+            for key, item in journal.items()
+            if key not in {"schema_version", "record", "job_id"}
+        }
+        calling_path = (
+            submission_root / "journal" / f"CALLING_{role.upper()}.json"
+        )
+        require(
+            _lexical_exists(calling_path),
+            f"recovery {role} journal lacks its pre-call intent",
+        )
+        calling_records[role] = read_json(calling_path)
+
+    calling_hashes: dict[str, str] = {}
+    calling_seen_gap = False
+    for role in ("wave0", "wave1", "report"):
+        path = submission_root / "journal" / f"CALLING_{role.upper()}.json"
+        if not _lexical_exists(path):
+            calling_seen_gap = True
+            continue
+        require(
+            not calling_seen_gap,
+            "recovery scheduler calling intents are not a contiguous prefix",
+        )
+        _regular_nonsymlink(path, f"recovery {role} scheduler calling intent")
+        require(
+            stat.S_IMODE(path.lstat().st_mode) == 0o444,
+            f"recovery {role} scheduler calling intent mode differs",
+        )
+        value = read_json(path)
         try:
-            known.extend(
-                _reconcile_job_ids(
-                    squeue,
-                    name,
-                    comment,
-                    snapshot_root,
-                    scheduler_runner,
-                    control_plane,
-                    fallback=scheduler_fallback,
-                    expected_observation=None,
-                    observations=scheduler_observations,
-                )
+            digest = dag_evidence.validate_calling_intent(
+                value,
+                role=role,
+                manifest=manifest,
+                snapshot_root=snapshot_root,
+                submission_root=submission_root,
+                submission_sha256=submission_sha256,
+                claim_token=str(claim["claim_token"]),
+                predecessor_job_ids=journal_ids,
+                expected_lock=transaction_lock_binding,
             )
         except BaseException as exc:
-            reconciliation_errors[role] = repr(exc)
-        ids_by_role[role] = sorted(set(known), key=int)
-    ids = sorted(set(ids_by_role["train"] + ids_by_role["report"]), key=int)
-    prior_cancelled_ids = _validated_successful_cancellation(
-        aborted,
-        scancel,
-        [] if aborted is None else list(aborted["known_job_ids"]),
+            raise SubmissionError(
+                f"recovery {role} scheduler calling intent differs: {exc}"
+            ) from exc
+        require(digest == file_sha256(path), f"recovery {role} calling hash differs")
+        calling_hashes[role] = digest
+        calling_records.setdefault(role, value)
+    require(
+        set(records).issubset(set(calling_hashes))
+        and len(calling_hashes) <= len(records) + 1,
+        "recovery calling/submitted prefix differs",
     )
-    require(prior_cancelled_ids.issubset(set(ids)), "prior cancellation IDs escaped recovered IDs")
-    ids_to_cancel = [value for value in ids if value not in prior_cancelled_ids]
+    if records:
+        try:
+            dag_evidence.validate_dag_records(
+                records,
+                {role: calling_records[role] for role in records},
+                {role: calling_hashes[role] for role in records},
+                manifest=manifest,
+                snapshot_root=snapshot_root,
+                submission_root=submission_root,
+                submission_sha256=submission_sha256,
+                claim_token=str(claim["claim_token"]),
+                job_ids=journal_ids,
+                expected_control_plane=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+                expected_lock=transaction_lock_binding,
+                allow_prefix=True,
+            )
+        except BaseException as exc:
+            raise SubmissionError(
+                f"recovery durable submitted scheduler evidence differs: {exc}"
+            ) from exc
+
+    durable_ids_by_role = {
+        role: sorted(
+            set(aborted_ids_by_role[role])
+            | ({journal_ids[role]} if role in journal_ids else set()),
+            key=int,
+        )
+        for role in ("wave0", "wave1", "report")
+    }
+    require(
+        len(
+            {
+                item
+                for values in durable_ids_by_role.values()
+                for item in values
+            }
+        )
+        == sum(len(values) for values in durable_ids_by_role.values()),
+        "recovery durable evidence assigns one scheduler ID to multiple roles",
+    )
+    durable_ids = sorted(
+        {item for values in durable_ids_by_role.values() for item in values}, key=int
+    )
+    if aborted is not None:
+        _validated_successful_cancellation(
+            aborted, scancel, list(aborted["cancellation_authority_job_ids"])
+        )
+
+    if prior_recovery is not None:
+        require(
+            prior_recovery.get("durable_claimed_job_ids_by_role")
+            == durable_ids_by_role
+            and prior_recovery.get("durable_claimed_job_ids") == durable_ids
+            and prior_recovery.get("calling_intent_sha256_by_role")
+            == calling_hashes,
+            "terminal recovery record differs from the reconstructed durable prefix",
+        )
+        residual_identity = {
+            "campaign_id": CAMPAIGN_ID,
+            "submission_root": str(submission_root),
+            "submission_sha256": submission_sha256,
+            "claim_token": claim["claim_token"],
+            "package_protocol_sha256": recovered_protocol,
+            "transaction_lock": transaction_lock_binding,
+        }
+        residual_chain = _validated_residual_recovery_chain(
+            submission_root / "journal",
+            filename_prefix="RECOVERY_RECONCILED",
+            initial_terminal_path=prior_recovery_path,
+            initial_cancel_history_length=len(
+                prior_recovery["cancel_attempt_history"]
+            ),
+            identity=residual_identity,
+            status_prefix="recovered_residual",
+            cancel_directory=submission_root / "journal",
+            cancel_calling_prefix="CALLING_RECOVERY_CANCEL",
+            cancel_result_prefix="RECOVERY_CANCEL_RESULT",
+            cancel_context=cancel_context,
+            role_names=role_names,
+            comment=comment,
+            squeue=squeue,
+            scancel=scancel,
+            expected_control_plane=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            scheduler_fallback=scheduler_fallback,
+        )
+        bound_history_length = len(
+            (
+                residual_chain[-1]["cancel_attempt_history"]
+                if residual_chain
+                else prior_recovery["cancel_attempt_history"]
+            )
+        )
+        revalidation_observations: list[dict[str, Any]] = []
+        revalidation_rounds, revalidation_active = _recovery_census_rounds(
+            squeue=squeue,
+            role_names=role_names,
+            comment=comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            observations=revalidation_observations,
+        )
+        revalidation_ids = sorted(
+            {
+                item
+                for values in revalidation_active.values()
+                for item in values
+            },
+            key=int,
+        )
+        for role in ("wave0", "wave1", "report"):
+            if role in journal_ids and revalidation_active[role]:
+                require(
+                    revalidation_active[role] == [journal_ids[role]],
+                    f"residual recovery live {role} identity differs from semantic journal",
+                )
+        append_residual = bool(revalidation_ids) or (
+            len(existing_cancel_history) > bound_history_length
+        )
+        if append_residual:
+            residual_history = existing_cancel_history
+            residual_cancellation: Mapping[str, Any] | None = None
+            residual_calling_sha256: str | None = None
+            post_rounds: list[dict[str, Any]] = []
+            post_active = {"wave0": [], "wave1": [], "report": []}
+            if revalidation_ids:
+                residual_history, residual_cancellation = (
+                    _append_recovery_cancel_attempt(
+                        submission_root / "journal",
+                        calling_prefix="CALLING_RECOVERY_CANCEL",
+                        result_prefix="RECOVERY_CANCEL_RESULT",
+                        context=cancel_context,
+                        scancel=scancel,
+                        job_ids=revalidation_ids,
+                        cwd=snapshot_root,
+                        runner=scheduler_runner,
+                        control_plane=control_plane,
+                        fallback=scheduler_fallback,
+                        expected_observation=verified_scheduler_preclaim[
+                            "scheduler_control_plane"
+                        ],
+                        observations=revalidation_observations,
+                    )
+                )
+                residual_calling_sha256 = residual_history[-1][
+                    "calling_sha256"
+                ]
+                post_rounds, post_active = _recovery_census_rounds(
+                    squeue=squeue,
+                    role_names=role_names,
+                    comment=comment,
+                    cwd=snapshot_root,
+                    runner=scheduler_runner,
+                    control_plane=control_plane,
+                    fallback=scheduler_fallback,
+                    expected_observation=verified_scheduler_preclaim[
+                        "scheduler_control_plane"
+                    ],
+                    observations=revalidation_observations,
+                )
+                require(
+                    post_active == {"wave0": [], "wave1": [], "report": []},
+                    "residual recovery exact jobs remain active after cancellation",
+                )
+            generation = len(residual_chain)
+            previous_path = (
+                submission_root
+                / "journal"
+                / f"RECOVERY_RECONCILED_{generation - 1:04d}.json"
+                if generation
+                else prior_recovery_path
+            )
+            exclusive_json(
+                submission_root
+                / "journal"
+                / f"RECOVERY_RECONCILED_{generation:04d}.json",
+                {
+                    "schema_version": 1,
+                    "record": "residual_reconciliation",
+                    **residual_identity,
+                    "generation": generation,
+                    "previous_terminal_name": previous_path.name,
+                    "previous_terminal_sha256": file_sha256(previous_path),
+                    "status": (
+                        "recovered_residual_terminal_after_residual_cancel"
+                        if revalidation_ids
+                        else "recovered_residual_terminal_no_active_jobs"
+                    ),
+                    "live_verified_job_ids": revalidation_ids,
+                    "live_verified_job_ids_by_role": revalidation_active,
+                    "pre_cancel_census_rounds": revalidation_rounds,
+                    "cancelled_live_job_ids": revalidation_ids,
+                    "cancel_history_length_before": bound_history_length,
+                    "cancel_attempt_history": residual_history,
+                    "cancel_calling_sha256": residual_calling_sha256,
+                    "cancellation": residual_cancellation,
+                    "post_cancel_census_rounds": post_rounds,
+                    "post_cancel_active_job_ids_by_role": post_active,
+                    "scheduler_control_plane_observations": revalidation_observations,
+                    "scheduler_calls": len(revalidation_observations),
+                    "new_jobs_created": 0,
+                },
+            )
+            residual_chain = _validated_residual_recovery_chain(
+                submission_root / "journal",
+                filename_prefix="RECOVERY_RECONCILED",
+                initial_terminal_path=prior_recovery_path,
+                initial_cancel_history_length=len(
+                    prior_recovery["cancel_attempt_history"]
+                ),
+                identity=residual_identity,
+                status_prefix="recovered_residual",
+                cancel_directory=submission_root / "journal",
+                cancel_calling_prefix="CALLING_RECOVERY_CANCEL",
+                cancel_result_prefix="RECOVERY_CANCEL_RESULT",
+                cancel_context=cancel_context,
+                role_names=role_names,
+                comment=comment,
+                squeue=squeue,
+                scancel=scancel,
+                expected_control_plane=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+                scheduler_fallback=scheduler_fallback,
+            )
+        return {
+            **prior_recovery,
+            "reused_recovery": True,
+            "residual_reconciliation_chain": residual_chain,
+            "revalidation_census_rounds": revalidation_rounds,
+            "revalidation_scheduler_control_plane_observations": revalidation_observations,
+            "recovery_invocation_scheduler_calls": len(revalidation_observations),
+        }
+
+    latch_path = submission_root / "CANCEL_REQUESTED.json"
+    preexisting_latch: dict[str, Any] | None = None
+    cancel_latch_sha256: str | None = None
+    if _lexical_exists(latch_path):
+        raw_latch, cancel_latch_sha256 = read_immutable_json(
+            latch_path, "recovery cancellation latch"
+        )
+        preexisting_latch = _validated_recovery_cancel_latch(
+            raw_latch,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim["claim_token"]),
+            transaction_lock=transaction_lock_binding,
+        )
+
+    scheduler_observations: list[dict[str, Any]] = []
+    pre_cancel_rounds, live_ids_by_role = _recovery_census_rounds(
+        squeue=squeue,
+        role_names=role_names,
+        comment=comment,
+        cwd=snapshot_root,
+        runner=scheduler_runner,
+        control_plane=control_plane,
+        fallback=scheduler_fallback,
+        expected_observation=verified_scheduler_preclaim[
+            "scheduler_control_plane"
+        ],
+        observations=scheduler_observations,
+    )
+    live_ids = sorted(
+        {item for values in live_ids_by_role.values() for item in values}, key=int
+    )
+    for role in ("wave0", "wave1", "report"):
+        if role in journal_ids and live_ids_by_role[role]:
+            require(
+                live_ids_by_role[role] == [journal_ids[role]],
+                f"recovery live {role} identity differs from semantic journal",
+            )
     latch = {
         "schema_version": 1,
         "status": "cancel_requested",
         "campaign_id": CAMPAIGN_ID,
         "submission_sha256": submission_sha256,
-        "train_array_job_id": ids_by_role["train"][0] if len(ids_by_role["train"]) == 1 else None,
-        "report_job_id": ids_by_role["report"][0] if len(ids_by_role["report"]) == 1 else None,
-        "job_ids_by_role": ids_by_role,
+        "claim_token": claim["claim_token"],
+        "wave0_array_job_id": live_ids_by_role["wave0"][0] if live_ids_by_role["wave0"] else None,
+        "wave1_array_job_id": live_ids_by_role["wave1"][0] if live_ids_by_role["wave1"] else None,
+        "report_job_id": live_ids_by_role["report"][0] if live_ids_by_role["report"] else None,
+        "job_ids_by_role": live_ids_by_role,
+        "transaction_lock": transaction_lock_binding,
         "recovery": True,
+        "scheduler_id_authority": "fresh_settled_exact_name_census_only",
     }
-    if not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"):
-        exclusive_json(submission_root / "CANCEL_REQUESTED.json", latch)
+    if preexisting_latch is not None:
+        assert cancel_latch_sha256 is not None
+    else:
+        cancel_latch_sha256 = exclusive_json(latch_path, latch)
+    cancel_history = existing_cancel_history
     cancellation = None
-    cancellation_error = None
-    if ids_to_cancel:
-        try:
-            cancellation = _cancel_exact(
-                scancel,
-                ids_to_cancel,
-                snapshot_root,
-                scheduler_runner,
-                control_plane,
-                scheduler_fallback,
-                scheduler_observations,
-            )
-        except BaseException as exc:
-            cancellation_error = repr(exc)
+    cancel_calling_sha256 = None
+    post_cancel_rounds: list[dict[str, Any]] = []
+    post_cancel_active = {"wave0": [], "wave1": [], "report": []}
+    if live_ids:
+        cancel_history, cancellation = _append_recovery_cancel_attempt(
+            submission_root / "journal",
+            calling_prefix="CALLING_RECOVERY_CANCEL",
+            result_prefix="RECOVERY_CANCEL_RESULT",
+            context=cancel_context,
+            scancel=scancel,
+            job_ids=live_ids,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            observations=scheduler_observations,
+        )
+        post_cancel_rounds, post_cancel_active = _recovery_census_rounds(
+            squeue=squeue,
+            role_names=role_names,
+            comment=comment,
+            cwd=snapshot_root,
+            runner=scheduler_runner,
+            control_plane=control_plane,
+            fallback=scheduler_fallback,
+            expected_observation=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            observations=scheduler_observations,
+        )
+        require(
+            post_cancel_active == {"wave0": [], "wave1": [], "report": []},
+            "recovery exact jobs remain active after cancellation",
+        )
+    if cancel_history:
+        cancel_calling_sha256 = cancel_history[-1]["calling_sha256"]
+        cancellation = cancel_history[-1]["cancellation"]
     recovery_record = {
         "submission_sha256": submission_sha256,
-        "status": "recovered_cancelled_transaction",
-        "job_ids": ids,
-        "job_ids_by_role": ids_by_role,
-        "prior_cancelled_job_ids": sorted(prior_cancelled_ids, key=int),
-        "new_cancel_job_ids": ids_to_cancel,
+        "submission_root": str(submission_root),
+        "claim_token": claim["claim_token"],
+        "package_protocol_sha256": recovered_protocol,
+        "status": (
+            "recovered_terminal_after_cancel_attempts"
+            if cancel_history
+            else "recovered_terminal_no_active_jobs"
+        ),
+        "durable_claimed_job_ids": durable_ids,
+        "durable_claimed_job_ids_by_role": durable_ids_by_role,
+        "live_verified_job_ids": live_ids,
+        "live_verified_job_ids_by_role": live_ids_by_role,
+        "calling_intent_sha256_by_role": calling_hashes,
+        "pre_cancel_census_rounds": pre_cancel_rounds,
+        "cancelled_live_job_ids": live_ids,
+        "cancel_latch_sha256": cancel_latch_sha256,
+        "cancel_calling_sha256": cancel_calling_sha256,
         "cancellation": cancellation,
-        "cancellation_error": cancellation_error,
-        "reconciliation_errors": reconciliation_errors,
+        "cancel_attempt_history": cancel_history,
+        "post_cancel_census_rounds": post_cancel_rounds,
+        "post_cancel_active_job_ids_by_role": post_cancel_active,
         "scheduler_control_plane_observations": scheduler_observations,
+        "scheduler_calls": len(scheduler_observations),
+        "transaction_lock": transaction_lock_binding,
         "new_jobs_created": 0,
     }
-    if reconciliation_errors or cancellation_error:
-        incomplete_path = submission_root / "journal" / "8999_RECOVERY_INCOMPLETE.json"
-        if not _lexical_exists(incomplete_path):
-            append_journal(submission_root, 8999, "RECOVERY_INCOMPLETE", recovery_record)
-        detail = "; ".join(
-            f"{role}: {error}" for role, error in sorted(reconciliation_errors.items())
-        )
-        if cancellation_error:
-            detail += ("; " if detail else "") + f"scancel: {cancellation_error}"
-        raise SubmissionError("recovery is incomplete: " + detail)
     recovery_path = submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
     if _lexical_exists(recovery_path):
-        require(read_json(recovery_path) == {"schema_version": 1, "record": "recovery_cancelled", **recovery_record}, "recovery journal differs")
+        require(
+            exact_json_equal(
+                read_json(recovery_path),
+                {
+                    "schema_version": 1,
+                    "record": "recovery_cancelled",
+                    **recovery_record,
+                },
+            ),
+            "recovery journal differs",
+        )
     else:
         append_journal(submission_root, 9000, "RECOVERY_CANCELLED", recovery_record)
-    return {**recovery_record, "scheduler_calls": 2 + int(bool(ids_to_cancel))}
+    validated_recovery = _validated_recovery_terminal_record(
+        read_json(recovery_path),
+        submission_root=submission_root,
+        submission_sha256=submission_sha256,
+        claim_token=str(claim["claim_token"]),
+        package_protocol_sha256=recovered_protocol,
+        role_names=role_names,
+        comment=comment,
+        squeue=squeue,
+        scancel=scancel,
+        transaction_lock=transaction_lock_binding,
+        expected_control_plane=verified_scheduler_preclaim[
+            "scheduler_control_plane"
+        ],
+        scheduler_fallback=scheduler_fallback,
+    )
+    return {**validated_recovery, "reused_recovery": False}
 
 
 def recover_transaction(
@@ -5529,11 +8674,14 @@ def recover_transaction(
 ) -> dict[str, Any]:
     """Recover only after proving that no live submitter owns the transaction."""
 
-    with _TransactionLock(submission_root):
+    with _TransactionLock(submission_root) as transaction_lock:
+        leased_scheduler_runner = _scheduler_runner_with_lock_lease(
+            scheduler_runner, transaction_lock
+        )
         return _recover_transaction_locked(
             repo_root,
             submission_root,
-            scheduler_runner=scheduler_runner,
+            scheduler_runner=leased_scheduler_runner,
         )
 
 
@@ -5572,7 +8720,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run only authenticated read-only Slurm controller and sbatch --test-only probes",
     )
-    actions.add_argument("--submit", action="store_true", help="explicitly create the seal and submit two jobs")
+    actions.add_argument(
+        "--submit",
+        action="store_true",
+        help="explicitly seal and submit the held-wave0, wave1, and report DAG",
+    )
     parser.add_argument("--repo-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument(
         "--submission-root",
@@ -5646,7 +8798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.submit and _lexical_exists(submission_root):
             recovered = recover_transaction(repo_root, submission_root)
             print(json.dumps(recovered, sort_keys=True, indent=2, allow_nan=False))
-            return 0 if recovered.get("status") == "submitted" else 2
+            return 0 if recovered.get("status") == "committed_two_wave_dag" else 2
         preflight = static_preflight(repo_root, submission_root)
         if not args.submit:
             print(json.dumps(_summary(preflight), sort_keys=True, indent=2, allow_nan=False))

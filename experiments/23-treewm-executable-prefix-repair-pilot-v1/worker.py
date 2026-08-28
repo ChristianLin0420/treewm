@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run one sealed Exp23 cell from scratch to 25k with exact safe requeue.
+"""Run one sealed Exp23 cell through the fixed two-wave Launch8 DAG.
 
-There are no lifecycle stages.  Update 5k is only a retrospective report boundary.
-Every restart uses the same ``resume=auto`` invocation and accepts the same cell's
-verified checkpoint at any durable update, including update 25k while terminal final
-evaluation is pending.
+Wave zero owns the fresh run claim.  On USR1 it seals a checkpoint-bound continuation
+receipt and exits without contacting the scheduler.  The independently submitted
+afterok wave one authenticates that receipt and resumes the same scientific identity,
+or authenticates wave-zero completion and performs a no-op.  There is no compute-side
+scheduler client and no within-wave requeue.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -25,13 +25,12 @@ import signal
 import stat
 import subprocess
 import sys
-import time
 from types import ModuleType
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 OBJECTIVE = "treewm_v2_grounded_executable_prefix_pilot_v1"
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 STOP_ENVIRONMENT = "TREEWM_STOP_AFTER_UPDATE"
 HEADLESS_RUNTIME_ENVIRONMENT = {
     "MUJOCO_GL": "egl",
@@ -74,25 +73,33 @@ SCHEDULER_CONTROL_PLANE = {
         "plugin binaries, and shared libraries are trusted mutable external runtime"
     ),
 }
-REPORT_DEPENDENCY_TEST_REQUIREMENT = {
-    "phase": "after_train_reconciliation_before_report_submission",
-    "dependency": "afterok:<accepted_train_array_job_id>",
+DEPENDENCY_TEST_REQUIREMENT = {
+    "phases": [
+        "after_wave0_reconciliation_before_wave1_submission",
+        "after_wave1_reconciliation_before_report_submission",
+    ],
+    "dependencies": [
+        "afterok:<accepted_wave0_array_job_id>",
+        "afterok:<accepted_wave1_array_job_id>",
+    ],
     "kill_on_invalid_dep": "yes",
     "required": True,
 }
 
 SUBMISSION_CONTRACT_NAME = "SUBMISSION_CONTRACT.json"
+SUBMISSION_AUTHORIZATION_NAME = "SUBMISSION_AUTHORIZATION.json"
+SUBMISSION_RECEIPT_NAME = "SUBMISSION_RECEIPT.json"
 GLOBAL_CANCEL_NAME = "CANCEL_REQUESTED.json"
 TASK_LAUNCH_NAME = "LAUNCH.json"
 TASK_COMPLETE_NAME = "WORKER_COMPLETE.json"
 TASK_CANCEL_NAME = "CANCEL_REQUESTED.json"
-GENERATION_ROOT_NAME = "requeue"
+GENERATION_ROOT_NAME = "waves"
 GENERATION_START_NAME = "START.json"
 WORKER_SIGNAL_READY_NAME = "WORKER_SIGNAL_READY.json"
 USR1_REQUEST_NAME = "USR1_REQUESTED.json"
 TERM_REQUEST_NAME = "TERM_REQUESTED.json"
-REQUEUE_READY_NAME = "REQUEUE_READY.json"
-REQUEUE_CALLING_NAME = "REQUEUE_CALLING.json"
+CONTINUATION_READY_NAME = "CONTINUATION_READY.json"
+WAVE_INCOMPLETE_NAME = "WAVE_INCOMPLETE.json"
 GENERATION_COMPLETE_NAME = "WORKER_COMPLETE.json"
 GENERATION_CANCELLED_NAME = "WORKER_CANCELLED.json"
 GENERATION_FAILED_NAME = "WORKER_FAILED.json"
@@ -154,6 +161,40 @@ SUBMISSION_CONTRACT_FIELDS = frozenset(
         "fresh_start",
     }
 )
+SUBMISSION_AUTHORIZATION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "array",
+        "job_ids",
+        "dependencies",
+        "kill_on_invalid_dependency",
+        "within_wave_requeue",
+        "wave0_submitted_held",
+        "accepted_job_evidence_sha256",
+        "authorized_at_utc",
+    }
+)
+SUBMISSION_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "submission_authorization_sha256",
+        "array",
+        "wave0_array_job_id",
+        "wave1_array_job_id",
+        "report_job_id",
+        "wave1_dependency",
+        "report_dependency",
+        "kill_on_invalid_dependency",
+        "within_wave_requeue",
+        "wave0_submitted_held",
+    }
+)
 INTERPRETER_CONTRACT_FIELDS = frozenset(
     {
         "lexical_executable",
@@ -174,12 +215,14 @@ ARTIFACT_BASE_FIELDS = frozenset(
         "submission_sha256",
         "launch_sha256",
         "cell_index",
-        "restart_count",
+        "wave_index",
         "array_job_id",
         "array_task_id",
+        "predecessor_array_job_id",
+        "submission_authorization_sha256",
     }
 )
-REQUEUE_READY_FIELDS = ARTIFACT_BASE_FIELDS | frozenset(
+CONTINUATION_READY_FIELDS = ARTIFACT_BASE_FIELDS | frozenset(
     {
         "status",
         "trainer_exit_code",
@@ -192,22 +235,6 @@ REQUEUE_READY_FIELDS = ARTIFACT_BASE_FIELDS | frozenset(
         "final_eval_progress_sha256",
     }
 )
-REQUEUE_CALLING_FIELDS = ARTIFACT_BASE_FIELDS | frozenset(
-    {
-        "status",
-        "requeue_target",
-        "requeue_ready_sha256",
-        "checkpoint_sha256",
-        "checkpoint_file_identity",
-        "scheduler_control_plane",
-        "scheduler_config_sha256",
-        "scheduler_config_size",
-        "scontrol_executable_sha256",
-        "scontrol_show_command",
-        "scontrol_show_stdout_sha256",
-        "scontrol_requeue_command",
-    }
-)
 SIGNAL_REQUEST_FIELDS = frozenset(
     {
         "schema_version",
@@ -215,9 +242,11 @@ SIGNAL_REQUEST_FIELDS = frozenset(
         "campaign_id",
         "submission_sha256",
         "cell_index",
-        "restart_count",
+        "wave_index",
         "array_job_id",
         "array_task_id",
+        "predecessor_array_job_id",
+        "submission_authorization_sha256",
         "signal",
     }
 )
@@ -374,6 +403,35 @@ def canonical_json(value: object) -> str:
 
 def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def exact_json_equal(left: object, right: object) -> bool:
+    """Compare JSON values recursively without Python's bool/int coercion."""
+
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (
+            isinstance(left, Mapping)
+            and isinstance(right, Mapping)
+            and set(left) == set(right)
+            and all(exact_json_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(exact_json_equal(a, b) for a, b in zip(left, right))
+        )
+    return type(left) is type(right) and left == right
+
+
+def _is_job_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value[0] in "123456789"
+        and all(character in "0123456789" for character in value)
+    )
 
 
 def sha256_string(value: object) -> bool:
@@ -567,134 +625,6 @@ def _full_stat_identity(info: os.stat_result) -> tuple[int, ...]:
         int(info.st_mtime_ns),
         int(info.st_ctime_ns),
     )
-
-
-SchedulerRunner = Callable[
-    [Sequence[str], Path, Mapping[str, str], Sequence[int]],
-    subprocess.CompletedProcess[str],
-]
-
-
-def _default_scheduler_runner(
-    command: Sequence[str],
-    cwd: Path,
-    environment: Mapping[str, str],
-    inherited_fds: Sequence[int],
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(command),
-        cwd=cwd,
-        env=dict(environment),
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        pass_fds=tuple(inherited_fds),
-    )
-
-
-def _open_root_owned_scheduler_executable(
-    path: Path,
-) -> tuple[int, int, os.stat_result, str]:
-    """Pin the exact root-owned scheduler client used by this lifecycle call."""
-
-    absolute = _absolute_path(path, "scheduler control executable")
-    require(
-        absolute == Path("/usr/local/bin/scontrol"),
-        "scheduler control executable path differs",
-    )
-    directory_fd = os.open("/", _DIRECTORY_FLAGS)
-    try:
-        root_info = os.fstat(directory_fd)
-        require(
-            stat.S_ISDIR(root_info.st_mode)
-            and root_info.st_uid == 0
-            and not stat.S_IMODE(root_info.st_mode) & 0o022,
-            "scheduler executable root is not root-controlled",
-        )
-        for component in absolute.parent.parts[1:]:
-            child_fd: int | None = None
-            try:
-                child_fd = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory_fd)
-                child_info = os.fstat(child_fd)
-                require(
-                    stat.S_ISDIR(child_info.st_mode)
-                    and child_info.st_uid == 0
-                    and not stat.S_IMODE(child_info.st_mode) & 0o022,
-                    f"scheduler executable directory is not root-controlled: {component}",
-                )
-            except OSError as exc:
-                if child_fd is not None:
-                    os.close(child_fd)
-                raise LifecycleError(
-                    f"scheduler executable directory cannot be authenticated: {exc}"
-                ) from exc
-            except BaseException:
-                if child_fd is not None:
-                    os.close(child_fd)
-                raise
-            os.close(directory_fd)
-            directory_fd = child_fd
-        executable_fd: int | None = None
-        try:
-            executable_fd = os.open(absolute.name, _FILE_FLAGS, dir_fd=directory_fd)
-            opened = os.fstat(executable_fd)
-            named = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
-            require(
-                stat.S_ISREG(opened.st_mode)
-                and opened.st_uid == 0
-                and opened.st_nlink == 1
-                and stat.S_IMODE(opened.st_mode) == 0o755
-                and _full_stat_identity(opened) == _full_stat_identity(named),
-                "scheduler control executable is not the exact root-owned 0755 file",
-            )
-            digest, hashed = _hash_fd_stable(
-                executable_fd, "scheduler control executable"
-            )
-            require(
-                _full_stat_identity(hashed) == _full_stat_identity(opened),
-                "scheduler control executable changed while hashing",
-            )
-            return directory_fd, executable_fd, opened, digest
-        except BaseException:
-            if executable_fd is not None:
-                os.close(executable_fd)
-            raise
-    except BaseException:
-        os.close(directory_fd)
-        raise
-
-
-def _sealed_scheduler_config_descriptor(payload: bytes) -> int:
-    require(hasattr(os, "memfd_create"), "scheduler requeue requires memfd_create")
-    descriptor = os.memfd_create(
-        "treewm-exp23-requeue-slurm-conf",
-        getattr(os, "MFD_CLOEXEC", 0) | getattr(os, "MFD_ALLOW_SEALING", 0),
-    )
-    try:
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            require(written > 0, "scheduler requeue config write was short")
-            view = view[written:]
-        os.fchmod(descriptor, 0o400)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        seals = (
-            getattr(fcntl, "F_SEAL_SEAL", 0)
-            | getattr(fcntl, "F_SEAL_SHRINK", 0)
-            | getattr(fcntl, "F_SEAL_GROW", 0)
-            | getattr(fcntl, "F_SEAL_WRITE", 0)
-        )
-        require(seals != 0, "scheduler requeue config seals are unavailable")
-        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
-        require(
-            fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & seals == seals,
-            "scheduler requeue config is not immutable",
-        )
-        return descriptor
-    except BaseException:
-        os.close(descriptor)
-        raise
 
 
 def validate_file_identity(value: object, label: str) -> dict[str, int]:
@@ -1099,43 +1029,59 @@ def bootstrap_submission(
     require(hashlib.sha256(payload).hexdigest() == submission_sha256, "submission contract bytes differ")
     contract = _decode_json_bytes(payload, contract_path)
     require(set(contract) == SUBMISSION_CONTRACT_FIELDS, "submission contract fields differ")
-    require(contract.get("schema_version") == 1, "submission contract schema differs")
+    require(
+        type(contract.get("schema_version")) is int
+        and contract.get("schema_version") == 1,
+        "submission contract schema differs",
+    )
     require(contract.get("status") == "sealed_for_submission", "submission is not sealed")
     require(contract.get("campaign_id") == CAMPAIGN_ID, "submission campaign differs")
     require(contract.get("formal_validation") is False, "submission formal-validation label differs")
     require(contract.get("array") == "0-19%20", "submission array differs")
     require(contract.get("fresh_start") is True, "submission is not fresh-start")
     require(
-        contract.get("scheduler_control_plane_contract") == SCHEDULER_CONTROL_PLANE,
+        exact_json_equal(
+            contract.get("scheduler_control_plane_contract"),
+            SCHEDULER_CONTROL_PLANE,
+        ),
         "submission scheduler control-plane contract differs",
     )
     scheduler_preclaim = contract.get("scheduler_preclaim")
     require(
         isinstance(scheduler_preclaim, Mapping)
+        and type(scheduler_preclaim.get("schema_version")) is int
         and scheduler_preclaim.get("schema_version") == 1
         and scheduler_preclaim.get("status") == "scheduler_preclaim_verified"
         and scheduler_preclaim.get("campaign_id") == CAMPAIGN_ID
-        and scheduler_preclaim.get("scheduler_calls") == 7
+        and type(scheduler_preclaim.get("scheduler_calls")) is int
+        and scheduler_preclaim.get("scheduler_calls") == 10
+        and type(scheduler_preclaim.get("scheduler_mutation_calls")) is int
         and scheduler_preclaim.get("scheduler_mutation_calls") == 0
+        and type(scheduler_preclaim.get("persistent_writes_performed")) is int
         and scheduler_preclaim.get("persistent_writes_performed") == 0,
         "submission scheduler preclaim differs",
     )
     require(
         isinstance(scheduler_preclaim.get("scheduler_probe_commands"), list)
-        and len(scheduler_preclaim["scheduler_probe_commands"]) == 7
-        and scheduler_preclaim.get("report_dependency_test")
-        == REPORT_DEPENDENCY_TEST_REQUIREMENT
-        and scheduler_preclaim.get("zero_job_proof")
-        == {
-            "job_names": {
-                "train": "exp23-launch7-scheduler-test-train",
-                "report": "exp23-launch7-scheduler-test-report",
+        and len(scheduler_preclaim["scheduler_probe_commands"]) == 10
+        and exact_json_equal(
+            scheduler_preclaim.get("dependency_tests"),
+            DEPENDENCY_TEST_REQUIREMENT,
+        )
+        and exact_json_equal(
+            scheduler_preclaim.get("zero_job_proof"),
+            {
+                "job_names": {
+                    "wave0": "exp23-launch8-scheduler-test-wave0",
+                    "wave1": "exp23-launch8-scheduler-test-wave1",
+                    "report": "exp23-launch8-scheduler-test-report",
+                },
+                "pre_queries": 3,
+                "post_queries": 3,
+                "matching_jobs_before": 0,
+                "matching_jobs_after": 0,
             },
-            "pre_queries": 2,
-            "post_queries": 2,
-            "matching_jobs_before": 0,
-            "matching_jobs_after": 0,
-        },
+        ),
         "submission scheduler preclaim call ledger differs",
     )
     preclaim_observation = scheduler_preclaim.get("scheduler_control_plane")
@@ -1153,8 +1099,12 @@ def bootstrap_submission(
     }
     require(
         isinstance(preclaim_observation, Mapping)
-        and preclaim_observation.get("critical") == expected_critical
-        and scheduler_preclaim.get("controller_configuration") == expected_critical,
+        and exact_json_equal(
+            preclaim_observation.get("critical"), expected_critical
+        )
+        and exact_json_equal(
+            scheduler_preclaim.get("controller_configuration"), expected_critical
+        ),
         "submission scheduler preclaim identity differs",
     )
     scheduler_fallback = contract.get("scheduler_fallback_config")
@@ -1170,16 +1120,17 @@ def bootstrap_submission(
             "size",
             "source_control_plane",
         }
+        and type(scheduler_fallback.get("schema_version")) is int
         and scheduler_fallback.get("schema_version") == 1
         and scheduler_fallback.get("purpose")
         == (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
+            "accepted-job exact reconciliation, cancellation, dependency verification, "
+            "and wave-zero release only; never submission or compute-side execution"
         )
         and scheduler_fallback.get("encoding") == "base64"
         and isinstance(scheduler_fallback.get("payload_base64"), str)
         and sha256_string(str(scheduler_fallback.get("sha256", "")))
-        and isinstance(scheduler_fallback.get("size"), int)
+        and type(scheduler_fallback.get("size")) is int
         and 0 < scheduler_fallback["size"] <= 16 * 1024 * 1024,
         "submission scheduler fallback metadata differs",
     )
@@ -1194,9 +1145,13 @@ def bootstrap_submission(
         and hashlib.sha256(scheduler_fallback_bytes).hexdigest()
         == scheduler_fallback["sha256"]
         and isinstance(scheduler_fallback.get("source_control_plane"), Mapping)
-        and scheduler_fallback["source_control_plane"] == preclaim_observation
-        and scheduler_fallback["source_control_plane"].get("critical")
-        == expected_critical
+        and exact_json_equal(
+            scheduler_fallback["source_control_plane"], preclaim_observation
+        )
+        and exact_json_equal(
+            scheduler_fallback["source_control_plane"].get("critical"),
+            expected_critical,
+        )
         and isinstance(
             scheduler_fallback["source_control_plane"].get("config"), Mapping
         )
@@ -1282,8 +1237,10 @@ def bootstrap_submission(
         "trainer bootstrap smoke fields differ",
     )
     require(
-        smoke.get("schema_version") == 1
+        type(smoke.get("schema_version")) is int
+        and smoke.get("schema_version") == 1
         and smoke.get("status") == "sealed_trainer_hydra_composition_verified"
+        and type(smoke.get("cell_index")) is int
         and smoke.get("cell_index") == 0
         and smoke.get("python_flags") == ["-P", "-S", "-B"]
         and smoke.get("entry_relative_path") == str(PACKAGE_RELATIVE / "train_entry.py")
@@ -1291,7 +1248,9 @@ def bootstrap_submission(
         and smoke.get("config_package_sha256") == SNAPSHOT_IMPORT_FILES["configs/__init__.py"]
         and smoke.get("snapshot_inventory_sha256") == contract.get("snapshot_inventory_sha256")
         and smoke.get("cuda_visible_devices") == ""
+        and type(smoke.get("persistent_writes_performed")) is int
         and smoke.get("persistent_writes_performed") == 0
+        and type(smoke.get("scheduler_calls")) is int
         and smoke.get("scheduler_calls") == 0,
         "trainer bootstrap smoke contract differs",
     )
@@ -1338,8 +1297,207 @@ def task_root_for(submission_root: Path, cell_index: int) -> Path:
     return submission_root / "tasks" / f"cell-{cell_index:02d}"
 
 
-def generation_root_for(task_root: Path, restart_count: int) -> Path:
-    return task_root / GENERATION_ROOT_NAME / str(restart_count)
+def generation_root_for(task_root: Path, wave_index: int) -> Path:
+    return task_root / GENERATION_ROOT_NAME / str(wave_index)
+
+
+def load_submission_authorization(
+    submission_root: Path,
+    submission_sha256: str,
+    *,
+    wave_index: int,
+    array_job_id: str,
+    predecessor_array_job_id: str,
+) -> tuple[dict[str, Any], str]:
+    """Authenticate the controller-published fixed DAG before any task mutation."""
+
+    authorization, authorization_sha256, _ = read_json_artifact(
+        submission_root / SUBMISSION_AUTHORIZATION_NAME,
+        "submission authorization",
+        required_mode=0o444,
+    )
+    receipt, _, _ = read_json_artifact(
+        submission_root / SUBMISSION_RECEIPT_NAME,
+        "submission receipt",
+        required_mode=0o444,
+    )
+    require(
+        set(authorization) == SUBMISSION_AUTHORIZATION_FIELDS,
+        "submission authorization fields differ",
+    )
+    require(
+        set(receipt) == SUBMISSION_RECEIPT_FIELDS,
+        "submission receipt fields differ",
+    )
+    require(
+        type(authorization.get("schema_version")) is int
+        and authorization.get("schema_version") == 1
+        and authorization.get("status") == "authorized_two_wave_dag"
+        and authorization.get("campaign_id") == CAMPAIGN_ID
+        and authorization.get("submission_sha256") == submission_sha256
+        and authorization.get("array") == "0-19%20"
+        and authorization.get("within_wave_requeue") is False
+        and authorization.get("wave0_submitted_held") is True
+        and sha256_string(authorization.get("accepted_job_evidence_sha256"))
+        and isinstance(authorization.get("authorized_at_utc"), str)
+        and bool(authorization["authorized_at_utc"]),
+        "submission authorization contract differs",
+    )
+    job_ids = authorization.get("job_ids")
+    dependencies = authorization.get("dependencies")
+    kill_policy = authorization.get("kill_on_invalid_dependency")
+    require(
+        isinstance(job_ids, Mapping)
+        and set(job_ids) == {"wave0", "wave1", "report"}
+        and all(_is_job_id(job_ids[name]) for name in job_ids)
+        and len(set(job_ids.values())) == 3,
+        "submission authorization job IDs differ",
+    )
+    require(
+        exact_json_equal(
+            dependencies,
+            {
+                "wave0": "none",
+                "wave1": f"afterok:{job_ids['wave0']}",
+                "report": f"afterok:{job_ids['wave1']}",
+            },
+        )
+        and exact_json_equal(
+            kill_policy, {"wave1": "yes", "report": "yes"}
+        ),
+        "submission authorization graph differs",
+    )
+    require(
+        type(receipt.get("schema_version")) is int
+        and receipt.get("schema_version") == 1
+        and receipt.get("status") == "committed_two_wave_dag"
+        and receipt.get("campaign_id") == CAMPAIGN_ID
+        and receipt.get("submission_sha256") == submission_sha256
+        and receipt.get("submission_authorization_sha256") == authorization_sha256
+        and receipt.get("array") == "0-19%20"
+        and receipt.get("wave0_array_job_id") == job_ids["wave0"]
+        and receipt.get("wave1_array_job_id") == job_ids["wave1"]
+        and receipt.get("report_job_id") == job_ids["report"]
+        and receipt.get("wave1_dependency") == dependencies["wave1"]
+        and receipt.get("report_dependency") == dependencies["report"]
+        and exact_json_equal(
+            receipt.get("kill_on_invalid_dependency"), kill_policy
+        )
+        and receipt.get("within_wave_requeue") is False
+        and receipt.get("wave0_submitted_held") is True,
+        "submission receipt graph differs",
+    )
+    records: dict[str, Any] = {}
+    for role, ordinal in (("wave0", 3), ("wave1", 4), ("report", 5)):
+        journal, _, _ = read_json_artifact(
+            submission_root
+            / "journal"
+            / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json",
+            f"{role} submission journal",
+            required_mode=0o444,
+        )
+        require(
+            type(journal.get("schema_version")) is int
+            and journal.get("schema_version") == 1
+            and journal.get("record") == f"{role}_submitted"
+            and isinstance(journal.get("job_id"), str)
+            and journal.get("job_id") == job_ids[role],
+            f"{role} submission journal differs",
+        )
+        records[role] = {
+            key: value
+            for key, value in journal.items()
+            if key not in {"schema_version", "record", "job_id"}
+        }
+    contract, _, _ = read_json_artifact(
+        submission_root / SUBMISSION_CONTRACT_NAME,
+        "submission contract for DAG evidence",
+        required_mode=0o444,
+    )
+    snapshot_root = _absolute_path(
+        str(contract.get("snapshot_root", "")), "DAG evidence snapshot root"
+    )
+    manifest, _, _ = read_json_artifact(
+        snapshot_root / PACKAGE_RELATIVE / "manifest.json",
+        "snapshot manifest for DAG evidence",
+        required_mode=0o444,
+    )
+    claim, _, _ = read_json_artifact(
+        submission_root / "journal" / "0000_CLAIMED.json",
+        "DAG transaction claim",
+        required_mode=0o444,
+    )
+    calling_records = {}
+    calling_sha256_by_role = {}
+    for role in ("wave0", "wave1", "report"):
+        calling_records[role], calling_sha256_by_role[role], _ = read_json_artifact(
+            submission_root / "journal" / f"CALLING_{role.upper()}.json",
+            f"{role} scheduler calling record",
+            required_mode=0o444,
+        )
+    dag_evidence = _load_dag_evidence(snapshot_root)
+    try:
+        semantic_hash = dag_evidence.validate_dag_records(
+            records,
+            calling_records,
+            calling_sha256_by_role,
+            manifest=manifest,
+            snapshot_root=snapshot_root,
+            submission_root=submission_root,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim.get("claim_token", "")),
+            job_ids={role: job_ids[role] for role in job_ids},
+            expected_control_plane=contract["scheduler_preclaim"][
+                "scheduler_control_plane"
+            ],
+        )
+    except BaseException as exc:
+        raise LifecycleError(f"accepted DAG scheduler evidence differs: {exc}") from exc
+    require(
+        semantic_hash == authorization["accepted_job_evidence_sha256"],
+        "accepted-job journal evidence differs",
+    )
+    authorized, _, _ = read_json_artifact(
+        submission_root / "journal" / "0006_DAG_AUTHORIZED.json",
+        "durable DAG authorization journal",
+        required_mode=0o444,
+    )
+    require(
+        exact_json_equal(
+            authorized,
+            {
+            "schema_version": 1,
+            "record": "dag_authorized",
+            "submission_authorization_sha256": authorization_sha256,
+            "accepted_job_evidence_sha256": authorization[
+                "accepted_job_evidence_sha256"
+            ],
+            "job_ids": dict(job_ids),
+            "dependencies": dict(dependencies),
+            },
+        ),
+        "durable DAG authorization journal differs",
+    )
+    ready, _, _ = read_json_artifact(
+        submission_root / "journal" / "0007_READY_TO_COMMIT.json",
+        "durable ready-to-commit journal",
+        required_mode=0o444,
+    )
+    require(
+        exact_json_equal(
+            ready,
+            {"schema_version": 1, "record": "ready_to_commit", **dict(receipt)},
+        ),
+        "durable ready-to-commit journal differs",
+    )
+    expected_job_id = job_ids["wave0"] if wave_index == 0 else job_ids["wave1"]
+    expected_predecessor = "none" if wave_index == 0 else job_ids["wave0"]
+    require(array_job_id == expected_job_id, "current wave array job ID differs")
+    require(
+        predecessor_array_job_id == expected_predecessor,
+        "current wave predecessor array job ID differs",
+    )
+    return dict(authorization), authorization_sha256
 
 
 def _load_campaign(snapshot_root: Path) -> ModuleType:
@@ -1353,6 +1511,24 @@ def _load_campaign(snapshot_root: Path) -> ModuleType:
     sys.modules[name] = module
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_dag_evidence(snapshot_root: Path) -> ModuleType:
+    package = snapshot_root / PACKAGE_RELATIVE
+    path = package / "dag_evidence.py"
+    require_regular_nonsymlink(path, "Exp23 DAG evidence verifier")
+    name = "_treewm_exp23_dag_evidence_for_worker"
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, "cannot load DAG evidence verifier")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    require(
+        Path(str(module.__file__)).resolve(strict=True) == path.resolve(strict=True),
+        "DAG evidence verifier escaped snapshot",
+    )
     return module
 
 
@@ -1595,42 +1771,6 @@ def load_launch_context(
     }
 
 
-def scheduler_control_plane_observation(
-    context: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Reuse the snapshot-bound submit verifier for root-admin Slurm inputs."""
-
-    snapshot_root = context["snapshot_root"]
-    submission_root = context["submission_root"]
-    contract = context["submission_contract"]
-    _revalidate_snapshot_before_import(snapshot_root, submission_root, contract)
-    path = context["package"] / "submit.py"
-    require_regular_nonsymlink(path, "snapshot scheduler verifier")
-    name = f"_treewm_exp23_scheduler_verifier_{os.getpid()}_{time.time_ns()}"
-    spec = importlib.util.spec_from_file_location(name, path)
-    require(spec is not None and spec.loader is not None, "cannot load snapshot scheduler verifier")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        observe = getattr(module, "_scheduler_control_plane_observation", None)
-        require(callable(observe), "snapshot scheduler verifier API differs")
-        value = observe(context["manifest"]["execution"].get("scheduler_control_plane"))
-    finally:
-        sys.modules.pop(name, None)
-    require(
-        isinstance(value, Mapping)
-        and value.get("schema_version") == 1
-        and isinstance(value.get("config"), Mapping)
-        and sha256_string(value["config"].get("sha256"))
-        and isinstance(value.get("cli_filter_policy"), Mapping)
-        and sha256_string(value["cli_filter_policy"].get("tree_sha256")),
-        "scheduler control-plane observation differs",
-    )
-    return dict(value)
-
-
 def _finite_mapping(value: object, label: str) -> dict[str, float]:
     require(isinstance(value, Mapping), f"{label} is not a mapping")
     result: dict[str, float] = {}
@@ -1754,7 +1894,11 @@ def validate_metric_tracker_state(
 ) -> None:
     require(isinstance(state, Mapping), "checkpoint metric-tracker state is absent")
     require(set(state) == {"schema_version", "sums", "counts", "hists"}, "metric-tracker fields differ")
-    require(state.get("schema_version") == 1, "metric-tracker schema differs")
+    require(
+        type(state.get("schema_version")) is int
+        and state.get("schema_version") == 1,
+        "metric-tracker schema differs",
+    )
     sums = state.get("sums")
     counts = state.get("counts")
     hists = state.get("hists")
@@ -2120,7 +2264,11 @@ def _validate_final_progress_value(
 ) -> dict[str, Any]:
     value = dict(value)
     expected_keys = _expected_episode_keys(manifest)
-    require(value.get("schema_version") == 1, "final-progress schema differs")
+    require(
+        type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1,
+        "final-progress schema differs",
+    )
     require(value.get("objective_version") == OBJECTIVE, "final-progress objective differs")
     require(value.get("status") in {"in_progress", "complete"}, "final-progress status differs")
     expected_fields = {
@@ -2140,8 +2288,15 @@ def _validate_final_progress_value(
     require(value.get("identity_sha256") == expected_identity_sha256, "final-progress identity differs")
     require(value.get("seed_table_sha256") == expected_seed_table_sha256, "final-progress seed table differs")
     task_ids = [key[1] for key in expected_keys[::5]]
-    require(value.get("task_ids") == task_ids, "final-progress task IDs differ")
-    require(value.get("episodes_per_task") == 5, "final-progress episode count differs")
+    require(
+        exact_json_equal(value.get("task_ids"), task_ids),
+        "final-progress task IDs differ",
+    )
+    require(
+        type(value.get("episodes_per_task")) is int
+        and value.get("episodes_per_task") == 5,
+        "final-progress episode count differs",
+    )
     rows = value.get("completed_results")
     require(isinstance(rows, list) and 1 <= len(rows) <= 25, "final-progress rows differ")
     normalized = [
@@ -2425,7 +2580,10 @@ def validate_complete_run(
         "final_eval_progress": "final_eval_progress.json",
     }
     for key, value in expected.items():
-        require(completion.get(key) == value, f"completion {key} differs")
+        require(
+            exact_json_equal(completion.get(key), value),
+            f"completion {key} differs",
+        )
     metrics = _finite_mapping(completion.get("final_evaluation"), "completion final evaluation")
     require(progress is not None and progress["status"] == "complete", "completion progress is incomplete")
     require(metrics == progress["metrics"] == checkpoint_state["final_eval"], "terminal metrics disagree")
@@ -2437,7 +2595,8 @@ def validate_complete_run(
         "terminal final evaluation progress",
     )
     require(
-        progress_value == progress["value"] and progress_sha256 == progress["sha256"],
+        exact_json_equal(progress_value, progress["value"])
+        and progress_sha256 == progress["sha256"],
         "terminal final-progress changed after checkpoint validation",
     )
     seed_tables, _, _ = _read_run_json_artifact(
@@ -2446,7 +2605,10 @@ def validate_complete_run(
         "evaluation seed tables",
     )
     expected_seed_tables = expected_evaluation_seed_tables(context)
-    require(seed_tables == expected_seed_tables, "evaluation seed tables differ from reconstruction")
+    require(
+        exact_json_equal(seed_tables, expected_seed_tables),
+        "evaluation seed tables differ from reconstruction",
+    )
     require(seed_tables.get("sha256") == identity["evaluation_seed_tables_sha256"], "evaluation seed tables differ")
     require(completion.get("evaluation_seed_tables_sha256") == seed_tables["sha256"], "completion seed-table hash differs")
     require(completion.get("final_seed_table_sha256") == identity["final_seed_table_sha256"], "completion final seed table differs")
@@ -2492,9 +2654,13 @@ def _artifact_base(args: argparse.Namespace, context: Mapping[str, Any]) -> dict
         "submission_sha256": args.submission_sha256,
         "launch_sha256": context["launch"]["launch_sha256"],
         "cell_index": args.cell_index,
-        "restart_count": args.restart_count,
+        "wave_index": args.wave_index,
         "array_job_id": str(args.array_job_id),
         "array_task_id": int(args.array_task_id),
+        "predecessor_array_job_id": str(args.predecessor_array_job_id),
+        "submission_authorization_sha256": str(
+            args._submission_authorization_sha256
+        ),
     }
 
 
@@ -2507,9 +2673,11 @@ def record_signal_request(
     submission_root: Path,
     submission_sha256: str,
     cell_index: int,
-    restart_count: int,
+    wave_index: int,
     array_job_id: str,
     array_task_id: int,
+    predecessor_array_job_id: str,
+    submission_authorization_sha256: str,
     signal_name: str,
     bootstrap_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2520,6 +2688,10 @@ def record_signal_request(
         contract=bootstrap_contract,
     )
     require(signal_name in {"USR1", "TERM"}, "unsupported lifecycle signal")
+    require(
+        sha256_string(submission_authorization_sha256),
+        "submission authorization SHA256 is malformed",
+    )
     task_root = ensure_contained_directory(
         task_root_for(submission_root, cell_index),
         submission_root,
@@ -2527,7 +2699,7 @@ def record_signal_request(
         create=True,
     )
     generation = ensure_contained_directory(
-        generation_root_for(task_root, restart_count),
+        generation_root_for(task_root, wave_index),
         task_root,
         "generation state root",
         create=True,
@@ -2538,9 +2710,11 @@ def record_signal_request(
         "campaign_id": CAMPAIGN_ID,
         "submission_sha256": submission_sha256,
         "cell_index": cell_index,
-        "restart_count": restart_count,
+        "wave_index": wave_index,
         "array_job_id": str(array_job_id),
         "array_task_id": int(array_task_id),
+        "predecessor_array_job_id": str(predecessor_array_job_id),
+        "submission_authorization_sha256": submission_authorization_sha256,
         "signal": signal_name,
     }
     require(set(value) == SIGNAL_REQUEST_FIELDS, "signal-request marker fields differ")
@@ -2557,7 +2731,7 @@ def cancellation_requested(submission_root: Path, task_root: Path) -> bool:
     )
 
 
-def requeue_requested(generation: Path) -> bool:
+def continuation_requested(generation: Path) -> bool:
     return lexical_exists(generation / USR1_REQUEST_NAME)
 
 
@@ -2566,7 +2740,7 @@ def validate_ready_checkpoint_binding(
     checkpoint_state: Mapping[str, Any],
     label: str,
 ) -> dict[str, int]:
-    """Bind every requeue claim to the reopened checkpoint and progress bytes."""
+    """Bind every continuation claim to the reopened checkpoint and progress bytes."""
     checkpoint_identity = validate_file_identity(
         ready.get("checkpoint_file_identity"),
         f"{label} checkpoint identity",
@@ -2584,89 +2758,120 @@ def validate_ready_checkpoint_binding(
         ).get("sha256"),
     }
     for key, value in expected.items():
-        require(ready.get(key) == value, f"{label} {key} differs from checkpoint")
+        require(
+            exact_json_equal(ready.get(key), value),
+            f"{label} {key} differs from checkpoint",
+        )
     return checkpoint_identity
 
 
-def _verify_previous_lineage(
+def _expected_wave0_base(
     args: argparse.Namespace,
-    task_root: Path,
     context: Mapping[str, Any],
-) -> None:
-    restart_count = int(args.restart_count)
-    require(restart_count > 0, "previous lineage requested for generation zero")
-    previous = generation_root_for(task_root, restart_count - 1)
-    ensure_contained_directory(previous, task_root, "previous generation root")
-    ready_path = previous / REQUEUE_READY_NAME
-    calling_path = previous / REQUEUE_CALLING_NAME
-    ready, ready_sha256, _ = read_json_artifact(
-        ready_path,
-        "previous requeue READY",
-        required_mode=0o444,
-    )
-    calling, _, _ = read_json_artifact(
-        calling_path,
-        "previous requeue CALLING",
-        required_mode=0o444,
-    )
-    require(set(ready) == REQUEUE_READY_FIELDS, "previous READY fields differ")
-    require(set(calling) == REQUEUE_CALLING_FIELDS, "previous CALLING fields differ")
-    common = {
+) -> dict[str, Any]:
+    return {
         "schema_version": 1,
         "campaign_id": CAMPAIGN_ID,
         "submission_sha256": args.submission_sha256,
         "launch_sha256": context["launch"]["launch_sha256"],
         "cell_index": args.cell_index,
-        "restart_count": restart_count - 1,
-        "array_job_id": str(args.array_job_id),
+        "wave_index": 0,
+        "array_job_id": str(args.predecessor_array_job_id),
         "array_task_id": int(args.array_task_id),
+        "predecessor_array_job_id": "none",
+        "submission_authorization_sha256": str(
+            args._submission_authorization_sha256
+        ),
     }
-    for key, value in common.items():
-        require(ready.get(key) == value, f"previous READY {key} differs")
-        require(calling.get(key) == value, f"previous CALLING {key} differs")
-    require(ready.get("status") == "requeue_ready", "previous generation is not requeue-ready")
-    require(calling.get("status") == "scontrol_requeue_calling", "previous generation did not call requeue")
+
+
+def _verify_wave0_ready_lineage(
+    args: argparse.Namespace,
+    task_root: Path,
+    context: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    require(args.wave_index == 1, "continuation lineage is only valid in wave one")
+    previous = generation_root_for(task_root, 0)
+    ensure_contained_directory(previous, task_root, "wave-zero state root")
     require(
-        calling.get("requeue_target") == f"{args.array_job_id}_{args.array_task_id}",
-        "previous requeue target differs",
+        not lexical_exists(previous / GENERATION_COMPLETE_NAME)
+        and not lexical_exists(task_root / TASK_COMPLETE_NAME),
+        "wave-zero READY conflicts with completion",
     )
-    scheduler_binding, _scheduler_payload = _validated_requeue_scheduler_config(context)
-    scontrol = str(context["manifest"]["execution"].get("scontrol", ""))
-    target = f"{args.array_job_id}_{args.array_task_id}"
-    require(
-        calling.get("scheduler_control_plane")
-        == scheduler_binding["source_control_plane"]
-        and calling.get("scheduler_config_sha256") == scheduler_binding["sha256"]
-        and calling.get("scheduler_config_size") == scheduler_binding["size"]
-        and sha256_string(calling.get("scontrol_executable_sha256"))
-        and calling.get("scontrol_show_command")
-        == [scontrol, "show", "job", target, "--oneliner"]
-        and sha256_string(calling.get("scontrol_show_stdout_sha256"))
-        and calling.get("scontrol_requeue_command")
-        == [scontrol, "requeue", target],
-        "previous requeue scheduler binding differs",
+    ready, ready_sha256, _ = read_json_artifact(
+        previous / CONTINUATION_READY_NAME,
+        "wave-zero continuation READY",
+        required_mode=0o444,
     )
-    require(calling.get("requeue_ready_sha256") == ready_sha256, "previous CALLING/READY differ")
     require(
-        calling.get("checkpoint_sha256") == ready.get("checkpoint_sha256")
-        and sha256_string(ready.get("checkpoint_sha256")),
-        "previous checkpoint lineage hash differs",
+        set(ready) == CONTINUATION_READY_FIELDS,
+        "wave-zero continuation READY fields differ",
+    )
+    for key, value in _expected_wave0_base(args, context).items():
+        require(
+            exact_json_equal(ready.get(key), value),
+            f"wave-zero READY {key} differs",
+        )
+    require(
+        ready.get("status") == "continuation_ready",
+        "wave zero is not continuation-ready",
     )
     current = resolve_checkpoint(context)
-    ready_identity = validate_ready_checkpoint_binding(ready, current, "previous READY")
-    require(
-        validate_file_identity(
-            calling.get("checkpoint_file_identity"),
-            "previous CALLING checkpoint identity",
-        )
-        == ready_identity,
-        "previous CALLING/READY checkpoint identity differs",
+    ready_identity = validate_ready_checkpoint_binding(
+        ready, current, "wave-zero continuation READY"
     )
     require(
-        current["checkpoint_sha256"] == ready.get("checkpoint_sha256")
+        sha256_string(ready.get("checkpoint_sha256"))
+        and current["checkpoint_sha256"] == ready.get("checkpoint_sha256")
         and current["checkpoint_file_identity"] == ready_identity,
-        "checkpoint advanced/swapped after READY",
+        "checkpoint advanced or swapped after wave-zero READY",
     )
+    return current, ready_sha256
+
+
+def _verify_wave0_complete_triplet(
+    args: argparse.Namespace,
+    task_root: Path,
+    context: Mapping[str, Any],
+    input_state: Mapping[str, Any],
+) -> str:
+    require(args.wave_index == 1, "completion no-op is only valid in wave one")
+    require(input_state.get("kind") == "complete", "wave-zero completion is not complete")
+    previous = generation_root_for(task_root, 0)
+    ensure_contained_directory(previous, task_root, "wave-zero state root")
+    require(
+        not lexical_exists(previous / CONTINUATION_READY_NAME),
+        "wave-zero completion conflicts with continuation READY",
+    )
+    wave_marker, wave_sha256, _ = read_json_artifact(
+        previous / GENERATION_COMPLETE_NAME,
+        "wave-zero completion marker",
+        required_mode=0o444,
+    )
+    task_marker, task_sha256, _ = read_json_artifact(
+        task_root / TASK_COMPLETE_NAME,
+        "task completion marker",
+        required_mode=0o444,
+    )
+    require(
+        wave_sha256 == task_sha256 and exact_json_equal(wave_marker, task_marker),
+        "wave-zero/task completion markers differ",
+    )
+    for key, value in _expected_wave0_base(args, context).items():
+        require(
+            exact_json_equal(wave_marker.get(key), value),
+            f"wave-zero completion {key} differs",
+        )
+    require(wave_marker.get("status") == "worker_complete", "wave-zero status differs")
+    complete = input_state.get("complete")
+    require(isinstance(complete, Mapping), "validated trainer completion is absent")
+    for key, value in complete.items():
+        if key != "status":
+            require(
+                exact_json_equal(wave_marker.get(key), value),
+                f"wave-zero completion payload differs: {key}",
+            )
+    return wave_sha256
 
 
 class SignalRelay:
@@ -2700,9 +2905,13 @@ class SignalRelay:
                     submission_root=Path(self.args.submission_root),
                     submission_sha256=self.args.submission_sha256,
                     cell_index=self.args.cell_index,
-                    restart_count=self.args.restart_count,
+                    wave_index=self.args.wave_index,
                     array_job_id=self.args.array_job_id,
                     array_task_id=self.args.array_task_id,
+                    predecessor_array_job_id=self.args.predecessor_array_job_id,
+                    submission_authorization_sha256=(
+                        self.args._submission_authorization_sha256
+                    ),
                     signal_name=name,
                     bootstrap_contract=getattr(self.args, "_bootstrap_contract", None),
                 )
@@ -2719,7 +2928,7 @@ class SignalRelay:
         desired = None
         if cancellation_requested(Path(self.args.submission_root), self.task_root):
             desired = signal.SIGTERM
-        elif requeue_requested(self.generation):
+        elif continuation_requested(self.generation):
             desired = signal.SIGUSR1
         if desired is None or self.forwarded == desired:
             return
@@ -2887,7 +3096,6 @@ def _execute_generation(
     submission = context["submission_root"]
     require(args.array_task_id == args.cell_index, "Slurm array task/cell mapping differs")
     base = _artifact_base(args, context)
-    scheduler_observation = scheduler_control_plane_observation(context)
     seal_json(
         task_root / TASK_LAUNCH_NAME,
         {
@@ -2897,8 +3105,6 @@ def _execute_generation(
             "submission_sha256": args.submission_sha256,
             "launch_sha256": context["launch"]["launch_sha256"],
             "cell_index": args.cell_index,
-            "array_job_id": str(args.array_job_id),
-            "array_task_id": int(args.array_task_id),
             "launch": context["launch"],
         },
     )
@@ -2907,28 +3113,41 @@ def _execute_generation(
         seal_json(generation / GENERATION_CANCELLED_NAME, {**base, "status": "cancelled_before_launch"})
         return CANCELLED_EXIT_CODE
 
-    if args.restart_count == 0:
+    predecessor_evidence_sha256: str | None = None
+    wave0_complete_noop = False
+    if args.wave_index == 0:
         _claim_fresh_run(context)
         input_state = {"kind": "fresh", "checkpoint_sha256": None}
     else:
-        _verify_previous_lineage(args, task_root, context)
         input_state = inspect_run(context)
-        require(input_state["kind"] not in {"absent", "claimed_empty"}, "requeue has no exact checkpoint")
+        require(
+            input_state["kind"] not in {"absent", "claimed_empty"},
+            "wave one has no exact predecessor checkpoint",
+        )
+        if input_state["kind"] == "complete":
+            predecessor_evidence_sha256 = _verify_wave0_complete_triplet(
+                args, task_root, context, input_state
+            )
+            wave0_complete_noop = True
+        else:
+            input_state, predecessor_evidence_sha256 = _verify_wave0_ready_lineage(
+                args, task_root, context
+            )
 
     seal_json(
         generation / GENERATION_START_NAME,
         {
             **base,
-            "status": "generation_started",
+            "status": "wave_started",
             "input_kind": input_state["kind"],
             "input_checkpoint_sha256": input_state.get("checkpoint_sha256"),
-            "scheduler_control_plane": scheduler_observation,
+            "predecessor_evidence_sha256": predecessor_evidence_sha256,
         },
     )
-    if input_state["kind"] == "complete":
+    if wave0_complete_noop:
         marker = _complete_marker(args, context, input_state["complete"])
+        marker["status"] = "wave_one_noop_after_wave_zero_complete"
         seal_json(generation / GENERATION_COMPLETE_NAME, marker)
-        seal_json(task_root / TASK_COMPLETE_NAME, marker)
         return 0
 
     status = _spawn_trainer(args, context, relay)
@@ -2953,7 +3172,7 @@ def _execute_generation(
         seal_json(generation / GENERATION_CANCELLED_NAME, cancellation)
         return CANCELLED_EXIT_CODE
 
-    if requeue_requested(generation):
+    if continuation_requested(generation):
         require(status == GRACEFUL_EXIT_CODE, "USR1 trainer exit is not graceful code 75")
         require(output_state["kind"] not in {"absent", "claimed_empty"}, "USR1 produced no resumable checkpoint")
         require(
@@ -2962,7 +3181,7 @@ def _execute_generation(
         )
         ready = {
             **base,
-            "status": "requeue_ready",
+            "status": "continuation_ready",
             "trainer_exit_code": status,
             "checkpoint_kind": output_state["kind"],
             "completed_updates": output_state["completed_updates"],
@@ -2974,9 +3193,23 @@ def _execute_generation(
                 output_state.get("progress") or {}
             ).get("sha256"),
         }
-        require(set(ready) == REQUEUE_READY_FIELDS, "requeue READY fields differ")
-        seal_json(generation / REQUEUE_READY_NAME, ready)
-        return GRACEFUL_EXIT_CODE
+        require(
+            set(ready) == CONTINUATION_READY_FIELDS,
+            "continuation READY fields differ",
+        )
+        if args.wave_index == 0:
+            seal_json(generation / CONTINUATION_READY_NAME, ready)
+            return GRACEFUL_EXIT_CODE
+        seal_json(
+            generation / WAVE_INCOMPLETE_NAME,
+            {
+                **ready,
+                "status": "wave_one_incomplete_no_successor",
+            },
+        )
+        raise LifecycleError(
+            "wave one exhausted after an exact checkpoint; the fixed DAG has no third wave"
+        )
 
     raise LifecycleError(
         f"trainer exited {status} without a complete run or durable lifecycle request"
@@ -2995,7 +3228,7 @@ def run_worker(args: argparse.Namespace) -> int:
     # validation.  No readiness marker or durable task state is published until the
     # complete context has validated; train.slurm buffers its durable signal request.
     provisional_task = task_root_for(submission, args.cell_index)
-    provisional_generation = generation_root_for(provisional_task, args.restart_count)
+    provisional_generation = generation_root_for(provisional_task, args.wave_index)
     relay = SignalRelay(args, provisional_task, provisional_generation)
     relay.install()
     context = load_launch_context(
@@ -3050,271 +3283,14 @@ def run_worker(args: argparse.Namespace) -> int:
         raise
 
 
-def _validated_requeue_scheduler_config(
-    context: Mapping[str, Any],
-) -> tuple[dict[str, Any], bytes]:
-    contract = context["submission_contract"]
-    preclaim = contract.get("scheduler_preclaim")
-    fallback = contract.get("scheduler_fallback_config")
-    require(
-        isinstance(preclaim, Mapping)
-        and isinstance(preclaim.get("scheduler_control_plane"), Mapping)
-        and isinstance(fallback, Mapping),
-        "requeue scheduler binding is absent",
-    )
-    expected_fields = {
-        "schema_version",
-        "purpose",
-        "encoding",
-        "payload_base64",
-        "sha256",
-        "size",
-        "source_control_plane",
-    }
-    require(
-        set(fallback) == expected_fields
-        and fallback.get("schema_version") == 1
-        and fallback.get("purpose")
-        == (
-            "accepted-job exact reconciliation, cancellation, and requeue only; "
-            "never submission"
-        )
-        and fallback.get("encoding") == "base64"
-        and isinstance(fallback.get("payload_base64"), str)
-        and sha256_string(fallback.get("sha256"))
-        and type(fallback.get("size")) is int
-        and 0 < int(fallback["size"]) <= 16 * 1024 * 1024
-        and fallback.get("source_control_plane")
-        == preclaim["scheduler_control_plane"],
-        "requeue scheduler binding differs from the exact preclaim",
-    )
-    try:
-        payload = base64.b64decode(str(fallback["payload_base64"]), validate=True)
-    except (ValueError, UnicodeError) as exc:
-        raise LifecycleError(f"requeue scheduler config encoding differs: {exc}") from exc
-    require(
-        len(payload) == fallback["size"]
-        and hashlib.sha256(payload).hexdigest() == fallback["sha256"]
-        and isinstance(fallback["source_control_plane"].get("config"), Mapping)
-        and fallback["source_control_plane"]["config"].get("sha256")
-        == fallback["sha256"]
-        and isinstance(
-            fallback["source_control_plane"]["config"].get("identity"), Mapping
-        )
-        and fallback["source_control_plane"]["config"]["identity"].get("size")
-        == fallback["size"]
-        and fallback["source_control_plane"].get("critical")
-        == {
-            key: SCHEDULER_CONTROL_PLANE[key]
-            for key in (
-                "cluster_name",
-                "slurmctld_hosts",
-                "slurmctld_port",
-                "auth_type",
-                "gres_types",
-                "cli_filter_plugins",
-                "job_submit_plugins",
-            )
-        },
-        "requeue scheduler config bytes differ",
-    )
-    return dict(fallback), payload
-
-
-def _scontrol_field(stdout: str, name: str) -> str:
-    lines = [line for line in stdout.splitlines() if line.strip()]
-    require(len(lines) == 1, "scontrol show returned an ambiguous job record")
-    prefix = f"{name}="
-    values = [token[len(prefix):] for token in lines[0].split() if token.startswith(prefix)]
-    require(len(values) == 1 and values[0], f"scontrol show {name} differs")
-    return values[0]
-
-
-def authenticated_requeue(
-    args: argparse.Namespace,
-    scheduler_runner: SchedulerRunner = _default_scheduler_runner,
-) -> int:
-    """Show and requeue one exact array element through preclaim-pinned bytes."""
-
-    submission = ensure_directory(args.submission_root, "submission root")
-    bootstrap_contract = getattr(args, "_bootstrap_contract", None)
-    snapshot = getattr(args, "_bootstrap_snapshot_root", None)
-    require(
-        isinstance(bootstrap_contract, Mapping) and isinstance(snapshot, Path),
-        "requeue lacks verified bootstrap",
-    )
-    context = load_launch_context(
-        snapshot_root=snapshot,
-        submission_root=submission,
-        submission_sha256=args.submission_sha256,
-        cell_index=args.cell_index,
-        bootstrap_contract=bootstrap_contract,
-    )
-    task_root = ensure_contained_directory(
-        task_root_for(submission, args.cell_index),
-        submission,
-        "task state root",
-    )
-    generation = ensure_contained_directory(
-        generation_root_for(task_root, args.restart_count),
-        task_root,
-        "generation state root",
-    )
-    require(not cancellation_requested(submission, task_root), "cancellation raced with requeue")
-    ready_path = generation / REQUEUE_READY_NAME
-    ready, ready_sha256, _ = read_json_artifact(
-        ready_path,
-        "requeue READY",
-        required_mode=0o444,
-    )
-    require(set(ready) == REQUEUE_READY_FIELDS, "requeue READY fields differ")
-    require(ready.get("status") == "requeue_ready", "generation is not requeue-ready")
-    expected_common = {
-        "schema_version": 1,
-        "campaign_id": CAMPAIGN_ID,
-        "submission_sha256": args.submission_sha256,
-        "launch_sha256": context["launch"]["launch_sha256"],
-        "cell_index": args.cell_index,
-        "restart_count": args.restart_count,
-        "array_job_id": str(args.array_job_id),
-        "array_task_id": int(args.array_task_id),
-    }
-    for key, value in expected_common.items():
-        require(ready.get(key) == value, f"requeue READY {key} differs")
-    current = resolve_checkpoint(context)
-    ready_identity = validate_ready_checkpoint_binding(ready, current, "requeue READY")
-    require(
-        sha256_string(ready.get("checkpoint_sha256"))
-        and current["checkpoint_sha256"] == ready["checkpoint_sha256"]
-        and current["checkpoint_file_identity"] == ready_identity,
-        "checkpoint advanced/swapped before scontrol requeue",
-    )
-    target = f"{args.array_job_id}_{args.array_task_id}"
-    scheduler_binding, scheduler_payload = _validated_requeue_scheduler_config(context)
-    scontrol = Path(str(context["manifest"]["execution"].get("scontrol", "")))
-    directory_fd: int | None = None
-    executable_fd: int | None = None
-    config_fd: int | None = None
-    try:
-        directory_fd, executable_fd, executable_info, executable_sha256 = (
-            _open_root_owned_scheduler_executable(scontrol)
-        )
-        config_fd = _sealed_scheduler_config_descriptor(scheduler_payload)
-        scheduler_environment = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "LANG": "C",
-            "LC_ALL": "C",
-            "SLURM_CONF": f"/proc/self/fd/{config_fd}",
-        }
-        show_command = [str(scontrol), "show", "job", target, "--oneliner"]
-        requeue_command = [str(scontrol), "requeue", target]
-        show_actual = [f"/proc/self/fd/{executable_fd}", *show_command[1:]]
-        inherited_fds = (config_fd, executable_fd)
-        shown = scheduler_runner(
-            show_actual,
-            snapshot,
-            scheduler_environment,
-            inherited_fds,
-        )
-        require(
-            len(shown.stdout) <= 1024 * 1024 and len(shown.stderr) <= 1024 * 1024,
-            "scontrol show response is oversized",
-        )
-        executable_mid_sha256, executable_mid = _hash_fd_stable(
-            executable_fd, "scheduler control executable after show"
-        )
-        require(
-            _full_stat_identity(executable_mid) == _full_stat_identity(executable_info)
-            and executable_mid_sha256 == executable_sha256,
-            "scheduler control executable changed across scontrol show",
-        )
-        require(
-            shown.returncode == 0,
-            f"cannot read exact Slurm array element: {shown.stderr.strip()}",
-        )
-        require(_scontrol_field(shown.stdout, "JobId") == target, "Slurm JobId differs")
-        require(
-            _scontrol_field(shown.stdout, "ArrayJobId") == str(args.array_job_id),
-            "Slurm ArrayJobId differs",
-        )
-        require(
-            _scontrol_field(shown.stdout, "ArrayTaskId") == str(args.array_task_id),
-            "Slurm ArrayTaskId differs",
-        )
-        require(
-            _scontrol_field(shown.stdout, "JobState") == "RUNNING",
-            "array element is not RUNNING at requeue linearization",
-        )
-        require(
-            not cancellation_requested(submission, task_root),
-            "cancellation raced before CALLING",
-        )
-        calling = {
-            **expected_common,
-            "status": "scontrol_requeue_calling",
-            "requeue_target": target,
-            "requeue_ready_sha256": ready_sha256,
-            "checkpoint_sha256": ready["checkpoint_sha256"],
-            "checkpoint_file_identity": ready_identity,
-            "scheduler_control_plane": scheduler_binding["source_control_plane"],
-            "scheduler_config_sha256": scheduler_binding["sha256"],
-            "scheduler_config_size": scheduler_binding["size"],
-            "scontrol_executable_sha256": executable_sha256,
-            "scontrol_show_command": show_command,
-            "scontrol_show_stdout_sha256": hashlib.sha256(
-                shown.stdout.encode("utf-8")
-            ).hexdigest(),
-            "scontrol_requeue_command": requeue_command,
-        }
-        require(set(calling) == REQUEUE_CALLING_FIELDS, "requeue CALLING fields differ")
-        seal_json(generation / REQUEUE_CALLING_NAME, calling)
-        require(
-            not cancellation_requested(submission, task_root),
-            "cancellation raced after CALLING",
-        )
-        requeued = scheduler_runner(
-            [f"/proc/self/fd/{executable_fd}", *requeue_command[1:]],
-            snapshot,
-            scheduler_environment,
-            inherited_fds,
-        )
-        require(
-            len(requeued.stdout) <= 1024 * 1024
-            and len(requeued.stderr) <= 1024 * 1024,
-            "scontrol requeue response is oversized",
-        )
-        executable_after_sha256, executable_after = _hash_fd_stable(
-            executable_fd, "scheduler control executable after requeue"
-        )
-        named_after = os.stat(
-            scontrol.name, dir_fd=directory_fd, follow_symlinks=False
-        )
-        require(
-            _full_stat_identity(executable_after) == _full_stat_identity(executable_info)
-            and _full_stat_identity(named_after) == _full_stat_identity(executable_info)
-            and executable_after_sha256 == executable_sha256,
-            "scheduler control executable changed across scontrol requeue",
-        )
-        require(
-            requeued.returncode == 0,
-            f"Slurm requeue call failed after immutable CALLING: {requeued.stderr.strip()}",
-        )
-        return 0
-    except OSError as exc:
-        raise LifecycleError(f"authenticated scheduler requeue failed: {exc}") from exc
-    finally:
-        for descriptor in (config_fd, executable_fd, directory_fd):
-            if descriptor is not None:
-                os.close(descriptor)
-
-
 def _common_parser(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--submission-root", type=Path, required=True)
     parser.add_argument("--submission-sha256", required=True)
     parser.add_argument("--cell-index", type=int, required=True)
-    parser.add_argument("--restart-count", type=int, required=True)
+    parser.add_argument("--wave-index", type=int, choices=(0, 1), required=True)
     parser.add_argument("--array-job-id", required=True)
     parser.add_argument("--array-task-id", type=int, required=True)
+    parser.add_argument("--predecessor-array-job-id", required=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -3326,8 +3302,6 @@ def _parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record-signal")
     _common_parser(record)
     record.add_argument("--signal", choices=("USR1", "TERM"), required=True)
-    requeue = sub.add_parser("requeue")
-    _common_parser(requeue)
     return parser
 
 
@@ -3336,7 +3310,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     require(args.command is not None, "worker command is required")
     require(0 <= args.cell_index < 20, "cell index is out of range")
-    require(args.restart_count >= 0, "restart count is negative")
+    require(args.wave_index in {0, 1}, "wave index differs")
+    require(_is_job_id(args.array_job_id), "array job ID is malformed")
+    require(
+        args.predecessor_array_job_id == "none"
+        or _is_job_id(args.predecessor_array_job_id),
+        "predecessor array job ID is malformed",
+    )
     require(args.array_task_id == args.cell_index, "array task/cell mapping differs")
     require(STOP_ENVIRONMENT not in os.environ, f"inherited {STOP_ENVIRONMENT} is forbidden")
     expected_snapshot = args.snapshot_root if args.command == "run" else None
@@ -3360,6 +3340,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         contract=bootstrap_contract,
         snapshot_root=bootstrap_snapshot,
     )
+    authorization, authorization_sha256 = load_submission_authorization(
+        bootstrap_submission_root,
+        args.submission_sha256,
+        wave_index=args.wave_index,
+        array_job_id=str(args.array_job_id),
+        predecessor_array_job_id=str(args.predecessor_array_job_id),
+    )
+    args._submission_authorization = authorization
+    args._submission_authorization_sha256 = authorization_sha256
     if args.command == "run":
         args.snapshot_root = bootstrap_snapshot
     if args.command == "record-signal":
@@ -3367,15 +3356,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             submission_root=args.submission_root,
             submission_sha256=args.submission_sha256,
             cell_index=args.cell_index,
-            restart_count=args.restart_count,
+            wave_index=args.wave_index,
             array_job_id=args.array_job_id,
             array_task_id=args.array_task_id,
+            predecessor_array_job_id=args.predecessor_array_job_id,
+            submission_authorization_sha256=authorization_sha256,
             signal_name=args.signal,
             bootstrap_contract=bootstrap_contract,
         )
         return 0
-    if args.command == "requeue":
-        return authenticated_requeue(args)
     return run_worker(args)
 
 

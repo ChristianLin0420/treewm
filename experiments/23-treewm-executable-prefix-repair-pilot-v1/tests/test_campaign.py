@@ -40,10 +40,10 @@ def test_full_static_contract_and_matrix():
     )
     assert [cell.index for cell in cells] == list(range(20))
     assert manifest["campaign_id"] == campaign.CAMPAIGN_ID
-    assert all(cell.run_name.startswith("exp23-launch7-") for cell in cells)
+    assert all(cell.run_name.startswith("exp23-launch8-") for cell in cells)
 
 
-def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
+def test_launch8_namespace_and_ordered_superseded_launches_are_exact():
     manifest, lock = contracts()
     superseded = manifest["superseded_launches"]
     assert superseded == campaign.SUPERSEDED_LAUNCHES
@@ -54,8 +54,9 @@ def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
         "treewm-executable-prefix-repair-pilot-v1-launch4",
         "treewm-executable-prefix-repair-pilot-v1-launch5",
         "treewm-executable-prefix-repair-pilot-v1-launch6",
+        "treewm-executable-prefix-repair-pilot-v1-launch7",
     ]
-    launch1, launch2, launch3, launch4, launch5, launch6 = superseded
+    launch1, launch2, launch3, launch4, launch5, launch6, launch7 = superseded
     assert launch1["source_commit_claimed_by_journal"] is False
     assert launch1["snapshot"] == {
         "inventory_sha256": "6767520819d42ef8866712023211b2f1bc8d236db3ffc836c8dae429b4e5b326",
@@ -463,6 +464,21 @@ def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
         "canonical_ledger_sha256"
     ] == "447a0b38dbbd0ead850aa1eb16010e67334452a698f103824393cd0341cbce4d"
     assert launch6["scientific_state"]["optimizer_update_total_across_cells"] == 102017
+    assert launch7["status"] == "terminal_failed_compute_scheduler_client_topology"
+    assert [
+        *launch7["job_ids_by_role"]["wave0_train"],
+        *launch7["job_ids_by_role"]["report"],
+    ] == ["33236584", "33236586"]
+    assert launch7["negative_provenance"] == {
+        "path": "launch7_negative_provenance.json",
+        "raw_sha256": "29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e",
+        "canonical_sha256": "48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62",
+        "scheduler_terminal_rows": 21,
+        "ready_checkpoint_cells": 16,
+        "completed_cells": 4,
+        "report_started": False,
+        "active_scheduler_jobs_after_terminal": 0,
+    }
     for row in superseded[:2]:
         assert row["submission_sha256"] is None
         assert row["known_job_ids"] == []
@@ -486,14 +502,14 @@ def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
             assert row[key] is False
     assert launch2["submission_contract_committed"] is False
     assert manifest["paths"]["run_root"].endswith(
-        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
+        "/outputs/treewm-executable-prefix-repair-pilot-v1-launch8"
     )
     assert manifest["paths"]["transaction_lock"] == (
-        "outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock"
+        "outputs/.exp23-c85fcaba919d617f.transaction.lock"
     )
     assert all(manifest["paths"]["run_root"] != row["run_root"] for row in superseded)
-    assert manifest["logging"]["wandb_project"].endswith("-launch7")
-    assert manifest["logging"]["wandb_group"].endswith("-launch7")
+    assert manifest["logging"]["wandb_project"].endswith("-launch8")
+    assert manifest["logging"]["wandb_group"].endswith("-launch8")
 
     tampered = copy.deepcopy(manifest)
     tampered["paths"]["run_root"] = launch2["run_root"]
@@ -505,7 +521,7 @@ def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
         campaign.validate_manifest(tampered, lock, REPO)
     tampered = copy.deepcopy(manifest)
     tampered["design"]["fresh_start_policy"] = (
-        "Every launch7 cell starts from scratch; no superseded state may be "
+        "Every Launch8 cell starts from scratch; no superseded state may be "
         "imported, reused, or resumed."
     )
     with pytest.raises(
@@ -515,11 +531,7 @@ def test_launch7_namespace_and_ordered_superseded_launches_are_exact():
     tampered = copy.deepcopy(manifest)
     tampered["design"]["fresh_start_policy"] = manifest["design"][
         "fresh_start_policy"
-    ].replace(
-        "only within a genuine scheduler requeue lineage of that same fresh "
-        "Launch7 cell",
-        "within any Launch7 process",
-    )
+    ].replace("authorization-bound", "unbound")
     with pytest.raises(
         campaign.ContractError, match="superseded-launch exclusion policy differs"
     ):
@@ -640,6 +652,35 @@ def test_generated_config_and_causal_locks_are_exact_prefix_stripped_payloads():
         assert claimed == campaign.stable_hash(body)
 
 
+def test_resolved_lock_cannot_rebind_a_coherently_rehashed_launch7_namespace(
+    tmp_path, monkeypatch
+):
+    manifest, _ = contracts()
+    stale = campaign.read_json(PACKAGE / "resolved_config.lock.json")
+    row = stale["matrix"][0]
+    row["resolved_config"]["campaign_id"] = (
+        "treewm-executable-prefix-repair-pilot-v1-launch7"
+    )
+    row["resolved_config"]["run_root"] = manifest["paths"]["run_root"].replace(
+        "launch8", "launch7"
+    )
+    row["resolved_config_sha256"] = campaign.stable_hash(row["resolved_config"])
+    body = dict(stale)
+    body.pop("artifact_sha256")
+    stale["artifact_sha256"] = campaign.stable_hash(body)
+    tampered_manifest = copy.deepcopy(manifest)
+    tampered_manifest["resolved_config_contract"]["artifact_sha256"] = stale[
+        "artifact_sha256"
+    ]
+    path = tmp_path / "resolved_config.lock.json"
+    path.write_text(campaign.canonical_json(stale) + "\n", encoding="ascii")
+    monkeypatch.setattr(campaign, "RESOLVED_CONFIG_LOCK_PATH", path)
+    with pytest.raises(
+        campaign.ContractError, match="resolved campaign/run-root identity differs"
+    ):
+        campaign._validate_resolved_config_lock(tampered_manifest)
+
+
 def test_protocol_inventory_is_closed_and_deterministic():
     assert campaign.PROTOCOL_FILES == (
         "manifest.json",
@@ -660,11 +701,18 @@ def test_protocol_inventory_is_closed_and_deterministic():
         "cancel.py",
         "report.py",
         "report.slurm",
+        "dag_evidence.py",
+        "two_wave_canary.py",
+        "canary_worker.py",
+        "canary_gpu.slurm",
+        "canary_report.slurm",
+        "launch7_negative_provenance.json",
         "README.md",
         "tests/test_campaign.py",
         "tests/test_gate.py",
         "tests/test_lifecycle.py",
         "tests/test_orchestration.py",
+        "tests/test_two_wave_canary.py",
     )
     assert len(campaign.PROTOCOL_FILES) == len(set(campaign.PROTOCOL_FILES))
     assert "protocol.sha256" not in campaign.PROTOCOL_FILES

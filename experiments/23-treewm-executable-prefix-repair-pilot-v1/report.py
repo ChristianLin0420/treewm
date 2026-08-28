@@ -28,7 +28,7 @@ sys.dont_write_bytecode = True
 PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 BOUNDARIES = (5_000, 25_000)
 SHA256 = frozenset("0123456789abcdef")
 WORKER_COMPLETE_KEYS = frozenset(
@@ -38,9 +38,11 @@ WORKER_COMPLETE_KEYS = frozenset(
         "submission_sha256",
         "launch_sha256",
         "cell_index",
-        "restart_count",
+        "wave_index",
         "array_job_id",
         "array_task_id",
+        "predecessor_array_job_id",
+        "submission_authorization_sha256",
         "status",
         "completed_updates",
         "checkpoint_sha256",
@@ -51,18 +53,73 @@ WORKER_COMPLETE_KEYS = frozenset(
         "final_metrics",
     }
 )
+ARTIFACT_BASE_KEYS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "submission_sha256",
+        "launch_sha256",
+        "cell_index",
+        "wave_index",
+        "array_job_id",
+        "array_task_id",
+        "predecessor_array_job_id",
+        "submission_authorization_sha256",
+    }
+)
+GENERATION_START_KEYS = ARTIFACT_BASE_KEYS | frozenset(
+    {
+        "status",
+        "input_kind",
+        "input_checkpoint_sha256",
+        "predecessor_evidence_sha256",
+    }
+)
+CONTINUATION_READY_KEYS = ARTIFACT_BASE_KEYS | frozenset(
+    {
+        "status",
+        "trainer_exit_code",
+        "checkpoint_kind",
+        "completed_updates",
+        "phase",
+        "pending_eval_step",
+        "checkpoint_sha256",
+        "checkpoint_file_identity",
+        "final_eval_progress_sha256",
+    }
+)
 RECEIPT_KEYS = frozenset(
     {
         "schema_version",
         "status",
         "campaign_id",
-        "submission_root",
-        "snapshot_root",
         "submission_sha256",
-        "train_array_job_id",
+        "submission_authorization_sha256",
+        "wave0_array_job_id",
+        "wave1_array_job_id",
         "report_job_id",
         "array",
-        "dependency",
+        "wave1_dependency",
+        "report_dependency",
+        "kill_on_invalid_dependency",
+        "within_wave_requeue",
+        "wave0_submitted_held",
+    }
+)
+AUTHORIZATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "array",
+        "job_ids",
+        "dependencies",
+        "kill_on_invalid_dependency",
+        "within_wave_requeue",
+        "wave0_submitted_held",
+        "accepted_job_evidence_sha256",
+        "authorized_at_utc",
     }
 )
 
@@ -108,6 +165,26 @@ def canonical_json(value: object) -> str:
 
 def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def exact_json_equal(left: object, right: object) -> bool:
+    """Compare JSON values recursively without Python's bool/int coercion."""
+
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (
+            isinstance(left, Mapping)
+            and isinstance(right, Mapping)
+            and set(left) == set(right)
+            and all(exact_json_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(exact_json_equal(a, b) for a, b in zip(left, right))
+        )
+    return type(left) is type(right) and left == right
 
 
 def file_sha256(path: str | Path) -> str:
@@ -745,17 +822,24 @@ def verify_snapshot_inventory(
     contained_regular(seal_path, submission, "contract-seal journal")
     require(stat.S_IMODE(seal_path.lstat().st_mode) == 0o444, "contract-seal journal mode differs")
     require(
-        read_json(seal_path)
-        == {
+        exact_json_equal(
+            read_json(seal_path),
+            {
             "schema_version": 1,
             "record": "contract_sealed",
             "submission_sha256": submission_sha256,
             "launch_count": 20,
-        },
+            },
+        ),
         "contract-seal journal differs",
     )
     contract = read_json(contract_path)
-    require(contract.get("schema_version") == 1 and contract.get("status") == "sealed_for_submission", "submission contract is not sealed")
+    require(
+        type(contract.get("schema_version")) is int
+        and contract.get("schema_version") == 1
+        and contract.get("status") == "sealed_for_submission",
+        "submission contract is not sealed",
+    )
     require(contract.get("campaign_id") == CAMPAIGN_ID, "submission contract campaign differs")
     require(contract.get("submission_root") == str(submission), "submission contract root differs")
     require(contract.get("snapshot_root") == str(snapshot), "submission snapshot root differs")
@@ -796,27 +880,296 @@ def verify_snapshot_inventory(
     require(stat.S_IMODE(receipt_path.lstat().st_mode) == 0o444, "submission receipt mode differs")
     receipt = read_json(receipt_path)
     require(set(receipt) == RECEIPT_KEYS, "submission receipt schema differs")
-    require(receipt["schema_version"] == 1 and receipt["status"] == "submitted", "submission receipt is not committed")
+    require(
+        type(receipt["schema_version"]) is int
+        and receipt["schema_version"] == 1
+        and receipt["status"] == "committed_two_wave_dag",
+        "submission receipt is not committed",
+    )
     require(receipt["campaign_id"] == CAMPAIGN_ID, "submission receipt campaign differs")
-    require(receipt["submission_root"] == str(submission), "submission receipt root differs")
-    require(receipt["snapshot_root"] == str(snapshot), "submission receipt snapshot differs")
     require(receipt["submission_sha256"] == submission_sha256, "submission receipt hash differs")
-    train_id = str(receipt["train_array_job_id"])
-    report_id = str(receipt["report_job_id"])
-    require(train_id.isdigit() and int(train_id) > 0, "training receipt job ID is malformed")
-    require(report_id.isdigit() and int(report_id) > 0 and report_id != train_id, "report receipt job ID is malformed")
+    wave0_id = receipt["wave0_array_job_id"]
+    wave1_id = receipt["wave1_array_job_id"]
+    report_id = receipt["report_job_id"]
+    require(
+        all(
+            isinstance(value, str)
+            and value
+            and value[0] in "123456789"
+            and all(character in "0123456789" for character in value)
+            for value in (wave0_id, wave1_id, report_id)
+        )
+        and len({wave0_id, wave1_id, report_id}) == 3,
+        "DAG receipt job IDs are malformed",
+    )
     require(receipt["array"] == "0-19%20", "submission receipt array differs")
-    require(receipt["dependency"] == f"afterok:{train_id}", "submission receipt dependency differs")
-    for role, ordinal, expected_id in (("train", 3, train_id), ("report", 4, report_id)):
+    require(
+        receipt["wave1_dependency"] == f"afterok:{wave0_id}"
+        and receipt["report_dependency"] == f"afterok:{wave1_id}"
+        and exact_json_equal(
+            receipt["kill_on_invalid_dependency"],
+            {"wave1": "yes", "report": "yes"},
+        )
+        and receipt["within_wave_requeue"] is False
+        and receipt["wave0_submitted_held"] is True,
+        "submission receipt DAG differs",
+    )
+    authorization_path = submission / "SUBMISSION_AUTHORIZATION.json"
+    contained_regular(authorization_path, submission, "submission authorization")
+    require(
+        stat.S_IMODE(authorization_path.lstat().st_mode) == 0o444
+        and file_sha256(authorization_path)
+        == receipt["submission_authorization_sha256"],
+        "submission authorization bytes differ",
+    )
+    authorization = read_json(authorization_path)
+    job_ids = {"wave0": wave0_id, "wave1": wave1_id, "report": report_id}
+    dependencies = {
+        "wave0": "none",
+        "wave1": f"afterok:{wave0_id}",
+        "report": f"afterok:{wave1_id}",
+    }
+    require(
+        set(authorization) == AUTHORIZATION_KEYS
+        and type(authorization.get("schema_version")) is int
+        and authorization.get("schema_version") == 1
+        and authorization.get("status") == "authorized_two_wave_dag"
+        and authorization.get("campaign_id") == CAMPAIGN_ID
+        and authorization.get("submission_sha256") == submission_sha256
+        and authorization.get("array") == "0-19%20"
+        and exact_json_equal(authorization.get("job_ids"), job_ids)
+        and exact_json_equal(authorization.get("dependencies"), dependencies)
+        and exact_json_equal(
+            authorization.get("kill_on_invalid_dependency"),
+            {"wave1": "yes", "report": "yes"},
+        )
+        and authorization.get("within_wave_requeue") is False
+        and authorization.get("wave0_submitted_held") is True
+        and sha256_string(authorization.get("accepted_job_evidence_sha256"))
+        and isinstance(authorization.get("authorized_at_utc"), str)
+        and bool(authorization["authorized_at_utc"]),
+        "submission authorization differs",
+    )
+    records: dict[str, Any] = {}
+    for role, ordinal, expected_id in (
+        ("wave0", 3, wave0_id),
+        ("wave1", 4, wave1_id),
+        ("report", 5, report_id),
+    ):
         journal_path = submission / "journal" / f"{ordinal:04d}_{role.upper()}_SUBMITTED.json"
         contained_regular(journal_path, submission, f"{role} submission journal")
         require(stat.S_IMODE(journal_path.lstat().st_mode) == 0o444, f"{role} submission journal mode differs")
         journal = read_json(journal_path)
         require(
-            journal.get("record") == f"{role}_submitted"
-            and str(journal.get("job_id")) == expected_id,
+            type(journal.get("schema_version")) is int
+            and journal.get("schema_version") == 1
+            and journal.get("record") == f"{role}_submitted"
+            and isinstance(journal.get("job_id"), str)
+            and journal.get("job_id") == expected_id,
             f"submission receipt {role} job differs from durable journal",
         )
+        records[role] = {
+            key: value
+            for key, value in journal.items()
+            if key not in {"schema_version", "record", "job_id"}
+        }
+    claim_path = submission / "journal" / "0000_CLAIMED.json"
+    contained_regular(claim_path, submission, "DAG transaction claim")
+    require(stat.S_IMODE(claim_path.lstat().st_mode) == 0o444, "DAG transaction claim mode differs")
+    claim = read_json(claim_path)
+    calling_records = {}
+    calling_sha256_by_role = {}
+    for role in ("wave0", "wave1", "report"):
+        calling_path = submission / "journal" / f"CALLING_{role.upper()}.json"
+        contained_regular(calling_path, submission, f"{role} scheduler calling record")
+        require(stat.S_IMODE(calling_path.lstat().st_mode) == 0o444, f"{role} scheduler calling record mode differs")
+        calling_records[role] = read_json(calling_path)
+        calling_sha256_by_role[role] = file_sha256(calling_path)
+    manifest = read_json(snapshot / PACKAGE_RELATIVE / "manifest.json")
+    dag_evidence = _load_module(
+        "DAG evidence verifier",
+        snapshot / PACKAGE_RELATIVE / "dag_evidence.py",
+        snapshot,
+    )
+    try:
+        semantic_hash = dag_evidence.validate_dag_records(
+            records,
+            calling_records,
+            calling_sha256_by_role,
+            manifest=manifest,
+            snapshot_root=snapshot,
+            submission_root=submission,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim.get("claim_token", "")),
+            job_ids=job_ids,
+            expected_control_plane=contract["scheduler_preclaim"][
+                "scheduler_control_plane"
+            ],
+        )
+    except BaseException as exc:
+        raise ReportError(f"accepted DAG scheduler evidence differs: {exc}") from exc
+    require(
+        semantic_hash == authorization["accepted_job_evidence_sha256"],
+        "accepted-job journal evidence differs",
+    )
+    authorized_path = submission / "journal" / "0006_DAG_AUTHORIZED.json"
+    contained_regular(authorized_path, submission, "durable DAG authorization journal")
+    require(stat.S_IMODE(authorized_path.lstat().st_mode) == 0o444, "DAG authorization journal mode differs")
+    require(
+        exact_json_equal(
+            read_json(authorized_path),
+            {
+            "schema_version": 1,
+            "record": "dag_authorized",
+            "submission_authorization_sha256": receipt[
+                "submission_authorization_sha256"
+            ],
+            "accepted_job_evidence_sha256": authorization[
+                "accepted_job_evidence_sha256"
+            ],
+            "job_ids": job_ids,
+            "dependencies": dependencies,
+            },
+        ),
+        "durable DAG authorization journal differs",
+    )
+    ready_path = submission / "journal" / "0007_READY_TO_COMMIT.json"
+    contained_regular(ready_path, submission, "durable ready-to-commit journal")
+    require(stat.S_IMODE(ready_path.lstat().st_mode) == 0o444, "ready-to-commit journal mode differs")
+    require(
+        exact_json_equal(
+            read_json(ready_path),
+            {"schema_version": 1, "record": "ready_to_commit", **receipt},
+        ),
+        "durable ready-to-commit journal differs",
+    )
+    released_path = submission / "journal" / "0008_WAVE0_RELEASED.json"
+    contained_regular(released_path, submission, "durable wave-zero release journal")
+    require(stat.S_IMODE(released_path.lstat().st_mode) == 0o444, "wave-zero release journal mode differs")
+    released = read_json(released_path)
+    require(
+        set(released)
+        == {
+            "schema_version",
+            "record",
+            "wave0_array_job_id",
+            "submission_authorization_sha256",
+            "calling_sha256",
+            "release_evidence",
+        }
+        and type(released.get("schema_version")) is int
+        and released.get("schema_version") == 1
+        and released.get("record") == "wave0_released"
+        and released.get("wave0_array_job_id") == wave0_id
+        and released.get("submission_authorization_sha256")
+        == receipt["submission_authorization_sha256"]
+        and sha256_string(released.get("calling_sha256"))
+        and isinstance(released.get("release_evidence"), Mapping),
+        "durable wave-zero release journal differs",
+    )
+    release_calling_path = submission / "journal" / "CALLING_WAVE0_RELEASE.json"
+    contained_regular(
+        release_calling_path, submission, "wave-zero release calling record"
+    )
+    release_calling = read_json(release_calling_path)
+    require(
+        file_sha256(release_calling_path) == released["calling_sha256"]
+        and exact_json_equal(
+            release_calling,
+            {
+            "schema_version": 1,
+            "status": "scheduler_calling",
+            "campaign_id": CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "claim_token": claim["claim_token"],
+            "role": "wave0_release",
+            "job_name": f"exp23-launch8-{submission_sha256[:16]}-wave0",
+            "scheduler_comment": f"treewm-exp23:{submission_sha256}",
+            "command": [
+                str(manifest["execution"]["scontrol"]),
+                "release",
+                wave0_id,
+            ],
+            "transaction_lock": calling_records["wave0"]["transaction_lock"],
+            },
+        ),
+        "wave-zero release calling record differs",
+    )
+    evidence = dict(released["release_evidence"])
+    require(
+        set(evidence)
+        == {
+            "release_command",
+            "release_returncode",
+            "release_stdout",
+            "release_stderr",
+            "show_command",
+            "show_returncode",
+            "show_stdout",
+            "show_stderr",
+            "state",
+            "reason",
+            "release_scheduler_control_plane",
+            "show_scheduler_control_plane",
+        },
+        "wave-zero release evidence fields differ",
+    )
+    release_command = evidence["release_command"]
+    require(
+        (
+            release_command == ["/usr/local/bin/scontrol", "release", wave0_id]
+            and type(evidence["release_returncode"]) is int
+            and evidence["release_returncode"] == 0
+            and isinstance(evidence["release_stdout"], str)
+            and isinstance(evidence["release_stderr"], str)
+            and exact_json_equal(
+                evidence["release_scheduler_control_plane"],
+                (contract.get("scheduler_preclaim") or {}).get(
+                    "scheduler_control_plane"
+                ),
+            )
+        )
+        or (
+            release_command is None
+            and evidence["release_returncode"] is None
+            and evidence["release_stdout"] == ""
+            and evidence["release_stderr"] == ""
+            and evidence["release_scheduler_control_plane"] is None
+        ),
+        "wave-zero release command differs",
+    )
+    require(
+        evidence["show_command"]
+        == ["/usr/local/bin/scontrol", "show", "job", wave0_id, "--oneliner"]
+        and type(evidence["show_returncode"]) is int
+        and evidence["show_returncode"] == 0
+        and isinstance(evidence["show_stdout"], str)
+        and isinstance(evidence["show_stderr"], str)
+        and len(evidence["show_stdout"]) <= 1024 * 1024
+        and len(evidence["show_stderr"]) <= 1024 * 1024
+        and exact_json_equal(
+            evidence["show_scheduler_control_plane"],
+            (contract.get("scheduler_preclaim") or {}).get(
+                "scheduler_control_plane"
+            ),
+        ),
+        "wave-zero release show/control evidence differs",
+    )
+    fields = {
+        token.split("=", 1)[0]: token.split("=", 1)[1]
+        for token in evidence["show_stdout"].split()
+        if "=" in token
+    }
+    require(
+        fields.get("JobId") == wave0_id
+        and fields.get("JobName") == f"exp23-launch8-{submission_sha256[:16]}-wave0"
+        and fields.get("Comment") == f"treewm-exp23:{submission_sha256}"
+        and fields.get("JobState") == evidence["state"]
+        and evidence["state"] in {"PENDING", "RUNNING", "COMPLETING", "COMPLETED"}
+        and fields.get("Reason") == evidence["reason"]
+        and evidence["reason"] != "JobHeldUser",
+        "wave-zero release identity/state differs",
+    )
     scheduler_job = os.environ.get("SLURM_JOB_ID")
     if scheduler_job is not None:
         require(scheduler_job == report_id, "active report Slurm job differs from committed receipt")
@@ -1221,20 +1574,86 @@ def validate_worker_receipt(
     index: int,
     launch: Mapping[str, Any],
     submission_sha256: str,
-    train_array_job_id: str,
+    wave0_array_job_id: str,
+    wave1_array_job_id: str,
+    submission_authorization_sha256: str,
+    task_root: Path,
     terminal: Mapping[str, Any],
-) -> None:
+) -> dict[str, Any]:
     require(set(marker) == WORKER_COMPLETE_KEYS, f"cell{index}: WORKER_COMPLETE fields differ")
-    require(marker["schema_version"] == 1, f"cell{index}: worker receipt schema differs")
+    require(
+        type(marker["schema_version"]) is int and marker["schema_version"] == 1,
+        f"cell{index}: worker receipt schema differs",
+    )
     require(marker["status"] == "worker_complete", f"cell{index}: worker receipt status differs")
     require(marker["campaign_id"] == CAMPAIGN_ID, f"cell{index}: worker receipt campaign differs")
     require(marker["submission_sha256"] == submission_sha256, f"cell{index}: worker receipt submission differs")
     require(marker["launch_sha256"] == launch["launch_sha256"], f"cell{index}: worker receipt launch differs")
     require(type(marker["cell_index"]) is int and marker["cell_index"] == index, f"cell{index}: worker receipt cell differs")
-    require(type(marker["restart_count"]) is int and marker["restart_count"] >= 0, f"cell{index}: restart count differs")
-    require(isinstance(marker["array_job_id"], str) and marker["array_job_id"].isdigit(), f"cell{index}: array job ID differs")
-    require(marker["array_job_id"] == train_array_job_id, f"cell{index}: worker array job differs from submission receipt")
+    require(
+        type(marker["wave_index"]) is int and marker["wave_index"] in {0, 1},
+        f"cell{index}: completion wave differs",
+    )
+    require(
+        isinstance(marker["array_job_id"], str)
+        and marker["array_job_id"]
+        and marker["array_job_id"][0] in "123456789"
+        and all(character in "0123456789" for character in marker["array_job_id"]),
+        f"cell{index}: array job ID differs",
+    )
+    expected_array_id = wave0_array_job_id if marker["wave_index"] == 0 else wave1_array_job_id
+    expected_predecessor = "none" if marker["wave_index"] == 0 else wave0_array_job_id
+    require(
+        marker["array_job_id"] == expected_array_id
+        and marker["predecessor_array_job_id"] == expected_predecessor
+        and marker["submission_authorization_sha256"]
+        == submission_authorization_sha256,
+        f"cell{index}: worker DAG authorization differs",
+    )
     require(type(marker["array_task_id"]) is int and marker["array_task_id"] == index, f"cell{index}: array task differs")
+
+    def exact_base(value: Mapping[str, Any], wave_index: int) -> None:
+        expected_base = {
+            "schema_version": 1,
+            "campaign_id": CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "launch_sha256": launch["launch_sha256"],
+            "cell_index": index,
+            "wave_index": wave_index,
+            "array_job_id": (
+                wave0_array_job_id if wave_index == 0 else wave1_array_job_id
+            ),
+            "array_task_id": index,
+            "predecessor_array_job_id": (
+                "none" if wave_index == 0 else wave0_array_job_id
+            ),
+            "submission_authorization_sha256": submission_authorization_sha256,
+        }
+        require(
+            all(
+                exact_json_equal(value.get(key), expected)
+                for key, expected in expected_base.items()
+            ),
+            f"cell{index}: wave{wave_index} artifact base differs",
+        )
+
+    wave0_start_path = task_root / "waves" / "0" / "START.json"
+    contained_regular(wave0_start_path, task_root, f"cell{index} wave-zero START")
+    require(
+        stat.S_IMODE(wave0_start_path.lstat().st_mode) == 0o444,
+        f"cell{index}: wave-zero START mode differs",
+    )
+    wave0_start = read_json(wave0_start_path)
+    require(
+        set(wave0_start) == GENERATION_START_KEYS
+        and wave0_start.get("status") == "wave_started"
+        and wave0_start.get("input_kind") == "fresh"
+        and wave0_start.get("input_checkpoint_sha256") is None
+        and wave0_start.get("predecessor_evidence_sha256") is None,
+        f"cell{index}: wave-zero scratch START differs",
+    )
+    exact_base(wave0_start, 0)
+    wave0_start_sha256 = file_sha256(wave0_start_path)
     for key in (
         "completed_updates",
         "checkpoint_sha256",
@@ -1243,8 +1662,155 @@ def validate_worker_receipt(
         "completed_results_sha256",
         "identity_sha256",
     ):
-        require(marker[key] == terminal[key], f"cell{index}: worker receipt {key} differs from independent verification")
+        require(
+            exact_json_equal(marker[key], terminal[key]),
+            f"cell{index}: worker receipt {key} differs from independent verification",
+        )
     require(_finite_mapping(marker["final_metrics"], f"cell{index} worker metrics") == terminal["final_metrics"], f"cell{index}: worker receipt metrics differ")
+    wave_marker_path = task_root / "waves" / str(marker["wave_index"]) / "WORKER_COMPLETE.json"
+    contained_regular(wave_marker_path, task_root, f"cell{index} wave completion")
+    require(
+        stat.S_IMODE(wave_marker_path.lstat().st_mode) == 0o444
+        and stat.S_IMODE((task_root / "WORKER_COMPLETE.json").lstat().st_mode) == 0o444,
+        f"cell{index}: worker completion marker mode differs",
+    )
+    require(
+        exact_json_equal(read_json(wave_marker_path), marker)
+        and file_sha256(wave_marker_path) == file_sha256(task_root / "WORKER_COMPLETE.json"),
+        f"cell{index}: task/wave completion markers differ",
+    )
+    if marker["wave_index"] == 0:
+        require(
+            not _lexical_exists(task_root / "waves" / "0" / "CONTINUATION_READY.json"),
+            f"cell{index}: wave-zero completion conflicts with continuation READY",
+        )
+        noop_path = task_root / "waves" / "1" / "WORKER_COMPLETE.json"
+        contained_regular(noop_path, task_root, f"cell{index} wave-one no-op completion")
+        require(stat.S_IMODE(noop_path.lstat().st_mode) == 0o444, f"cell{index}: wave-one no-op mode differs")
+        noop = read_json(noop_path)
+        require(
+            set(noop) == WORKER_COMPLETE_KEYS
+            and noop["status"] == "wave_one_noop_after_wave_zero_complete"
+            and type(noop["wave_index"]) is int
+            and noop["wave_index"] == 1
+            and noop["array_job_id"] == wave1_array_job_id
+            and noop["predecessor_array_job_id"] == wave0_array_job_id
+            and noop["submission_authorization_sha256"]
+            == submission_authorization_sha256,
+            f"cell{index}: wave-one completion no-op differs",
+        )
+        for key in WORKER_COMPLETE_KEYS - {
+            "status", "wave_index", "array_job_id", "predecessor_array_job_id"
+        }:
+            require(
+                exact_json_equal(noop[key], marker[key]),
+                f"cell{index}: wave-one no-op payload differs: {key}",
+            )
+        wave1_start_path = task_root / "waves" / "1" / "START.json"
+        contained_regular(wave1_start_path, task_root, f"cell{index} wave-one no-op START")
+        require(stat.S_IMODE(wave1_start_path.lstat().st_mode) == 0o444, f"cell{index}: wave-one no-op START mode differs")
+        wave1_start = read_json(wave1_start_path)
+        wave0_complete_sha256 = file_sha256(wave_marker_path)
+        require(
+            set(wave1_start) == GENERATION_START_KEYS
+            and wave1_start.get("status") == "wave_started"
+            and wave1_start.get("input_kind") == "complete"
+            and wave1_start.get("input_checkpoint_sha256")
+            == marker["checkpoint_sha256"]
+            and wave1_start.get("predecessor_evidence_sha256")
+            == wave0_complete_sha256,
+            f"cell{index}: wave-one no-op predecessor lineage differs",
+        )
+        exact_base(wave1_start, 1)
+        return {
+            "branch": "wave0_complete_wave1_noop",
+            "wave0_start_sha256": wave0_start_sha256,
+            "wave0_predecessor_evidence_name": "WORKER_COMPLETE.json",
+            "wave0_predecessor_evidence_sha256": wave0_complete_sha256,
+            "wave0_checkpoint_sha256": marker["checkpoint_sha256"],
+            "wave1_start_sha256": file_sha256(wave1_start_path),
+            "wave1_input_checkpoint_sha256": wave1_start["input_checkpoint_sha256"],
+            "wave1_predecessor_evidence_sha256": wave1_start[
+                "predecessor_evidence_sha256"
+            ],
+            "wave1_noop_sha256": file_sha256(noop_path),
+        }
+
+    ready_path = task_root / "waves" / "0" / "CONTINUATION_READY.json"
+    contained_regular(ready_path, task_root, f"cell{index} wave-zero continuation READY")
+    require(stat.S_IMODE(ready_path.lstat().st_mode) == 0o444, f"cell{index}: wave-zero READY mode differs")
+    require(
+        not _lexical_exists(task_root / "waves" / "0" / "WORKER_COMPLETE.json"),
+        f"cell{index}: wave-zero READY conflicts with completion",
+    )
+    ready = read_json(ready_path)
+    exact_base(ready, 0)
+    ready_identity = ready.get("checkpoint_file_identity")
+    require(
+        set(ready) == CONTINUATION_READY_KEYS
+        and ready.get("status") == "continuation_ready"
+        and type(ready.get("trainer_exit_code")) is int
+        and ready.get("trainer_exit_code") == 75
+        and isinstance(ready.get("checkpoint_kind"), str)
+        and bool(ready["checkpoint_kind"])
+        and type(ready.get("completed_updates")) is int
+        and 0 <= ready["completed_updates"] <= 25_000
+        and isinstance(ready.get("phase"), str)
+        and bool(ready["phase"])
+        and (
+            ready.get("pending_eval_step") is None
+            or type(ready.get("pending_eval_step")) is int
+        )
+        and isinstance(ready.get("checkpoint_sha256"), str)
+        and len(ready["checkpoint_sha256"]) == 64
+        and set(ready["checkpoint_sha256"]) <= SHA256,
+        f"cell{index}: wave-zero continuation READY differs",
+    )
+    require(
+        isinstance(ready_identity, Mapping)
+        and set(ready_identity) == {"device", "inode", "size", "mtime_ns", "ctime_ns"}
+        and all(
+            type(ready_identity.get(key)) is int and ready_identity[key] >= 0
+            for key in ready_identity
+        )
+        and (
+            ready.get("final_eval_progress_sha256") is None
+            or (
+                isinstance(ready["final_eval_progress_sha256"], str)
+                and len(ready["final_eval_progress_sha256"]) == 64
+                and set(ready["final_eval_progress_sha256"]) <= SHA256
+            )
+        ),
+        f"cell{index}: wave-zero continuation READY checkpoint evidence differs",
+    )
+    ready_sha256 = file_sha256(ready_path)
+    wave1_start_path = task_root / "waves" / "1" / "START.json"
+    contained_regular(wave1_start_path, task_root, f"cell{index} wave-one resume START")
+    require(stat.S_IMODE(wave1_start_path.lstat().st_mode) == 0o444, f"cell{index}: wave-one resume START mode differs")
+    wave1_start = read_json(wave1_start_path)
+    exact_base(wave1_start, 1)
+    require(
+        set(wave1_start) == GENERATION_START_KEYS
+        and wave1_start.get("status") == "wave_started"
+        and wave1_start.get("input_kind") == ready["checkpoint_kind"]
+        and wave1_start.get("input_checkpoint_sha256")
+        == ready["checkpoint_sha256"]
+        and wave1_start.get("predecessor_evidence_sha256") == ready_sha256,
+        f"cell{index}: wave-one checkpoint predecessor lineage differs",
+    )
+    return {
+        "branch": "wave0_ready_wave1_resume",
+        "wave0_start_sha256": wave0_start_sha256,
+        "wave0_predecessor_evidence_name": "CONTINUATION_READY.json",
+        "wave0_predecessor_evidence_sha256": ready_sha256,
+        "wave0_checkpoint_sha256": ready["checkpoint_sha256"],
+        "wave1_start_sha256": file_sha256(wave1_start_path),
+        "wave1_input_checkpoint_sha256": wave1_start["input_checkpoint_sha256"],
+        "wave1_predecessor_evidence_sha256": wave1_start[
+            "predecessor_evidence_sha256"
+        ],
+        "wave1_noop_sha256": None,
+    }
 
 
 def _outcome_from_terminal(terminal: Mapping[str, Any]) -> dict[str, Any]:
@@ -1454,26 +2020,32 @@ def assemble_report(
             **complete,
             "progress": inspected["progress"],
         }
-        validate_worker_receipt(
+        wave_lineage = validate_worker_receipt(
             marker,
             index=index,
             launch=context["launch"],
             submission_sha256=submission_sha256,
             terminal=terminal,
-            train_array_job_id=str(receipt["train_array_job_id"]),
+            wave0_array_job_id=receipt["wave0_array_job_id"],
+            wave1_array_job_id=receipt["wave1_array_job_id"],
+            submission_authorization_sha256=str(
+                receipt["submission_authorization_sha256"]
+            ),
+            task_root=marker_path.parent,
         )
         cells[index]["boundaries"]["25000"]["outcome"] = _outcome_from_terminal(terminal)
         terminal_provenance.append(
             {
                 "index": index,
                 "worker_complete_sha256": file_sha256(marker_path),
-                "restart_count": marker["restart_count"],
+                "wave_index": marker["wave_index"],
                 "array_job_id": marker["array_job_id"],
                 "checkpoint_sha256": complete["checkpoint_sha256"],
                 "completion_sha256": complete["completion_sha256"],
                 "final_eval_progress_sha256": complete["final_eval_progress_sha256"],
                 "completed_results_sha256": complete["completed_results_sha256"],
                 "identity_sha256": complete["identity_sha256"],
+                "wave_lineage": wave_lineage,
             }
         )
 

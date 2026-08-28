@@ -11,12 +11,14 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 from typing import Any, Mapping
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
+PACKAGE_RELATIVE = Path("experiments/23-treewm-executable-prefix-repair-pilot-v1")
 MANIFEST_PATH = PACKAGE_DIR / "manifest.json"
 WEIGHT_LOCK_PATH = PACKAGE_DIR / "weight_audit.lock.json"
 PROTOCOL_LOCK_PATH = PACKAGE_DIR / "protocol.sha256"
@@ -72,18 +74,25 @@ PROTOCOL_FILES = (
     "cancel.py",
     "report.py",
     "report.slurm",
+    "dag_evidence.py",
+    "two_wave_canary.py",
+    "canary_worker.py",
+    "canary_gpu.slurm",
+    "canary_report.slurm",
+    "launch7_negative_provenance.json",
     "README.md",
     "tests/test_campaign.py",
     "tests/test_gate.py",
     "tests/test_lifecycle.py",
     "tests/test_orchestration.py",
+    "tests/test_two_wave_canary.py",
 )
 SNAPSHOT_IMPORT_FILES = {
     "configs/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 }
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
+CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -1209,6 +1218,82 @@ SUPERSEDED_LAUNCHES = [{
     "resume_allowed": False,
     "retry_allowed": False,
     "recovery_allowed": False,
+}, {
+    "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch7",
+    "run_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
+    ),
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch7/"
+        "state/submission"
+    ),
+    "snapshot_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch7/"
+        "state/submission/source-snapshot/repo"
+    ),
+    "transaction_lock": "outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock",
+    "wandb_project": "treewm-executable-prefix-repair-pilot-v1-launch7",
+    "status": "terminal_failed_compute_scheduler_client_topology",
+    "source_commit": "bdd5d819d291104d5aa7cbe8934ba935cb76518c",
+    "submission_sha256": (
+        "fc4ce1695e6e4ed5a23c8cd0a240299e0823ed1f2a17da87461261d74e74d112"
+    ),
+    "receipt_sha256": (
+        "9be7e28cb2ffdfa7ab59f903eeb50e34e8e8f58a4dd4273d7fd789dfbc6ade10"
+    ),
+    "package_protocol_sha256": (
+        "300d4aacde0502477450dbfc6bc2aaaa80eade93bc572776dd59a0cdd2d7d582"
+    ),
+    "manifest_canonical_sha256": (
+        "f43c885bce1734e3b2eab842d1c56dd18e3a1b7bfd302c51ccbdf5a1ebe2ab5d"
+    ),
+    "negative_provenance": {
+        "path": "launch7_negative_provenance.json",
+        "raw_sha256": (
+            "29051e9839b9ceff4160b8ea0e99e82ce449cd7c2306f1e3604b30f24bb0272e"
+        ),
+        "canonical_sha256": (
+            "48839a4f58214d7a1b616f2f43089e24e16f44717865bac8c3c76845c4457e62"
+        ),
+        "scheduler_terminal_rows": 21,
+        "ready_checkpoint_cells": 16,
+        "completed_cells": 4,
+        "report_started": False,
+        "active_scheduler_jobs_after_terminal": 0,
+    },
+    "job_ids_by_role": {
+        "wave0_train": ["33236584"],
+        "report": ["33236586"],
+    },
+    "proof_scope": (
+        "Launch7 started all twenty fresh generation-zero cells. Four cells completed "
+        "25k and terminal evaluation; sixteen sealed exact USR1 READY checkpoints, then "
+        "failed deterministically because /usr/local/bin/scontrol was absent from every "
+        "observed GPU compute-node image. No REQUEUE_CALLING or replacement generation "
+        "exists and the reporter was cancelled with DependencyNeverSatisfied. The full "
+        "read-only terminal census is protocol-bound by launch7_negative_provenance.json. "
+        "Every Launch7 output, checkpoint, W&B identity, task state, receipt, job ID, and "
+        "namespace is negative evidence only and cannot enter Launch8."
+    ),
+    "submission_contract_committed": True,
+    "submission_receipt_committed": True,
+    "scientific_run_started": True,
+    "checkpoint_created": True,
+    "wandb_run_created": True,
+    "scientific_run_completed": False,
+    "report_valid": False,
+    "results_consumed": False,
+    "checkpoints_consumed": False,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
 }]
 
 
@@ -1430,7 +1515,7 @@ def expand_matrix(manifest: Mapping[str, Any]) -> list[Cell]:
                         env_config=str(setting["env_config"]),
                         arm=arm,
                         seed=seed,
-                        run_name=f"exp23-launch7-{setting['id']}-arm{arm.lower()}-seed{seed}",
+                        run_name=f"exp23-launch8-{setting['id']}-arm{arm.lower()}-seed{seed}",
                     )
                 )
     return result
@@ -1826,7 +1911,13 @@ def _validate_resolved_config_lock(manifest: Mapping[str, Any]) -> dict[str, Any
     for cell, row in zip(cells, rows, strict=True):
         require((row["setting_id"], row["arm_id"], row["seed"]) == (cell.setting, cell.arm, cell.seed), f"cell{cell.index}: resolved-config identity differs")
         require(stable_hash(row["resolved_config"]) == row["resolved_config_sha256"], f"cell{cell.index}: resolved config hash differs")
+        require(
+            row["resolved_config"].get("campaign_id") == manifest["campaign_id"]
+            and row["resolved_config"].get("run_root") == manifest["paths"]["run_root"],
+            f"cell{cell.index}: resolved campaign/run-root identity differs",
+        )
         argv = row.get("trainer_argv_repo_relative")
+        expected_hydra_directory = str(run_directory(manifest, cell) / "hydra")
         require(
             isinstance(argv, list)
             and len(argv) >= 3
@@ -1834,6 +1925,12 @@ def _validate_resolved_config_lock(manifest: Mapping[str, Any]) -> dict[str, Any
             and argv[1] == "scripts/train.py"
             and stable_hash(argv) == row["trainer_argv_sha256"],
             f"cell{cell.index}: repo-relative trainer argv differs",
+        )
+        require(
+            f"+campaign_id={manifest['campaign_id']}" in argv
+            and f"run_root={manifest['paths']['run_root']}" in argv
+            and f"hydra.run.dir={expected_hydra_directory}" in argv,
+            f"cell{cell.index}: resolved launch namespace differs",
         )
         require(row["resolved_config"].get("run_name") is None and row["resolved_config"].get("resume") == "auto", f"cell{cell.index}: run-name/resume parity differs")
     for setting in SETTINGS:
@@ -1966,6 +2063,72 @@ def _validate_core(manifest: Mapping[str, Any], lock: Mapping[str, Any], repo: P
     require(live == lock["source_sha256"]["trainer_code_fingerprint"], "audit/core fingerprint differs")
 
 
+def _validate_launch7_negative_provenance(
+    manifest: Mapping[str, Any], repo: Path
+) -> None:
+    prior = manifest["superseded_launches"][-1]
+    require(
+        prior["campaign_id"]
+        == "treewm-executable-prefix-repair-pilot-v1-launch7",
+        "Launch7 superseded position differs",
+    )
+    binding = prior["negative_provenance"]
+    path = repo / PACKAGE_RELATIVE / str(binding["path"])
+    info = path.lstat()
+    require(
+        stat.S_ISREG(info.st_mode) and not path.is_symlink(),
+        "Launch7 negative provenance is not a regular nonsymlink file",
+    )
+    require(
+        file_sha256(path) == binding["raw_sha256"],
+        "Launch7 negative provenance raw hash differs",
+    )
+    value = read_json(path)
+    require(
+        stable_hash(value) == binding["canonical_sha256"],
+        "Launch7 negative provenance canonical hash differs",
+    )
+    require(
+        value.get("schema_version") == 1
+        and value.get("status") == "terminal_negative_provenance_frozen"
+        and value.get("campaign_id") == prior["campaign_id"]
+        and value["immutable_identity"]["source_commit"] == prior["source_commit"]
+        and value["immutable_identity"]["submission_sha256"]
+        == prior["submission_sha256"]
+        and value["immutable_identity"]["receipt_sha256"]
+        == prior["receipt_sha256"]
+        and value["immutable_identity"]["manifest_canonical_sha256"]
+        == prior["manifest_canonical_sha256"],
+        "Launch7 negative provenance identity differs",
+    )
+    scheduler_payload = {
+        "schema_version": 1,
+        "fields": value["scheduler_terminal_rows_schema"].split("|"),
+        "rows": value["scheduler_terminal_rows"],
+    }
+    require(
+        stable_hash(scheduler_payload)
+        == value["scheduler_terminal_observation"][
+            "canonical_reduced_rows_sha256"
+        ]
+        == "ba0af0501dda20c6697333311c3c7c9eea2d3e586f348057e2d4aae811afaeac",
+        "Launch7 scheduler terminal wrapper differs",
+    )
+    require(
+        len(value["scheduler_terminal_rows"]) == binding["scheduler_terminal_rows"]
+        and len(value["ready_checkpoints"]) == binding["ready_checkpoint_cells"]
+        and len(value["completed_cells"]) == binding["completed_cells"]
+        and value["reporter"]["started"] is binding["report_started"]
+        and value["terminal_zero_active_evidence"]["active_job_count"]
+        == binding["active_scheduler_jobs_after_terminal"]
+        and value["scientific_conclusion"]["reuse_allowed"] is False
+        and value["scientific_conclusion"]["resume_allowed"] is False
+        and value["scientific_conclusion"]["retry_allowed"] is False
+        and value["scientific_conclusion"]["recovery_allowed"] is False,
+        "Launch7 terminal/no-reuse census differs",
+    )
+
+
 def validate_manifest(
     manifest: Mapping[str, Any],
     lock: Mapping[str, Any],
@@ -1976,8 +2139,12 @@ def validate_manifest(
 ) -> None:
     require(manifest.get("schema_version") == 1, "manifest schema differs")
     require(manifest.get("campaign_id") == CAMPAIGN_ID, "campaign ID differs")
-    require(manifest.get("status") == "sealed_launch_ready_unsubmitted", "package launch state differs")
+    require(
+        manifest.get("status") == "sealed_launch_ready_unsubmitted",
+        "package launch state differs",
+    )
     require(manifest.get("formal_validation") is False, "pilot is marked formal")
+    _validate_launch7_negative_provenance(manifest, Path(repo).resolve())
     require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
     require(
         manifest.get("superseded_launches") == SUPERSEDED_LAUNCHES,
@@ -2003,32 +2170,32 @@ def validate_manifest(
     )
     require(
         manifest["paths"]["prospective_run_root"]
-        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
+        == "outputs/treewm-executable-prefix-repair-pilot-v1-launch8"
         and manifest["paths"]["transaction_lock"]
-        == "outputs/.exp23-8fc3c9e0775ae4d7.transaction.lock"
+        == "outputs/.exp23-c85fcaba919d617f.transaction.lock"
         and manifest["paths"]["run_root"]
         == (
             "/lustre/fs11/portfolios/edgeai/projects/"
             "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
-            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch7"
+            "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8"
         ),
-        "launch7 run/transaction namespace differs",
+        "launch8 run/transaction namespace differs",
     )
     require(
         manifest["paths"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_project"] == CAMPAIGN_ID
         and manifest["logging"]["wandb_group"] == CAMPAIGN_ID,
-        "launch7 W&B namespace differs",
+        "launch8 W&B namespace differs",
     )
     require(
         manifest["design"]["fresh_start_policy"]
         == (
-            "Every launch7 generation-zero cell starts from scratch in the fresh "
-            "launch7 namespace; no checkpoint, result, optimizer, model "
+            "Every Launch8 wave-zero cell starts from scratch in the fresh Launch8 "
+            "namespace; no checkpoint, result, optimizer, model "
             "initialization, W&B identity, or state from any superseded launch may "
             "be imported, reused, resumed, retried, or recovered. Resume=auto and "
-            "W&B resume are permitted only within a genuine scheduler requeue "
-            "lineage of that same fresh Launch7 cell."
+            "W&B resume are permitted only for the exact same fresh Launch8 cell in "
+            "the predeclared, authorization-bound wave-zero to wave-one DAG."
         ),
         "superseded-launch exclusion policy differs",
     )
@@ -2053,16 +2220,118 @@ def validate_manifest(
     cells = expand_matrix(manifest)
     require(len(cells) == 20, "matrix expansion differs")
     require(
-        all(cell.run_name.startswith("exp23-launch7-") for cell in cells),
-        "launch7 run-name namespace differs",
+        all(cell.run_name.startswith("exp23-launch8-") for cell in cells),
+        "launch8 run-name namespace differs",
     )
     launch = manifest["launch_contract"]
     require(launch["array"] == "0-19%20" and launch["array_cells"] == 20, "launch array differs")
+    require(
+        launch["scientific_cells"] == 20
+        and launch["gpu_array_jobs"] == 2
+        and launch["scheduled_gpu_task_slots"] == 40
+        and launch["gpu_per_cell"] == 1,
+        "two-wave GPU topology counts differ",
+    )
     require(launch["scratch_to_updates"] == 25_000 and launch["analysis_only_boundary_updates"] == 5_000, "launch boundaries differ")
     require(launch["terminal_final_evaluation"] is True and launch["terminal_final_evaluation_total_episodes"] == 25, "terminal evaluation contract differs")
     require(launch["midpoint_selection"] is False, "midpoint selection enabled")
     require("no TREEWM_STOP_AFTER_UPDATE" in launch["trainer_invocation_policy"], "staged stop reintroduced")
     require(launch["actual_submit_performed"] is False, "manifest claims a submission")
+    graph = launch["scheduler_graph"]
+    require(
+        graph["scientific_cells"] == 20
+        and [node["role"] for node in graph["nodes"]]
+        == ["wave0", "wave1", "report"]
+        and graph["nodes"][0]["initial_state"] == "held"
+        and graph["nodes"][0]["within_wave_requeue"] is False
+        and graph["nodes"][1]["within_wave_requeue"] is False
+        and graph["nodes"][1]["usr1_incomplete_outcome"]
+        == "nonzero terminal failure; no successor wave"
+        and graph["edges"]
+        == [
+            {
+                "from": "wave0",
+                "to": "wave1",
+                "dependency": "afterok:<wave0_array_job_id>",
+                "kill_on_invalid_dependency": True,
+            },
+            {
+                "from": "wave1",
+                "to": "report",
+                "dependency": "afterok:<wave1_array_job_id>",
+                "kill_on_invalid_dependency": True,
+            },
+        ]
+        and graph["authorization_order"]
+        == [
+            "submit wave0 held",
+            "submit and authenticate wave1 dependency",
+            "submit and authenticate report dependency",
+            "publish SUBMISSION_AUTHORIZATION.json",
+            "publish SUBMISSION_RECEIPT.json",
+            "release exact wave0 array",
+        ],
+        "structured scheduler graph differs",
+    )
+    feasibility = launch["runtime_feasibility"]
+    require(
+        feasibility["wave_walltime_seconds"] == 14_400
+        and feasibility["signal_seconds_before_end"] == 420
+        and feasibility["pre_signal_usable_seconds"] == 13_980
+        and feasibility["launch7_minimum_ready_checkpoint_updates"] == 17_518
+        and feasibility["worst_case_remaining_updates"] == 7_482
+        and feasibility["completed_cell_post_25000_progress_to_scheduler_exit_seconds"]
+        == [99, 94, 134, 104]
+        and feasibility["conservative_terminal_completion_bound_seconds"] == 180
+        and math.isclose(
+            feasibility["required_wave1_updates_per_second_after_terminal_reserve"],
+            7482 / (13980 - 180),
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        )
+        and feasibility["observed_to_required_rate_margin"] > 2.31,
+        "two-wave runtime feasibility proof differs",
+    )
+    require(
+        launch["real_gpu_two_wave_canary"]
+        == {
+            "scientific": False,
+            "default_action": "read-only --describe",
+            "preflight_invocation": False,
+            "explicit_submit_flag": "--submit-real-gpu-two-wave-canary",
+            "hard_crash_action": "--recover-or-cancel-real-gpu-canary",
+            "confirmation_phrase": (
+                "SUBMIT_EXP23_LAUNCH8_REAL_GPU_TWO_WAVE_CANARY"
+            ),
+            "controller": "two_wave_canary.py",
+            "compute_worker": "canary_worker.py",
+            "gpu_batch": "canary_gpu.slurm",
+            "report_batch": "canary_report.slurm",
+            "graph": (
+                "one held wave0 GPU job -> one afterok/kill-invalid wave1 GPU job -> "
+                "one afterok/kill-invalid CPU report; authorization, receipt, and READY "
+                "are durable before wave0 release"
+            ),
+            "dedicated_state_parent": "outputs/exp23-launch8-two-wave-canaries",
+            "controller_bootstrap": (
+                "pinned Python -I -S -B with exact live sealed package/protocol "
+                "validation; compute worker appends only the pinned venv/base "
+                "package roots before location-validating the Torch import"
+            ),
+            "runtime_proof_scope": (
+                "The canary proves isolated lexical pinned-Python execution, Torch "
+                "import from one of the two validated nonsymlink package-root "
+                "directories, exactly one visible selected CUDA device, a real CUDA "
+                "tensor operation, and checkpoint transfer across the two waves. It "
+                "does not hash or version-bind the resolved interpreter binary, "
+                "pyvenv.cfg, Torch distribution/native libraries, CUDA driver/runtime, "
+                "or establish byte-equivalence to the scientific trainer environment."
+            ),
+            "within_wave_requeue": False,
+            "run_during_read_only_preflight": False,
+        },
+        "real-GPU two-wave canary contract differs",
+    )
     execution = manifest["execution"]
     require("srun" not in execution, "srun execution path reintroduced")
     require(execution["scontrol"] == "/usr/local/bin/scontrol", "scontrol path differs")
@@ -2093,7 +2362,14 @@ def validate_manifest(
         == {"MUJOCO_GL": "egl", "XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
         "sealed trainer environment differs",
     )
-    require("continuous scratch-to-25000" in execution["training_lifecycle"], "continuous lifecycle differs")
+    require(
+        execution["within_wave_requeue"] is False
+        and "predeclared afterok wave one" in execution["training_lifecycle"]
+        and "no srun, compute-side scheduler client, or within-wave requeue"
+        in execution["process_topology"]
+        and execution["scheduler_client_placement"].startswith("Only submit.py"),
+        "two-wave process topology differs",
+    )
     validate_snapshot_import_files(repo)
     _validate_lock(lock, manifest)
     _validate_prefix_target_lock(manifest)
