@@ -2460,6 +2460,199 @@ class _TransactionLock:
             self.descriptor = None
 
 
+class _ReportCancelLock:
+    """Linearize recovery cancellation precedence against report publication."""
+
+    def __init__(self, submission_root: Path) -> None:
+        self.root = submission_root
+        self.path = submission_root / ".REPORT_CANCEL.lock"
+        self.descriptor: int | None = None
+
+    def __enter__(self) -> "_ReportCancelLock":
+        root = _directory_nonsymlink(self.root, "report/cancel lock root")
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise SubmissionError(f"cannot open report/cancel lock: {exc}") from exc
+        try:
+            opened = os.fstat(descriptor)
+            named = self.path.lstat()
+            require(
+                stat.S_ISREG(opened.st_mode)
+                and (opened.st_dev, opened.st_ino)
+                == (named.st_dev, named.st_ino)
+                and opened.st_uid == os.getuid()
+                and opened.st_nlink == 1,
+                "report/cancel lock identity differs",
+            )
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            _fsync_directory(root)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.descriptor = descriptor
+        return self
+
+    def __exit__(self, _kind: object, _value: object, _traceback: object) -> None:
+        assert self.descriptor is not None
+        try:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self.descriptor)
+            self.descriptor = None
+
+
+def _report_cancel_lock_binding(lock: _ReportCancelLock) -> dict[str, Any]:
+    require(lock.descriptor is not None, "report/cancel lock is not held")
+    opened = os.fstat(lock.descriptor)
+    named = lock.path.lstat()
+    require(
+        stat.S_ISREG(opened.st_mode)
+        and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+        and opened.st_uid == os.getuid()
+        and opened.st_nlink == 1
+        and stat.S_IMODE(opened.st_mode) == 0o600,
+        "report/cancel lock identity changed",
+    )
+    return {
+        "path": str(lock.path),
+        "device": opened.st_dev,
+        "inode": opened.st_ino,
+        "uid": opened.st_uid,
+        "mode": stat.S_IMODE(opened.st_mode),
+    }
+
+
+def _validated_published_report(
+    submission_root: Path,
+    receipt: Mapping[str, Any],
+    expected_production_prerequisite: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Authenticate a report that won the report/cancel lock before recovery."""
+
+    report_root = submission_root / "report"
+    if not _lexical_exists(report_root):
+        return None
+    root_info, rows = _secure_tree_rows(
+        report_root, "published report tree", hash_files=True
+    )
+    files = {str(row["path"]): row for row in rows if row["kind"] == "file"}
+    require(
+        stat.S_IMODE(root_info.st_mode) == 0o555
+        and len(files) == len(rows),
+        "published report tree shape/mode differs",
+    )
+    commit_path = report_root / "REPORT_COMMIT.json"
+    commit, _commit_sha256 = read_immutable_json(
+        commit_path, "published report commit"
+    )
+    require(
+        set(commit)
+        == {
+            "schema_version",
+            "status",
+            "scientific_rejection",
+            "campaign_id",
+            "submission_sha256",
+            "report_bundle",
+            "report_bundle_sha256",
+            "report_bundle_file_sha256",
+            "gate_decision",
+            "gate_sha256",
+            "gate_decision_file_sha256",
+            "provenance",
+            "provenance_sha256",
+            "provenance_file_sha256",
+        }
+        and type(commit.get("schema_version")) is int
+        and commit.get("schema_version") == 1
+        and commit.get("status") in {"accepted_engineering_pilot", "rejected"}
+        and commit.get("scientific_rejection")
+        is (commit.get("status") == "rejected")
+        and commit.get("campaign_id") == receipt.get("campaign_id")
+        and commit.get("submission_sha256") == receipt.get("submission_sha256"),
+        "published report commit differs",
+    )
+    for key in (
+        "report_bundle_sha256",
+        "report_bundle_file_sha256",
+        "gate_sha256",
+        "gate_decision_file_sha256",
+        "provenance_sha256",
+        "provenance_file_sha256",
+    ):
+        require(
+            isinstance(commit.get(key), str)
+            and SHA256.fullmatch(commit[key]) is not None,
+            f"published report {key} differs",
+        )
+    expected_names = {
+        "REPORT_COMMIT.json",
+        f"REPORT_BUNDLE.{commit['report_bundle_sha256']}.json",
+        f"GATE_DECISION.{commit['gate_sha256']}.json",
+        f"REPORT_PROVENANCE.{commit['provenance_sha256']}.json",
+    }
+    require(
+        commit["report_bundle"]
+        == f"REPORT_BUNDLE.{commit['report_bundle_sha256']}.json"
+        and commit["gate_decision"]
+        == f"GATE_DECISION.{commit['gate_sha256']}.json"
+        and commit["provenance"]
+        == f"REPORT_PROVENANCE.{commit['provenance_sha256']}.json"
+        and set(files) == expected_names
+        and all(row["mode"] == 0o444 for row in files.values()),
+        "published report file coverage/names/modes differ",
+    )
+    raw_bindings = {
+        str(commit["report_bundle"]): str(commit["report_bundle_file_sha256"]),
+        str(commit["gate_decision"]): str(commit["gate_decision_file_sha256"]),
+        str(commit["provenance"]): str(commit["provenance_file_sha256"]),
+    }
+    require(
+        all(files[name].get("sha256") == digest for name, digest in raw_bindings.items()),
+        "published report file hashes differ",
+    )
+    bundle, _bundle_raw_sha256 = read_immutable_json(
+        report_root / str(commit["report_bundle"]), "published report bundle"
+    )
+    decision, _decision_raw_sha256 = read_immutable_json(
+        report_root / str(commit["gate_decision"]), "published gate decision"
+    )
+    provenance, _provenance_raw_sha256 = read_immutable_json(
+        report_root / str(commit["provenance"]), "published report provenance"
+    )
+    decision_body = dict(decision)
+    decision_hash = decision_body.pop("gate_sha256", None)
+    require(
+        stable_hash(bundle) == commit["report_bundle_sha256"]
+        and stable_hash(provenance) == commit["provenance_sha256"]
+        and decision_hash == commit["gate_sha256"]
+        and stable_hash(decision_body) == commit["gate_sha256"]
+        and decision.get("status") == commit["status"],
+        "published report logical hashes differ",
+    )
+    require(
+        provenance.get("campaign_id") == CAMPAIGN_ID
+        and provenance.get("submission_sha256") == receipt.get("submission_sha256")
+        and exact_json_equal(
+            provenance.get("production_authorization_prerequisite"),
+            expected_production_prerequisite,
+        )
+        and provenance.get("production_authorization_prerequisite_sha256")
+        == stable_hash(expected_production_prerequisite),
+        "published report successful-canary prerequisite differs",
+    )
+    return dict(commit)
+
+
 def _transaction_lock_binding(lock: _TransactionLock) -> dict[str, Any]:
     require(lock.descriptor is not None, "transaction lock is not held")
     opened = os.fstat(lock.descriptor)
@@ -5135,6 +5328,279 @@ def snapshot_test(
     }
 
 
+def _validated_production_authorization_prerequisite(
+    manifest: Mapping[str, Any],
+    *,
+    allow_missing: bool,
+    package_protocol_sha256: str,
+) -> dict[str, Any] | None:
+    """Project the exact positive-canary facts that authorize production.
+
+    ``campaign.validate_manifest`` authenticates the complete repository artifact.
+    This compact projection is additionally frozen into the submission contract so
+    a recovery cannot obtain authority solely from an older snapshot validator.
+    """
+
+    launch = manifest.get("launch_contract")
+    canary = (
+        launch.get("real_gpu_two_wave_canary")
+        if isinstance(launch, Mapping)
+        else None
+    )
+    evidence = (
+        canary.get("production_authorization_evidence")
+        if isinstance(canary, Mapping)
+        else None
+    )
+    accepted = canary.get("accepted_attempts") if isinstance(canary, Mapping) else None
+    if evidence is None and (accepted is None or accepted == []):
+        require(
+            allow_missing,
+            "successful canary production-authorization prerequisite is absent",
+        )
+        return None
+    require(
+        isinstance(evidence, Mapping)
+        and isinstance(accepted, list)
+        and len(accepted) == 1
+        and isinstance(accepted[0], Mapping),
+        "successful canary production-authorization prerequisite differs",
+    )
+    attempt = accepted[0]
+    sha_fields = (
+        "raw_sha256",
+        "canonical_sha256",
+        "report_raw_sha256",
+        "source_protocol_sha256",
+    )
+    require(
+        evidence.get("attempt") == "canary2"
+        and evidence.get("path") == "canary2_acceptance_provenance.json"
+        and evidence.get("required") is True
+        and evidence.get("satisfied") is True
+        and evidence.get("artifact_evidence_consumption_allowed") is True
+        and evidence.get("scientific_runtime_input_consumption_allowed") is False
+        and attempt.get("attempt") == "canary2"
+        and attempt.get("status") == "terminal_positive_canary_provenance_frozen"
+        and attempt.get("production_authorization_prerequisite_satisfied") is True
+        and attempt.get("topology_canary_passed") is True
+        and type(attempt.get("active_scheduler_jobs_after_terminal")) is int
+        and attempt.get("active_scheduler_jobs_after_terminal") == 0
+        and all(
+            isinstance(evidence.get(field), str)
+            and SHA256.fullmatch(evidence[field]) is not None
+            and evidence.get(field) == attempt.get(field)
+            for field in sha_fields
+        )
+        and evidence.get("path") == attempt.get("path"),
+        "successful canary production-authorization evidence differs",
+    )
+    raw_roles = attempt.get("job_ids_by_role")
+    require(
+        isinstance(raw_roles, Mapping)
+        and set(raw_roles) == {"wave0", "wave1", "report"},
+        "successful canary production-authorization job IDs differ",
+    )
+    roles: dict[str, list[str]] = {}
+    for role in ("wave0", "wave1", "report"):
+        values = raw_roles[role]
+        require(
+            isinstance(values, list)
+            and len(values) == 1
+            and isinstance(values[0], str)
+            and JOB_ID.fullmatch(values[0]) is not None,
+            f"successful canary production-authorization {role} ID differs",
+        )
+        roles[role] = list(values)
+    require(
+        len({item for values in roles.values() for item in values}) == 3,
+        "successful canary production-authorization job IDs are not injective",
+    )
+    token = attempt.get("canary_token")
+    state_root = attempt.get("state_root")
+    source_commit = attempt.get("source_commit")
+    state_map = attempt.get("state_file_map_canonical_sha256")
+    require(
+        isinstance(token, str)
+        and re.fullmatch(r"[0-9a-f]{16}", token) is not None
+        and isinstance(state_root, str)
+        and Path(state_root).is_absolute()
+        and os.path.normpath(state_root) == state_root
+        and not state_root.startswith("//")
+        and isinstance(source_commit, str)
+        and GIT_SHA1.fullmatch(source_commit) is not None
+        and isinstance(state_map, str)
+        and SHA256.fullmatch(state_map) is not None,
+        "successful canary production-authorization identity differs",
+    )
+    require(
+        isinstance(package_protocol_sha256, str)
+        and SHA256.fullmatch(package_protocol_sha256) is not None,
+        "sealed package protocol binding differs",
+    )
+    return {
+        "schema_version": 1,
+        "status": "canary2_production_authorization_prerequisite_satisfied",
+        "attempt": "canary2",
+        "path": "canary2_acceptance_provenance.json",
+        "raw_sha256": evidence["raw_sha256"],
+        "canonical_sha256": evidence["canonical_sha256"],
+        "report_raw_sha256": evidence["report_raw_sha256"],
+        "source_protocol_sha256": evidence["source_protocol_sha256"],
+        "source_commit": source_commit,
+        "state_root": state_root,
+        "state_file_map_canonical_sha256": state_map,
+        "canary_token": token,
+        "job_ids_by_role": roles,
+        "accepted_attempt_sha256": stable_hash(attempt),
+        "production_authorization_evidence_sha256": stable_hash(evidence),
+        "sealed_package_protocol_sha256": package_protocol_sha256,
+    }
+
+
+def _validated_live_production_authorization_prerequisite(
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Authenticate the live package before granting recovery authority."""
+
+    manifest = read_json(repo_root / PACKAGE_RELATIVE / "manifest.json")
+    campaign = load_campaign(repo_root)
+    validated_manifest, _weight_lock = campaign.load_contract(repo_root)
+    require(
+        exact_json_equal(validated_manifest, manifest),
+        "live production-authorization manifest validation differs",
+    )
+    protocol = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
+    value = _validated_production_authorization_prerequisite(
+        manifest,
+        allow_missing=False,
+        package_protocol_sha256=protocol,
+    )
+    assert value is not None
+    return value
+
+
+def _unavailable_live_production_authorization_prerequisite() -> dict[str, Any]:
+    """Stable fail-closed authority used only to permit cleanup reconciliation."""
+
+    return {
+        "schema_version": 1,
+        "status": "live_production_authorization_prerequisite_unavailable",
+        "authorization_allowed": False,
+        "cleanup_reconciliation_allowed": True,
+    }
+
+
+# Explicitly named private seam for legacy recovery fixtures.  Every production
+# caller must supply an authenticated live observation; omission is impossible.
+_UNENFORCED_RECOVERY_TEST_SEAM = object()
+
+
+def _validated_stored_production_prerequisite_observation(
+    value: object,
+) -> dict[str, Any]:
+    """Validate a sealed live-authority observation without consulting live state."""
+
+    unavailable = _unavailable_live_production_authorization_prerequisite()
+    if exact_json_equal(value, unavailable):
+        return unavailable
+    require(
+        isinstance(value, Mapping)
+        and set(value)
+        == {
+            "schema_version",
+            "status",
+            "attempt",
+            "path",
+            "raw_sha256",
+            "canonical_sha256",
+            "report_raw_sha256",
+            "source_protocol_sha256",
+            "source_commit",
+            "state_root",
+            "state_file_map_canonical_sha256",
+            "canary_token",
+            "job_ids_by_role",
+            "accepted_attempt_sha256",
+            "production_authorization_evidence_sha256",
+            "sealed_package_protocol_sha256",
+        }
+        and type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and value.get("status")
+        == "canary2_production_authorization_prerequisite_satisfied"
+        and value.get("attempt") == "canary2"
+        and value.get("path") == "canary2_acceptance_provenance.json",
+        "sealed live production-authorization observation differs",
+    )
+    for field in (
+        "raw_sha256",
+        "canonical_sha256",
+        "report_raw_sha256",
+        "source_protocol_sha256",
+        "state_file_map_canonical_sha256",
+        "accepted_attempt_sha256",
+        "production_authorization_evidence_sha256",
+        "sealed_package_protocol_sha256",
+    ):
+        require(
+            isinstance(value.get(field), str)
+            and SHA256.fullmatch(value[field]) is not None,
+            "sealed live production-authorization hash differs",
+        )
+    roles = value.get("job_ids_by_role")
+    require(
+        isinstance(value.get("source_commit"), str)
+        and GIT_SHA1.fullmatch(value["source_commit"]) is not None
+        and isinstance(value.get("state_root"), str)
+        and Path(value["state_root"]).is_absolute()
+        and os.path.normpath(value["state_root"]) == value["state_root"]
+        and not value["state_root"].startswith("//")
+        and isinstance(value.get("canary_token"), str)
+        and re.fullmatch(r"[0-9a-f]{16}", value["canary_token"]) is not None
+        and isinstance(roles, Mapping)
+        and set(roles) == {"wave0", "wave1", "report"}
+        and all(
+            isinstance(roles[role], list)
+            and len(roles[role]) == 1
+            and isinstance(roles[role][0], str)
+            and JOB_ID.fullmatch(roles[role][0]) is not None
+            for role in ("wave0", "wave1", "report")
+        )
+        and len({roles[role][0] for role in ("wave0", "wave1", "report")})
+        == 3,
+        "sealed live production-authorization identity differs",
+    )
+    return dict(value)
+
+
+def _production_prerequisite_denial_reason(
+    snapshot_prerequisite: Mapping[str, Any] | None,
+    live_observation: object,
+    *,
+    durable_cleanup_precedence: bool = False,
+) -> str:
+    live = _validated_stored_production_prerequisite_observation(
+        live_observation
+    )
+    if snapshot_prerequisite is None:
+        return "snapshot_missing"
+    if live["status"] == "live_production_authorization_prerequisite_unavailable":
+        return "live_unavailable"
+    if exact_json_equal(snapshot_prerequisite, live):
+        require(
+            durable_cleanup_precedence,
+            "satisfied production prerequisite cannot be sealed as missing",
+        )
+        return "durable_cleanup_precedence"
+    require(
+        not durable_cleanup_precedence
+        or isinstance(snapshot_prerequisite, Mapping),
+        "durable cleanup prerequisite evidence differs",
+    )
+    return "snapshot_live_mismatch"
+
+
 def _submission_contract(
     *,
     manifest: Mapping[str, Any],
@@ -5235,6 +5701,13 @@ def _submission_contract(
         "launches": rows,
         "array": "0-19%20",
         "fresh_start": True,
+        "production_authorization_prerequisite": (
+            _validated_production_authorization_prerequisite(
+                manifest,
+                allow_missing=False,
+                package_protocol_sha256=protocol,
+            )
+        ),
     }
     require(len(rows) == 20 and [row["index"] for row in rows] == list(range(20)), "submission launch matrix differs")
     return contract
@@ -6664,6 +7137,10 @@ def _validated_recovery_cancel_history(
     scancel: str,
     expected_control_plane: Mapping[str, Any],
     fallback: Mapping[str, Any],
+    calling_extra_validator: Callable[
+        [int, Mapping[str, Any], Sequence[str], Mapping[str, Any]], None
+    ]
+    | None = None,
 ) -> list[dict[str, Any]]:
     """Validate an append-only sequence of exact cancellation call/result pairs."""
 
@@ -6706,18 +7183,27 @@ def _validated_recovery_cancel_history(
             f"recovery cancellation intent {index} IDs differ",
         )
         job_ids = list(raw_ids)
-        require(
-            exact_json_equal(
-                calling,
-                {
+        expected_calling = {
                 **dict(context),
                 "attempt_index": index,
                 "job_ids": job_ids,
                 "command": [scancel, *job_ids],
-                },
+        }
+        require(
+            isinstance(calling, Mapping)
+            and all(
+                key in calling and exact_json_equal(calling[key], expected)
+                for key, expected in expected_calling.items()
             ),
             f"recovery cancellation intent {index} differs",
         )
+        if calling_extra_validator is None:
+            require(
+                set(calling) == set(expected_calling),
+                f"recovery cancellation intent {index} fields differ",
+            )
+        else:
+            calling_extra_validator(index, calling, job_ids, expected_calling)
         calling_sha256 = file_sha256(calling_path)
         result_name: str | None = None
         result_sha256: str | None = None
@@ -6844,6 +7330,11 @@ def _append_recovery_cancel_attempt(
     fallback: object,
     expected_observation: Mapping[str, Any],
     observations: list[dict[str, Any]],
+    calling_extra: Mapping[str, Any] | None = None,
+    calling_extra_validator: Callable[
+        [int, Mapping[str, Any], Sequence[str], Mapping[str, Any]], None
+    ]
+    | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     history = _validated_recovery_cancel_history(
         directory,
@@ -6853,6 +7344,7 @@ def _append_recovery_cancel_attempt(
         scancel=scancel,
         expected_control_plane=expected_observation,
         fallback=fallback,
+        calling_extra_validator=calling_extra_validator,
     )
     index = len(history)
     require(
@@ -6865,6 +7357,13 @@ def _append_recovery_cancel_attempt(
     exact = sorted(set(job_ids), key=int)
     require(exact, "recovery cancellation attempt has no exact target")
     calling_path = directory / f"{calling_prefix}_{index:04d}.json"
+    extra = {} if calling_extra is None else dict(calling_extra)
+    require(
+        not set(extra).intersection(
+            {*context, "attempt_index", "job_ids", "command"}
+        ),
+        "recovery cancellation calling extension overrides immutable context",
+    )
     calling_sha256 = exclusive_json(
         calling_path,
         {
@@ -6872,6 +7371,7 @@ def _append_recovery_cancel_attempt(
             "attempt_index": index,
             "job_ids": exact,
             "command": [scancel, *exact],
+            **extra,
         },
     )
     cancellation = _cancel_exact(
@@ -6902,6 +7402,7 @@ def _append_recovery_cancel_attempt(
         scancel=scancel,
         expected_control_plane=expected_observation,
         fallback=fallback,
+        calling_extra_validator=calling_extra_validator,
     )
     require(
         len(validated) == index + 1
@@ -7122,6 +7623,56 @@ def _validated_recovery_cancel_latch(
     return result
 
 
+def _validated_cleanup_cancel_latch(
+    value: object,
+    *,
+    submission_sha256: str,
+    claim_token: str,
+    transaction_lock: Mapping[str, Any],
+    committed_receipt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Accept either historical stop-latch schema without trusting its IDs."""
+
+    if isinstance(value, Mapping) and set(value) == {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "wave0_array_job_id",
+        "wave1_array_job_id",
+        "report_job_id",
+    }:
+        require(
+            committed_receipt is not None
+            and exact_json_equal(
+                value,
+                {
+                    "schema_version": 1,
+                    "status": "cancel_requested",
+                    "campaign_id": committed_receipt["campaign_id"],
+                    "submission_sha256": committed_receipt[
+                        "submission_sha256"
+                    ],
+                    "wave0_array_job_id": committed_receipt[
+                        "wave0_array_job_id"
+                    ],
+                    "wave1_array_job_id": committed_receipt[
+                        "wave1_array_job_id"
+                    ],
+                    "report_job_id": committed_receipt["report_job_id"],
+                },
+            ),
+            "committed cancellation latch differs during cleanup",
+        )
+        return dict(value)
+    return _validated_recovery_cancel_latch(
+        value,
+        submission_sha256=submission_sha256,
+        claim_token=claim_token,
+        transaction_lock=transaction_lock,
+    )
+
+
 def _validated_recovery_terminal_record(
     value: Mapping[str, Any],
     *,
@@ -7136,6 +7687,7 @@ def _validated_recovery_terminal_record(
     transaction_lock: Mapping[str, Any],
     expected_control_plane: Mapping[str, Any],
     scheduler_fallback: Mapping[str, Any],
+    committed_cancel_receipt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     expected_fields = {
         "schema_version",
@@ -7273,11 +7825,12 @@ def _validated_recovery_terminal_record(
         and value.get("cancel_latch_sha256") == file_sha256(latch_path),
         "recovery cancellation latch bytes differ",
     )
-    _validated_recovery_cancel_latch(
+    _validated_cleanup_cancel_latch(
         read_json(latch_path),
         submission_sha256=submission_sha256,
         claim_token=claim_token,
         transaction_lock=transaction_lock,
+        committed_receipt=committed_cancel_receipt,
     )
     # The latch linearizes cancellation precedence.  Its IDs are a historical
     # observation only: delayed scheduler visibility may make a later settled
@@ -7436,6 +7989,12 @@ def _validated_residual_recovery_chain(
     scancel: str,
     expected_control_plane: Mapping[str, Any],
     scheduler_fallback: Mapping[str, Any],
+    extra_fields: Sequence[str] = (),
+    extra_validator: Callable[[int, Mapping[str, Any]], None] | None = None,
+    cancel_calling_extra_validator: Callable[
+        [int, Mapping[str, Any], Sequence[str], Mapping[str, Any]], None
+    ]
+    | None = None,
 ) -> list[dict[str, Any]]:
     """Validate gap-free immutable residual recovery generations.
 
@@ -7474,6 +8033,7 @@ def _validated_residual_recovery_chain(
         scancel=scancel,
         expected_control_plane=expected_control_plane,
         fallback=scheduler_fallback,
+        calling_extra_validator=cancel_calling_extra_validator,
     )
     previous_name = initial_terminal_path.name
     previous_sha256 = file_sha256(initial_terminal_path)
@@ -7499,6 +8059,7 @@ def _validated_residual_recovery_chain(
         "scheduler_control_plane_observations",
         "scheduler_calls",
         "new_jobs_created",
+        *extra_fields,
     }
 
     def role_map(raw: object, label: str) -> dict[str, list[str]]:
@@ -7559,6 +8120,8 @@ def _validated_residual_recovery_chain(
             and value.get("new_jobs_created") == 0,
             f"residual recovery generation {generation} identity differs",
         )
+        if extra_validator is not None:
+            extra_validator(generation, value)
         attempts = _validated_scheduler_attempt_ledger(
             value.get("scheduler_control_plane_observations"),
             expected_control_plane=expected_control_plane,
@@ -7677,15 +8240,231 @@ def _validated_residual_recovery_chain(
     return chain
 
 
+def _validated_prerequisite_missing_marker(
+    value: Mapping[str, Any],
+    *,
+    submission_root: Path,
+    submission_sha256: str,
+    claim_token: str,
+    package_protocol_sha256: str,
+    snapshot_prerequisite: Mapping[str, Any] | None,
+    role_names: Mapping[str, str],
+    comment: str,
+    squeue: str,
+    transaction_lock: Mapping[str, Any],
+    report_cancel_lock: Mapping[str, Any],
+    expected_control_plane: Mapping[str, Any],
+    scheduler_fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_root",
+        "submission_sha256",
+        "claim_token",
+        "package_protocol_sha256",
+        "live_production_authorization_prerequisite",
+        "snapshot_production_authorization_prerequisite",
+        "prerequisite_denial_reason",
+        "cancel_latch_sha256",
+        "generation",
+        "phase",
+        "previous_terminal_name",
+        "previous_terminal_sha256",
+        "cancel_history_length_before",
+        "live_verified_job_ids",
+        "live_verified_job_ids_by_role",
+        "settled_census_rounds",
+        "scheduler_control_plane_observations",
+        "scheduler_calls",
+        "transaction_lock",
+        "report_cancel_lock",
+        "scheduler_id_authority",
+        "authorization_allowed",
+        "receipt_publication_allowed",
+        "release_allowed",
+        "resume_allowed",
+        "report_allowed",
+        "new_jobs_created",
+    }
+    require(
+        set(value) == expected_fields
+        and type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and value.get("status")
+        == "production_authorization_prerequisite_missing_cleanup_only"
+        and value.get("campaign_id") == CAMPAIGN_ID
+        and value.get("submission_root") == str(submission_root)
+        and value.get("submission_sha256") == submission_sha256
+        and value.get("claim_token") == claim_token
+        and value.get("package_protocol_sha256") == package_protocol_sha256
+        and exact_json_equal(
+            value.get("snapshot_production_authorization_prerequisite"),
+            snapshot_prerequisite,
+        )
+        and value.get("prerequisite_denial_reason")
+        == _production_prerequisite_denial_reason(
+            snapshot_prerequisite,
+            value.get("live_production_authorization_prerequisite"),
+            durable_cleanup_precedence=_lexical_exists(
+                submission_root / "CANCEL_REQUESTED.json"
+            ),
+        )
+        and isinstance(value.get("cancel_latch_sha256"), str)
+        and SHA256.fullmatch(value["cancel_latch_sha256"]) is not None
+        and value["cancel_latch_sha256"]
+        == file_sha256(submission_root / "CANCEL_REQUESTED.json")
+        and type(value.get("generation")) is int
+        and value["generation"] == 0
+        and value.get("phase")
+        in {"initial_recovery", "legacy_prior_recovery"}
+        and type(value.get("cancel_history_length_before")) is int
+        and value["cancel_history_length_before"] >= 0
+        and (
+            (
+                value.get("phase") == "initial_recovery"
+                and value.get("generation") == 0
+                and value.get("previous_terminal_name") is None
+                and value.get("previous_terminal_sha256") is None
+            )
+            or (
+                value.get("phase") == "legacy_prior_recovery"
+                and value.get("generation") == 0
+                and value.get("previous_terminal_name")
+                == "9000_RECOVERY_CANCELLED.json"
+                and isinstance(value.get("previous_terminal_sha256"), str)
+                and SHA256.fullmatch(value["previous_terminal_sha256"])
+                is not None
+                and file_sha256(
+                    submission_root / "journal" / value["previous_terminal_name"]
+                )
+                == value["previous_terminal_sha256"]
+            )
+        )
+        and exact_json_equal(value.get("transaction_lock"), transaction_lock)
+        and exact_json_equal(value.get("report_cancel_lock"), report_cancel_lock)
+        and value.get("scheduler_id_authority")
+        == "fresh_settled_exact_name_comment_owner_census_only"
+        and value.get("authorization_allowed") is False
+        and value.get("receipt_publication_allowed") is False
+        and value.get("release_allowed") is False
+        and value.get("resume_allowed") is False
+        and value.get("report_allowed") is False
+        and type(value.get("new_jobs_created")) is int
+        and value.get("new_jobs_created") == 0,
+        "production prerequisite-missing marker identity differs",
+    )
+    attempts = _validated_scheduler_attempt_ledger(
+        value.get("scheduler_control_plane_observations"),
+        expected_control_plane=expected_control_plane,
+        fallback=scheduler_fallback,
+    )
+    rounds, reconstructed, cursor = _validated_recovery_census_rounds(
+        value.get("settled_census_rounds"),
+        attempts=attempts,
+        role_names=role_names,
+        squeue=squeue,
+        comment=comment,
+        label="production prerequisite-missing cleanup",
+        expected_start=0,
+    )
+    live_flat = sorted(
+        {item for values in reconstructed.values() for item in values}, key=int
+    )
+    require(
+        cursor == len(attempts)
+        and type(value.get("scheduler_calls")) is int
+        and value.get("scheduler_calls") == len(attempts)
+        and exact_json_equal(
+            value.get("live_verified_job_ids_by_role"), reconstructed
+        )
+        and value.get("live_verified_job_ids") == live_flat,
+        "production prerequisite-missing marker census differs",
+    )
+    return {**dict(value), "settled_census_rounds": rounds}
+
+
+def _validated_prerequisite_missing_terminal(
+    value: Mapping[str, Any],
+    *,
+    submission_root: Path,
+    submission_sha256: str,
+    claim_token: str,
+    package_protocol_sha256: str,
+    snapshot_prerequisite: Mapping[str, Any] | None,
+    live_prerequisite_observation: Mapping[str, Any],
+    prerequisite_denial_reason: str,
+    prerequisite_marker_sha256: str,
+    recovery_terminal_sha256: str,
+) -> dict[str, Any]:
+    require(
+        exact_json_equal(
+            value,
+            {
+                "schema_version": 1,
+                "record": "production_prerequisite_missing",
+                "submission_root": str(submission_root),
+                "submission_sha256": submission_sha256,
+                "claim_token": claim_token,
+                "package_protocol_sha256": package_protocol_sha256,
+                "status": "production_authorization_prerequisite_missing_cleanup_terminal",
+                "live_production_authorization_prerequisite": dict(
+                    live_prerequisite_observation
+                ),
+                "snapshot_production_authorization_prerequisite": (
+                    dict(snapshot_prerequisite)
+                    if snapshot_prerequisite is not None
+                    else None
+                ),
+                "prerequisite_denial_reason": prerequisite_denial_reason,
+                "prerequisite_missing_marker_sha256": prerequisite_marker_sha256,
+                "recovery_terminal_name": "9000_RECOVERY_CANCELLED.json",
+                "recovery_terminal_sha256": recovery_terminal_sha256,
+                "authorization_allowed": False,
+                "receipt_publication_allowed": False,
+                "release_allowed": False,
+                "resume_allowed": False,
+                "report_allowed": False,
+                "new_jobs_created": 0,
+            },
+        ),
+        "production prerequisite-missing terminal evidence differs",
+    )
+    return dict(value)
+
+
 def _recover_transaction_locked(
     repo_root: Path,
     submission_root: Path,
     *,
     scheduler_runner: SchedulerRunner = _default_scheduler_runner,
+    live_production_prerequisite: Mapping[str, Any] | object,
+    report_cancel_lock_lease: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Recover a process crash without ever creating another scheduler job."""
 
     reject_inherited_environment()
+    unenforced_test_seam = (
+        live_production_prerequisite is _UNENFORCED_RECOVERY_TEST_SEAM
+    )
+    if not unenforced_test_seam:
+        require(
+            isinstance(live_production_prerequisite, Mapping)
+            and
+            isinstance(report_cancel_lock_lease, Mapping)
+            and set(report_cancel_lock_lease)
+            == {"path", "device", "inode", "uid", "mode"}
+            and isinstance(report_cancel_lock_lease.get("path"), str)
+            and all(
+                type(report_cancel_lock_lease.get(key)) is int
+                and report_cancel_lock_lease[key] >= 0
+                for key in ("device", "inode", "uid", "mode")
+            )
+            and report_cancel_lock_lease["uid"] == os.getuid()
+            and report_cancel_lock_lease["mode"] == 0o600,
+            "recovery lacks an authenticated report/cancel-lock lease",
+        )
     _directory_nonsymlink(repo_root, "repository root")
     submission_root = _directory_nonsymlink(submission_root, "existing submission root")
     contract_path = submission_root / "SUBMISSION_CONTRACT.json"
@@ -7766,6 +8545,70 @@ def _recover_transaction_locked(
     campaign = load_campaign(snapshot_root)
     weight_lock = campaign.read_json(snapshot_root / PACKAGE_RELATIVE / "weight_audit.lock.json")
     campaign.validate_manifest(manifest, weight_lock, snapshot_root)
+    prerequisite_enforced = not unenforced_test_seam
+    snapshot_prerequisite: dict[str, Any] | None = None
+    prerequisite_satisfied = True
+    if prerequisite_enforced:
+        assert isinstance(live_production_prerequisite, Mapping)
+        snapshot_prerequisite = _validated_production_authorization_prerequisite(
+            manifest,
+            allow_missing=True,
+            package_protocol_sha256=recovered_protocol,
+        )
+        prerequisite_artifact_relative = (
+            PACKAGE_RELATIVE / "canary2_acceptance_provenance.json"
+        )
+        prerequisite_inventory_key = prerequisite_artifact_relative.as_posix()
+        prerequisite_artifact_path = (
+            snapshot_root / prerequisite_artifact_relative
+        )
+        contract_has_prerequisite = (
+            "production_authorization_prerequisite" in contract
+        )
+        if snapshot_prerequisite is None:
+            require(
+                not contract_has_prerequisite
+                and prerequisite_inventory_key not in inventory
+                and not _lexical_exists(prerequisite_artifact_path),
+                "legacy recovery contract has detached canary authorization evidence",
+            )
+            prerequisite_satisfied = False
+        else:
+            artifact_digest, artifact_bytes = _hash_relative_regular(
+                snapshot_root,
+                prerequisite_artifact_relative,
+                "recovery canary2 authorization artifact",
+                capture=True,
+            )
+            assert artifact_bytes is not None
+            try:
+                artifact_value = json.loads(
+                    artifact_bytes.decode("utf-8"), object_pairs_hook=_pairs
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SubmissionError(
+                    f"recovery canary2 authorization artifact differs: {exc}"
+                ) from exc
+            require(
+                contract_has_prerequisite
+                and inventory.get(prerequisite_inventory_key)
+                == snapshot_prerequisite["raw_sha256"]
+                and artifact_digest == snapshot_prerequisite["raw_sha256"]
+                and stable_hash(artifact_value)
+                == snapshot_prerequisite["canonical_sha256"]
+                and exact_json_equal(
+                    contract.get("production_authorization_prerequisite"),
+                    snapshot_prerequisite,
+                ),
+                "recovery contract canary authorization binding differs",
+            )
+            prerequisite_satisfied = (
+                live_production_prerequisite.get("status")
+                == "canary2_production_authorization_prerequisite_satisfied"
+                and exact_json_equal(
+                    snapshot_prerequisite, live_production_prerequisite
+                )
+            )
     source = campaign.source_contract(snapshot_root)
     require(
         contract.get("trainer_code_fingerprint") == source["source_sha256"]
@@ -7805,18 +8648,95 @@ def _recover_transaction_locked(
         control_plane,
         verified_scheduler_preclaim["scheduler_control_plane"],
     )[0]
+    if prerequisite_satisfied and prerequisite_enforced:
+        try:
+            revalidated_live_prerequisite = (
+                _validated_live_production_authorization_prerequisite(
+                    repo_root
+                )
+            )
+        except Exception:
+            live_production_prerequisite = (
+                _unavailable_live_production_authorization_prerequisite()
+            )
+            prerequisite_satisfied = False
+        else:
+            live_production_prerequisite = revalidated_live_prerequisite
+            prerequisite_satisfied = (
+                snapshot_prerequisite is not None
+                and exact_json_equal(
+                    snapshot_prerequisite,
+                    revalidated_live_prerequisite,
+                )
+            )
+    durable_cleanup_precedence = any(
+        _lexical_exists(path)
+        for path in (
+            submission_root / "CANCEL_REQUESTED.json",
+            submission_root / "journal" / "PREREQUISITE_MISSING.json",
+            submission_root / "journal" / "9000_RECOVERY_CANCELLED.json",
+            submission_root
+            / "journal"
+            / "9001_PRODUCTION_PREREQUISITE_MISSING.json",
+        )
+    )
+    prerequisite_terminal_preexisting = _lexical_exists(
+        submission_root
+        / "journal"
+        / "9001_PRODUCTION_PREREQUISITE_MISSING.json"
+    )
+    prerequisite_marker_preexisting = _lexical_exists(
+        submission_root / "journal" / "PREREQUISITE_MISSING.json"
+    )
+    if prerequisite_terminal_preexisting:
+        require(
+            prerequisite_marker_preexisting
+            and _lexical_exists(
+                submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
+            ),
+            "production prerequisite terminal lacks its durable cleanup prefix",
+        )
+    prerequisite_missing = prerequisite_enforced and (
+        not prerequisite_satisfied or prerequisite_marker_preexisting
+    )
+    continuation_allowed = (
+        prerequisite_satisfied and not durable_cleanup_precedence
+    )
 
     execution = manifest["execution"]
     scontrol = str(execution["scontrol"])
-    _regular_nonsymlink(Path(scontrol), "recovery scontrol")
-    require(os.access(scontrol, os.X_OK), "recovery scontrol is not executable")
     token = submission_sha256[:16]
     wave0_name = f"exp23-launch8-{token}-wave0"
     comment = f"treewm-exp23:{submission_sha256}"
 
+    def require_current_production_prerequisite() -> None:
+        if unenforced_test_seam:
+            return
+        require(
+            prerequisite_enforced and snapshot_prerequisite is not None,
+            "successful canary production authorization is required",
+        )
+        try:
+            current = _validated_live_production_authorization_prerequisite(
+                repo_root
+            )
+        except Exception as exc:
+            raise SubmissionError(
+                f"live production authorization became unavailable: {exc}"
+            ) from exc
+        require(
+            exact_json_equal(current, snapshot_prerequisite),
+            "live production authorization changed before scheduler continuation",
+        )
+
     def finish_committed_receipt(
         receipt: dict[str, Any], recovery_status: str
     ) -> dict[str, Any]:
+        require(
+            prerequisite_satisfied,
+            "successful canary production authorization is required before commit or release",
+        )
+        require_current_production_prerequisite()
         durable_ready, _durable_ready_sha256 = read_immutable_json(
             submission_root / "journal" / "0007_READY_TO_COMMIT.json",
             "durable ready-to-commit journal",
@@ -7925,6 +8845,12 @@ def _recover_transaction_locked(
                 cancel_latch is None,
                 "durable cancellation forbids recovery wave-zero release",
             )
+            _regular_nonsymlink(Path(scontrol), "recovery scontrol")
+            require(
+                os.access(scontrol, os.X_OK),
+                "recovery scontrol is not executable",
+            )
+            require_current_production_prerequisite()
             if _lexical_exists(release_calling_path):
                 release_calling, release_calling_sha256 = read_immutable_json(
                     release_calling_path,
@@ -7938,6 +8864,7 @@ def _recover_transaction_locked(
                 release_calling_sha256 = exclusive_json(
                     release_calling_path, release_calling_value
                 )
+            require_current_production_prerequisite()
             release_evidence = _ensure_authorized_wave0_released(
                 scontrol=scontrol,
                 job_id=receipt["wave0_array_job_id"],
@@ -7988,7 +8915,113 @@ def _recover_transaction_locked(
         }
 
     receipt_path = submission_root / "SUBMISSION_RECEIPT.json"
-    if _lexical_exists(receipt_path):
+    ready_path = submission_root / "journal" / "0007_READY_TO_COMMIT.json"
+    cleanup_committed_receipt: dict[str, Any] | None = None
+    if _lexical_exists(ready_path):
+        cleanup_ready, _cleanup_ready_sha256 = read_immutable_json(
+            ready_path,
+            "cleanup durable ready-to-commit journal",
+        )
+        cleanup_committed_receipt = _receipt_from_ready_record(cleanup_ready)
+        require(
+            cleanup_committed_receipt["submission_sha256"]
+            == submission_sha256,
+            "cleanup READY submission differs",
+        )
+        if _lexical_exists(receipt_path):
+            cleanup_receipt, _cleanup_receipt_sha256 = read_immutable_json(
+                receipt_path,
+                "cleanup committed submission receipt",
+            )
+            require(
+                exact_json_equal(cleanup_receipt, cleanup_committed_receipt),
+                "cleanup committed receipt differs from durable READY",
+            )
+    elif _lexical_exists(receipt_path):
+        cleanup_receipt, _cleanup_receipt_sha256 = read_immutable_json(
+            receipt_path,
+            "cleanup committed submission receipt",
+        )
+        cleanup_committed_receipt = _receipt_from_ready_record(
+            {"record": "ready_to_commit", **cleanup_receipt}
+        )
+        require(
+            cleanup_committed_receipt["submission_sha256"]
+            == submission_sha256,
+            "cleanup committed receipt submission differs",
+        )
+
+    committed_cancel_precedence = False
+    if (
+        cleanup_committed_receipt is not None
+        and _lexical_exists(submission_root / "CANCEL_REQUESTED.json")
+    ):
+        cleanup_latch, _cleanup_latch_sha256 = read_immutable_json(
+            submission_root / "CANCEL_REQUESTED.json",
+            "cleanup cancellation latch",
+        )
+        if set(cleanup_latch) == {
+            "schema_version",
+            "status",
+            "campaign_id",
+            "submission_sha256",
+            "wave0_array_job_id",
+            "wave1_array_job_id",
+            "report_job_id",
+        }:
+            _validated_committed_cancel_latch(
+                submission_root, cleanup_committed_receipt
+            )
+            committed_cancel_precedence = True
+
+    committed_fast_path_allowed = prerequisite_satisfied and (
+        continuation_allowed
+        or (
+            committed_cancel_precedence
+            and not prerequisite_marker_preexisting
+            and not _lexical_exists(
+                submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
+            )
+        )
+    )
+
+    if _lexical_exists(submission_root / "report"):
+        require(
+            cleanup_committed_receipt is not None
+            and snapshot_prerequisite is not None,
+            "published report lacks committed receipt/canary authority",
+        )
+        published_report = _validated_published_report(
+            submission_root,
+            cleanup_committed_receipt,
+            snapshot_prerequisite,
+        )
+        assert published_report is not None
+        authorization, _authorization_sha256 = _validated_dag_authorization(
+            submission_root,
+            submission_sha256,
+            cleanup_committed_receipt,
+        )
+        require(
+            not durable_cleanup_precedence,
+            "published report conflicts with a durable cancellation/cleanup prefix",
+        )
+        return {
+            **cleanup_committed_receipt,
+            "status": "report_already_committed_before_recovery",
+            "recovery": "report_commit_precedence",
+            "published_report": published_report,
+            "authorization": authorization,
+            "authorization_allowed": False,
+            "receipt_publication_allowed": False,
+            "release_allowed": False,
+            "resume_allowed": False,
+            "report_allowed": False,
+            "scheduler_calls": 0,
+            "new_jobs_created": 0,
+        }
+
+    if committed_fast_path_allowed and _lexical_exists(receipt_path):
         receipt, _receipt_sha256 = read_immutable_json(
             receipt_path, "committed submission receipt"
         )
@@ -7999,8 +9032,7 @@ def _recover_transaction_locked(
         )
         return finish_committed_receipt(validated, "already_committed")
 
-    ready_path = submission_root / "journal" / "0007_READY_TO_COMMIT.json"
-    if _lexical_exists(ready_path):
+    if committed_fast_path_allowed and _lexical_exists(ready_path):
         require(
             not any(
                 _lexical_exists(submission_root / "journal" / name)
@@ -8018,6 +9050,7 @@ def _recover_transaction_locked(
                 receipt, "durable_ready_cancel_precedence"
             )
         _validated_dag_authorization(submission_root, submission_sha256, receipt)
+        require_current_production_prerequisite()
         exclusive_json(receipt_path, receipt)
         return finish_committed_receipt(
             receipt, "committed_from_durable_ready_record"
@@ -8027,9 +9060,15 @@ def _recover_transaction_locked(
     sbatch = str(execution["sbatch"])
     scancel = str(execution["scancel"])
     squeue = str(execution.get("squeue") or (Path(sbatch).parent / "squeue"))
-    for path, label in ((scancel, "scancel"), (squeue, "squeue")):
-        _regular_nonsymlink(Path(path), f"recovery {label}")
-        require(os.access(path, os.X_OK), f"recovery {label} is not executable")
+    _regular_nonsymlink(Path(squeue), "recovery squeue")
+    require(os.access(squeue, os.X_OK), "recovery squeue is not executable")
+
+    def require_scancel_client() -> None:
+        _regular_nonsymlink(Path(scancel), "recovery scancel")
+        require(
+            os.access(scancel, os.X_OK),
+            "recovery scancel is not executable",
+        )
     token = submission_sha256[:16]
     wave0_name = f"exp23-launch8-{token}-wave0"
     wave1_name = f"exp23-launch8-{token}-wave1"
@@ -8042,6 +9081,7 @@ def _recover_transaction_locked(
         "report": submission_root / "journal" / "0005_REPORT_SUBMITTED.json",
     }
     transaction_lock_binding = _leased_transaction_lock_binding(scheduler_runner)
+    report_cancel_lock_binding_value = dict(report_cancel_lock_lease or {})
     cancel_context = {
         "schema_version": 1,
         "status": "scheduler_calling",
@@ -8051,6 +9091,175 @@ def _recover_transaction_locked(
         "role": "recovery_cancel",
         "transaction_lock": transaction_lock_binding,
     }
+    prerequisite_marker_path = (
+        submission_root / "journal" / "PREREQUISITE_MISSING.json"
+    )
+    prerequisite_terminal_path = (
+        submission_root
+        / "journal"
+        / "9001_PRODUCTION_PREREQUISITE_MISSING.json"
+    )
+    prerequisite_denial_reason: str | None = None
+    if prerequisite_missing:
+        assert live_production_prerequisite is not None
+        prerequisite_denial_reason = _production_prerequisite_denial_reason(
+            snapshot_prerequisite,
+            live_production_prerequisite,
+            durable_cleanup_precedence=prerequisite_marker_preexisting,
+        )
+
+    def prerequisite_observation_fields() -> dict[str, Any]:
+        require(
+            prerequisite_denial_reason is not None
+            and live_production_prerequisite is not None,
+            "production prerequisite denial observation is absent",
+        )
+        return {
+            "live_production_authorization_prerequisite": dict(
+                live_production_prerequisite
+            ),
+            "snapshot_production_authorization_prerequisite": (
+                dict(snapshot_prerequisite)
+                if snapshot_prerequisite is not None
+                else None
+            ),
+            "prerequisite_denial_reason": prerequisite_denial_reason,
+        }
+
+    def finish_prerequisite_missing(
+        recovery_result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not prerequisite_missing:
+            return dict(recovery_result)
+        assert live_production_prerequisite is not None
+        marker, marker_sha256 = read_immutable_json(
+            prerequisite_marker_path,
+            "production prerequisite-missing cleanup marker",
+        )
+        validated_marker = _validated_prerequisite_missing_marker(
+            marker,
+            submission_root=submission_root,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim["claim_token"]),
+            package_protocol_sha256=recovered_protocol,
+            snapshot_prerequisite=snapshot_prerequisite,
+            role_names=role_names,
+            comment=comment,
+            squeue=squeue,
+            transaction_lock=transaction_lock_binding,
+            report_cancel_lock=report_cancel_lock_binding_value,
+            expected_control_plane=verified_scheduler_preclaim[
+                "scheduler_control_plane"
+            ],
+            scheduler_fallback=scheduler_fallback,
+        )
+        recovery_history = recovery_result.get("cancel_attempt_history")
+        require(
+            isinstance(recovery_history, list)
+            and (
+                (
+                    validated_marker["phase"] == "initial_recovery"
+                    and validated_marker["cancel_history_length_before"]
+                    <= len(recovery_history)
+                )
+                or (
+                    validated_marker["phase"] == "legacy_prior_recovery"
+                    and validated_marker["cancel_history_length_before"]
+                    >= len(recovery_history)
+                )
+            ),
+            "production prerequisite-missing marker cancellation prefix differs",
+        )
+        recovery_terminal_path = (
+            submission_root / "journal" / "9000_RECOVERY_CANCELLED.json"
+        )
+        recovery_terminal_sha256 = file_sha256(recovery_terminal_path)
+        payload = {
+            "submission_root": str(submission_root),
+            "submission_sha256": submission_sha256,
+            "claim_token": claim["claim_token"],
+            "package_protocol_sha256": recovered_protocol,
+            "status": "production_authorization_prerequisite_missing_cleanup_terminal",
+            "live_production_authorization_prerequisite": dict(
+                validated_marker[
+                    "live_production_authorization_prerequisite"
+                ]
+            ),
+            "snapshot_production_authorization_prerequisite": (
+                dict(
+                    validated_marker[
+                        "snapshot_production_authorization_prerequisite"
+                    ]
+                )
+                if validated_marker[
+                    "snapshot_production_authorization_prerequisite"
+                ]
+                is not None
+                else None
+            ),
+            "prerequisite_denial_reason": validated_marker[
+                "prerequisite_denial_reason"
+            ],
+            "prerequisite_missing_marker_sha256": marker_sha256,
+            "recovery_terminal_name": recovery_terminal_path.name,
+            "recovery_terminal_sha256": recovery_terminal_sha256,
+            "authorization_allowed": False,
+            "receipt_publication_allowed": False,
+            "release_allowed": False,
+            "resume_allowed": False,
+            "report_allowed": False,
+            "new_jobs_created": 0,
+        }
+        expected_terminal = {
+            "schema_version": 1,
+            "record": "production_prerequisite_missing",
+            **payload,
+        }
+        if _lexical_exists(prerequisite_terminal_path):
+            terminal, _terminal_sha256 = read_immutable_json(
+                prerequisite_terminal_path,
+                "production prerequisite-missing terminal evidence",
+            )
+            require(
+                exact_json_equal(terminal, expected_terminal),
+                "production prerequisite-missing terminal evidence differs",
+            )
+        else:
+            append_journal(
+                submission_root,
+                9001,
+                "PRODUCTION_PREREQUISITE_MISSING",
+                payload,
+            )
+            terminal = read_json(prerequisite_terminal_path)
+        validated_terminal = _validated_prerequisite_missing_terminal(
+            terminal,
+            submission_root=submission_root,
+            submission_sha256=submission_sha256,
+            claim_token=str(claim["claim_token"]),
+            package_protocol_sha256=recovered_protocol,
+            snapshot_prerequisite=snapshot_prerequisite,
+            live_prerequisite_observation=validated_marker[
+                "live_production_authorization_prerequisite"
+            ],
+            prerequisite_denial_reason=validated_marker[
+                "prerequisite_denial_reason"
+            ],
+            prerequisite_marker_sha256=marker_sha256,
+            recovery_terminal_sha256=recovery_terminal_sha256,
+        )
+        return {
+            **validated_terminal,
+            "cleanup_recovery": dict(recovery_result),
+            "reused_recovery": bool(recovery_result.get("reused_recovery")),
+            "recovery_invocation_scheduler_calls": int(
+                recovery_result.get(
+                    "recovery_invocation_scheduler_calls",
+                    recovery_result.get("scheduler_calls", 0),
+                )
+            ),
+        }
+
     existing_cancel_history = _validated_recovery_cancel_history(
         submission_root / "journal",
         calling_prefix="CALLING_RECOVERY_CANCEL",
@@ -8085,6 +9294,7 @@ def _recover_transaction_locked(
                 "scheduler_control_plane"
             ],
             scheduler_fallback=scheduler_fallback,
+            committed_cancel_receipt=cleanup_committed_receipt,
         )
 
     aborted_ids_by_role: dict[str, list[str]] = {
@@ -8337,6 +9547,58 @@ def _recover_transaction_locked(
             == calling_hashes,
             "terminal recovery record differs from the reconstructed durable prefix",
         )
+        if prerequisite_missing:
+            marker_exists = _lexical_exists(prerequisite_marker_path)
+            terminal_exists = _lexical_exists(prerequisite_terminal_path)
+            require(
+                marker_exists or not terminal_exists,
+                "production prerequisite-missing terminal lacks its decision marker",
+            )
+            if marker_exists:
+                marker, marker_sha256 = read_immutable_json(
+                    prerequisite_marker_path,
+                    "production prerequisite-missing cleanup marker",
+                )
+                validated_marker = _validated_prerequisite_missing_marker(
+                    marker,
+                    submission_root=submission_root,
+                    submission_sha256=submission_sha256,
+                    claim_token=str(claim["claim_token"]),
+                    package_protocol_sha256=recovered_protocol,
+                    snapshot_prerequisite=snapshot_prerequisite,
+                    role_names=role_names,
+                    comment=comment,
+                    squeue=squeue,
+                    transaction_lock=transaction_lock_binding,
+                    report_cancel_lock=report_cancel_lock_binding_value,
+                    expected_control_plane=verified_scheduler_preclaim[
+                        "scheduler_control_plane"
+                    ],
+                    scheduler_fallback=scheduler_fallback,
+                )
+                if terminal_exists:
+                    terminal, _terminal_sha256 = read_immutable_json(
+                        prerequisite_terminal_path,
+                        "production prerequisite-missing terminal evidence",
+                    )
+                    _validated_prerequisite_missing_terminal(
+                        terminal,
+                        submission_root=submission_root,
+                        submission_sha256=submission_sha256,
+                        claim_token=str(claim["claim_token"]),
+                        package_protocol_sha256=recovered_protocol,
+                        snapshot_prerequisite=snapshot_prerequisite,
+                        live_prerequisite_observation=validated_marker[
+                            "live_production_authorization_prerequisite"
+                        ],
+                        prerequisite_denial_reason=validated_marker[
+                            "prerequisite_denial_reason"
+                        ],
+                        prerequisite_marker_sha256=marker_sha256,
+                        recovery_terminal_sha256=file_sha256(
+                            prior_recovery_path
+                        ),
+                    )
         residual_identity = {
             "campaign_id": CAMPAIGN_ID,
             "submission_root": str(submission_root),
@@ -8405,6 +9667,56 @@ def _recover_transaction_locked(
         append_residual = bool(revalidation_ids) or (
             len(existing_cancel_history) > bound_history_length
         )
+        if (
+            prerequisite_missing
+            and not _lexical_exists(prerequisite_marker_path)
+        ):
+            assert live_production_prerequisite is not None
+            exclusive_json(
+                prerequisite_marker_path,
+                {
+                    "schema_version": 1,
+                    "status": "production_authorization_prerequisite_missing_cleanup_only",
+                    "campaign_id": CAMPAIGN_ID,
+                    "submission_root": str(submission_root),
+                    "submission_sha256": submission_sha256,
+                    "claim_token": claim["claim_token"],
+                    "package_protocol_sha256": recovered_protocol,
+                    **prerequisite_observation_fields(),
+                    "cancel_latch_sha256": file_sha256(
+                        submission_root / "CANCEL_REQUESTED.json"
+                    ),
+                    "generation": 0,
+                    "phase": "legacy_prior_recovery",
+                    "previous_terminal_name": prior_recovery_path.name,
+                    "previous_terminal_sha256": file_sha256(
+                        prior_recovery_path
+                    ),
+                    "cancel_history_length_before": len(existing_cancel_history),
+                    "live_verified_job_ids": revalidation_ids,
+                    "live_verified_job_ids_by_role": revalidation_active,
+                    "settled_census_rounds": revalidation_rounds,
+                    "scheduler_control_plane_observations": revalidation_observations,
+                    "scheduler_calls": len(revalidation_observations),
+                    "transaction_lock": transaction_lock_binding,
+                    "report_cancel_lock": report_cancel_lock_binding_value,
+                    "scheduler_id_authority": "fresh_settled_exact_name_comment_owner_census_only",
+                    "authorization_allowed": False,
+                    "receipt_publication_allowed": False,
+                    "release_allowed": False,
+                    "resume_allowed": False,
+                    "report_allowed": False,
+                    "new_jobs_created": 0,
+                },
+            )
+        generation = len(residual_chain)
+        previous_path = (
+            submission_root
+            / "journal"
+            / f"RECOVERY_RECONCILED_{generation - 1:04d}.json"
+            if generation
+            else prior_recovery_path
+        )
         if append_residual:
             residual_history = existing_cancel_history
             residual_cancellation: Mapping[str, Any] | None = None
@@ -8412,6 +9724,7 @@ def _recover_transaction_locked(
             post_rounds: list[dict[str, Any]] = []
             post_active = {"wave0": [], "wave1": [], "report": []}
             if revalidation_ids:
+                require_scancel_client()
                 residual_history, residual_cancellation = (
                     _append_recovery_cancel_attempt(
                         submission_root / "journal",
@@ -8450,14 +9763,6 @@ def _recover_transaction_locked(
                     post_active == {"wave0": [], "wave1": [], "report": []},
                     "residual recovery exact jobs remain active after cancellation",
                 )
-            generation = len(residual_chain)
-            previous_path = (
-                submission_root
-                / "journal"
-                / f"RECOVERY_RECONCILED_{generation - 1:04d}.json"
-                if generation
-                else prior_recovery_path
-            )
             exclusive_json(
                 submission_root
                 / "journal"
@@ -8511,7 +9816,7 @@ def _recover_transaction_locked(
                 ],
                 scheduler_fallback=scheduler_fallback,
             )
-        return {
+        recovered = {
             **prior_recovery,
             "reused_recovery": True,
             "residual_reconciliation_chain": residual_chain,
@@ -8519,6 +9824,7 @@ def _recover_transaction_locked(
             "revalidation_scheduler_control_plane_observations": revalidation_observations,
             "recovery_invocation_scheduler_calls": len(revalidation_observations),
         }
+        return finish_prerequisite_missing(recovered)
 
     latch_path = submission_root / "CANCEL_REQUESTED.json"
     preexisting_latch: dict[str, Any] | None = None
@@ -8527,11 +9833,12 @@ def _recover_transaction_locked(
         raw_latch, cancel_latch_sha256 = read_immutable_json(
             latch_path, "recovery cancellation latch"
         )
-        preexisting_latch = _validated_recovery_cancel_latch(
+        preexisting_latch = _validated_cleanup_cancel_latch(
             raw_latch,
             submission_sha256=submission_sha256,
             claim_token=str(claim["claim_token"]),
             transaction_lock=transaction_lock_binding,
+            committed_receipt=cleanup_committed_receipt,
         )
 
     scheduler_observations: list[dict[str, Any]] = []
@@ -8575,12 +9882,69 @@ def _recover_transaction_locked(
         assert cancel_latch_sha256 is not None
     else:
         cancel_latch_sha256 = exclusive_json(latch_path, latch)
+    if prerequisite_missing:
+        assert live_production_prerequisite is not None
+        marker_value = {
+            "schema_version": 1,
+            "status": "production_authorization_prerequisite_missing_cleanup_only",
+            "campaign_id": CAMPAIGN_ID,
+            "submission_root": str(submission_root),
+            "submission_sha256": submission_sha256,
+            "claim_token": claim["claim_token"],
+            "package_protocol_sha256": recovered_protocol,
+            **prerequisite_observation_fields(),
+            "cancel_latch_sha256": cancel_latch_sha256,
+            "generation": 0,
+            "phase": "initial_recovery",
+            "previous_terminal_name": None,
+            "previous_terminal_sha256": None,
+            "cancel_history_length_before": len(existing_cancel_history),
+            "live_verified_job_ids": live_ids,
+            "live_verified_job_ids_by_role": live_ids_by_role,
+            "settled_census_rounds": pre_cancel_rounds,
+            "scheduler_control_plane_observations": scheduler_observations,
+            "scheduler_calls": len(scheduler_observations),
+            "transaction_lock": transaction_lock_binding,
+            "report_cancel_lock": report_cancel_lock_binding_value,
+            "scheduler_id_authority": "fresh_settled_exact_name_comment_owner_census_only",
+            "authorization_allowed": False,
+            "receipt_publication_allowed": False,
+            "release_allowed": False,
+            "resume_allowed": False,
+            "report_allowed": False,
+            "new_jobs_created": 0,
+        }
+        if _lexical_exists(prerequisite_marker_path):
+            existing_marker, _existing_marker_sha256 = read_immutable_json(
+                prerequisite_marker_path,
+                "production prerequisite-missing cleanup marker",
+            )
+            _validated_prerequisite_missing_marker(
+                existing_marker,
+                submission_root=submission_root,
+                submission_sha256=submission_sha256,
+                claim_token=str(claim["claim_token"]),
+                package_protocol_sha256=recovered_protocol,
+                snapshot_prerequisite=snapshot_prerequisite,
+                role_names=role_names,
+                comment=comment,
+                squeue=squeue,
+                transaction_lock=transaction_lock_binding,
+                report_cancel_lock=report_cancel_lock_binding_value,
+                expected_control_plane=verified_scheduler_preclaim[
+                    "scheduler_control_plane"
+                ],
+                scheduler_fallback=scheduler_fallback,
+            )
+        else:
+            exclusive_json(prerequisite_marker_path, marker_value)
     cancel_history = existing_cancel_history
     cancellation = None
     cancel_calling_sha256 = None
     post_cancel_rounds: list[dict[str, Any]] = []
     post_cancel_active = {"wave0": [], "wave1": [], "report": []}
     if live_ids:
+        require_scancel_client()
         cancel_history, cancellation = _append_recovery_cancel_attempt(
             submission_root / "journal",
             calling_prefix="CALLING_RECOVERY_CANCEL",
@@ -8675,8 +10039,11 @@ def _recover_transaction_locked(
             "scheduler_control_plane"
         ],
         scheduler_fallback=scheduler_fallback,
+        committed_cancel_receipt=cleanup_committed_receipt,
     )
-    return {**validated_recovery, "reused_recovery": False}
+    return finish_prerequisite_missing(
+        {**validated_recovery, "reused_recovery": False}
+    )
 
 
 def recover_transaction(
@@ -8688,14 +10055,33 @@ def recover_transaction(
     """Recover only after proving that no live submitter owns the transaction."""
 
     with _TransactionLock(submission_root) as transaction_lock:
-        leased_scheduler_runner = _scheduler_runner_with_lock_lease(
-            scheduler_runner, transaction_lock
-        )
-        return _recover_transaction_locked(
-            repo_root,
-            submission_root,
-            scheduler_runner=leased_scheduler_runner,
-        )
+        with _ReportCancelLock(submission_root) as report_cancel_lock:
+            report_cancel_binding = _report_cancel_lock_binding(
+                report_cancel_lock
+            )
+            try:
+                live_prerequisite = (
+                    _validated_live_production_authorization_prerequisite(
+                        repo_root
+                    )
+                )
+            except Exception:
+                # Loss or drift of live authorization can never strand exact
+                # jobs from an older transaction.  It removes all continuation
+                # authority and permits only the cleanup state machine below.
+                live_prerequisite = (
+                    _unavailable_live_production_authorization_prerequisite()
+                )
+            leased_scheduler_runner = _scheduler_runner_with_lock_lease(
+                scheduler_runner, transaction_lock
+            )
+            return _recover_transaction_locked(
+                repo_root,
+                submission_root,
+                scheduler_runner=leased_scheduler_runner,
+                live_production_prerequisite=live_prerequisite,
+                report_cancel_lock_lease=report_cancel_binding,
+            )
 
 
 def _summary(preflight: Mapping[str, Any]) -> dict[str, Any]:
@@ -8784,6 +10170,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _internal_snapshot_main(raw_argv)
         args = _parser().parse_args(raw_argv)
         repo_root = _directory_nonsymlink(args.repo_root, "repository root")
+        if args.submit and args.submission_root is not None:
+            explicit_submission_root = args.submission_root.absolute()
+            if _lexical_exists(explicit_submission_root):
+                recovered = recover_transaction(
+                    repo_root, explicit_submission_root
+                )
+                print(
+                    json.dumps(
+                        recovered, sort_keys=True, indent=2, allow_nan=False
+                    )
+                )
+                return (
+                    0
+                    if recovered.get("status") == "committed_two_wave_dag"
+                    else 2
+                )
         manifest = read_json(repo_root / PACKAGE_RELATIVE / "manifest.json")
         if args.snapshot_test:
             require(
@@ -8793,12 +10195,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             verified = snapshot_test(repo_root)
             print(json.dumps(verified, sort_keys=True, indent=2, allow_nan=False))
             return 0
-        activate_isolated_runtime(manifest)
         submission_root = (
             args.submission_root.absolute()
             if args.submission_root is not None
             else Path(str(manifest["paths"]["run_root"])) / "state" / "submission"
         )
+        if args.submit and _lexical_exists(submission_root):
+            recovered = recover_transaction(repo_root, submission_root)
+            print(json.dumps(recovered, sort_keys=True, indent=2, allow_nan=False))
+            return 0 if recovered.get("status") == "committed_two_wave_dag" else 2
+        activate_isolated_runtime(manifest)
         if args.scheduler_test:
             require(
                 args.submission_root is None,
@@ -8808,10 +10214,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             verified = scheduler_preclaim_test(repo_root, preflight["manifest"])
             print(json.dumps(verified, sort_keys=True, indent=2, allow_nan=False))
             return 0
-        if args.submit and _lexical_exists(submission_root):
-            recovered = recover_transaction(repo_root, submission_root)
-            print(json.dumps(recovered, sort_keys=True, indent=2, allow_nan=False))
-            return 0 if recovered.get("status") == "committed_two_wave_dag" else 2
         preflight = static_preflight(repo_root, submission_root)
         if not args.submit:
             print(json.dumps(_summary(preflight), sort_keys=True, indent=2, allow_nan=False))

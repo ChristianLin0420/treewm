@@ -1,0 +1,543 @@
+{
+  "schema_version": 1,
+  "status": "terminal_positive_canary_provenance_frozen",
+  "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+  "canary_attempt": "canary2",
+  "scientific": false,
+  "observed_at_utc": "2026-08-28T23:28:04Z",
+  "scope": "Terminal positive evidence for the non-scientific Launch8 two-wave real-GPU topology canary. This evidence is a required production-authorization prerequisite, but the canary namespace, checkpoint, token, and scheduler job identities are permanently evidence-only and may never be consumed as scientific state.",
+  "canonical_reconstruction": {
+    "canonical_json": "UTF-8 JSON with ensure_ascii=true, allow_nan=false, object keys sorted lexicographically, separators comma and colon, and no trailing newline.",
+    "state_file_map_payload": "Hash canonical JSON of {schema_version:1,files:{state_root_relative_path:{mode,sha256,size}}}; mode is a four-digit octal string, size is the exact raw byte count, and sha256 is the raw-file SHA-256.",
+    "scheduler_rows_payload": "Split every nonempty raw stdout line on '|' into a 14-string array without dropping the final Comment field, then hash canonical JSON of {schema_version:1,fields:scheduler_terminal_rows_schema.split('|'),rows:scheduler_terminal_rows}.",
+    "scheduler_raw_stdout_payload": "scheduler_terminal_observation.raw_stdout is the exact UTF-8 stdout byte sequence, including its final newline; its size and SHA-256 are independently bound.",
+    "owner_scheduler_census_payload": "Base64-decode and zlib-decompress terminal_zero_active_evidence.owner_active_scheduler_census.raw_stdout_zlib_base64 to recover the exact owner-wide squeue stdout; verify its byte size and SHA-256, parse every nonempty line as five pipe-separated strings, and select rows whose JobName starts with exp23-launch8-canary-b95869841048e511- or whose Comment equals treewm-exp23-canary:b95869841048e511.",
+    "scope": "The state-file map is a point-in-time read-only census of the preserved successful canary root. WAVE0_READY, WAVE1_COMPLETE, CANARY_REPORT, sacct stdout, reduced sacct rows, and all zero-active scheduler observations are embedded and independently reconstructable. Large controller lifecycle records remain exact immutable raw digests in the literal state map; held-before-authorization and release-after-receipt semantics are independently pre-freeze-audited projections, not reconstructions of embedded record bytes. Package validation reads only this embedded artifact and never reads, imports, resumes, or recovers the successful canary root."
+  },
+  "immutable_identity": {
+    "source_commit_protocol_equivalent": "b688ea652e99479ed5d8c6eccd6c137d77f9e03f",
+    "source_commit_claimed_by_controller": false,
+    "source_commit_evidence": "Independent clean HEAD, origin/main, and live-remote equality plus byte comparison established b688ea652e99479ed5d8c6eccd6c137d77f9e03f as the protocol-equivalent source commit; the controller itself records only the protocol and four source hashes.",
+    "package_protocol_sha256": "79aaa2b6a9713034dc074c49ecbcf3daa17944c4f89287924fe13ddd3abc93d9",
+    "protocol_lock_raw_sha256": "785b52b5858876c52e03628da98f07d987e628b565d74c5ea5230cc0adb3dea1",
+    "manifest_raw_sha256": "225f1d27fe65a8405679f4937ed2f434d4c8d4a84dd280ec0983fc2743633baa",
+    "manifest_canonical_sha256": "e7b8f304d46e67a8e428e2aea851191f344578eef7cfe349a7d3a60cfd874088",
+    "state_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-b688ea6-79aaa2b6",
+    "state_root_relative": "outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-b688ea6-79aaa2b6",
+    "canary_token": "b95869841048e511",
+    "scheduler_comment": "treewm-exp23-canary:b95869841048e511",
+    "controller_identity_sha256": "8ab251408c6a326d3ff83c66869e01687bc60b9e4d9593a769d4c8532fcdd3fe",
+    "scheduler_control_plane_sha256": "b631db129a9330a869436a1487fe67d99a8692ba73eb3b1a0156de4adc349731",
+    "source_sha256": {
+      "canary_gpu.slurm": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+      "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+      "canary_worker.py": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d",
+      "two_wave_canary.py": "b373d64f410f08d1bd692dd9bb9e732a18b06bf80b6b483c313d82d4a6499436"
+    }
+  },
+  "terminal_state_file_census": {
+    "state_file_count": 24,
+    "state_file_bytes": 285696,
+    "directory_paths": [
+      ".",
+      "logs",
+      "source"
+    ],
+    "directory_modes": {
+      ".": "0700",
+      "logs": "0700",
+      "source": "0555"
+    },
+    "logs_file_count": 3,
+    "logs_total_bytes": 0,
+    "symlink_count": 0,
+    "special_file_count": 0,
+    "cache_file_count": 0,
+    "temporary_file_count": 0,
+    "state_file_map_canonical_sha256": "60dded3399d9b5406418209ffeb5020a09f22778e135c1ad79b3f413f9a7a2ce",
+    "files": {
+      ".CANARY_CONTROLLER.lock": {
+        "mode": "0600",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "CANARY_AUTHORIZATION.json": {
+        "mode": "0444",
+        "sha256": "ddcfc1f6b8bbf88de2fb4e5fb2d9096f34304c83c245d4e69ffc38e1a1ca826f",
+        "size": 7389
+      },
+      "CANARY_CONTROLLER_IDENTITY.json": {
+        "mode": "0444",
+        "sha256": "8ab251408c6a326d3ff83c66869e01687bc60b9e4d9593a769d4c8532fcdd3fe",
+        "size": 6651
+      },
+      "CANARY_READY_TO_RELEASE.json": {
+        "mode": "0444",
+        "sha256": "9ebc1dd37eacbaac43e8dc8c08f6519f561074bdff951f25fd1f57adae31b460",
+        "size": 739
+      },
+      "CANARY_REPORT.json": {
+        "mode": "0444",
+        "sha256": "1d4e00bf032f97434fdcabfe9c1f7601ca06786937b7c7d17c1d199b4a072dfd",
+        "size": 1146
+      },
+      "CANARY_REPORT_CALLING.json": {
+        "mode": "0444",
+        "sha256": "b4251aaeaca2a401fa8bdea48d5e74cf435a56a1946ca363c731dc714539929b",
+        "size": 2086
+      },
+      "CANARY_REPORT_SUBMITTED.json": {
+        "mode": "0444",
+        "sha256": "3eca7bf5d0a672ce9669a93b3f874d1bcf3cac47656645372ebc5f0596bb6961",
+        "size": 14463
+      },
+      "CANARY_SUBMISSION_RECEIPT.json": {
+        "mode": "0444",
+        "sha256": "9e69049b664ce938b553bd41201b17a1084588fa22357fdcea2457733e41b4f4",
+        "size": 51987
+      },
+      "CANARY_WAVE0_CALLING.json": {
+        "mode": "0444",
+        "sha256": "d3581167ec11180cacffe1118f8801e3ed8ec49c6cae41c6c854eee00ad6e625",
+        "size": 2036
+      },
+      "CANARY_WAVE0_RELEASED.json": {
+        "mode": "0444",
+        "sha256": "d68e5ebcf8e19bf05a5163ee5be9e9adf68ffe17ba0f4d1a708c152986b5b7cb",
+        "size": 13589
+      },
+      "CANARY_WAVE0_RELEASE_CALLING.json": {
+        "mode": "0444",
+        "sha256": "9ad66e9c1fecb8a1b629d99b12cad1499052c8db77585157237505a0413fc523",
+        "size": 1170
+      },
+      "CANARY_WAVE0_SUBMITTED.json": {
+        "mode": "0444",
+        "sha256": "334687364bf6e399640c64de50a602d18b094ca4f8fa360313b9de19da3bda42",
+        "size": 14597
+      },
+      "CANARY_WAVE1_CALLING.json": {
+        "mode": "0444",
+        "sha256": "6211993536d6dcd533f3c95fe736e17f1e2e1898d826926e0d54cec8f2cfdc9f",
+        "size": 2092
+      },
+      "CANARY_WAVE1_SUBMITTED.json": {
+        "mode": "0444",
+        "sha256": "1ef5a17469fce4e9c5c1c788b3303f201ad37265b0e2a49f9a685b232e690d96",
+        "size": 14792
+      },
+      "WAVE0_READY.json": {
+        "mode": "0444",
+        "sha256": "2023e18225c23d7cf430a0f8a99d870b37af3059269f6a22b8d3a5c0d3b3d2ee",
+        "size": 364
+      },
+      "WAVE1_COMPLETE.json": {
+        "mode": "0444",
+        "sha256": "60e04de8603d565e423e26e47a6d4f61a1cd0bc2b9373a4c0751d98f59eb115c",
+        "size": 423
+      },
+      "logs/report_33295661.out": {
+        "mode": "0644",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "logs/wave0_33295657.out": {
+        "mode": "0644",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "logs/wave1_33295659.out": {
+        "mode": "0644",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "source/canary_gpu.slurm": {
+        "mode": "0444",
+        "sha256": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+        "size": 1376
+      },
+      "source/canary_report.slurm": {
+        "mode": "0444",
+        "sha256": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+        "size": 1036
+      },
+      "source/canary_worker.py": {
+        "mode": "0444",
+        "sha256": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d",
+        "size": 42467
+      },
+      "source/two_wave_canary.py": {
+        "mode": "0444",
+        "sha256": "b373d64f410f08d1bd692dd9bb9e732a18b06bf80b6b483c313d82d4a6499436",
+        "size": 104792
+      },
+      "wave0_checkpoint.pt": {
+        "mode": "0444",
+        "sha256": "13f9a42beadc19fd4e0fea53614b820c2ee518a09834023f5419fae225685f8f",
+        "size": 2501
+      }
+    }
+  },
+  "durable_topology": {
+    "job_ids": {
+      "wave0": "33295657",
+      "wave1": "33295659",
+      "report": "33295661"
+    },
+    "job_names": {
+      "wave0": "exp23-launch8-canary-b95869841048e511-wave0",
+      "wave1": "exp23-launch8-canary-b95869841048e511-wave1",
+      "report": "exp23-launch8-canary-b95869841048e511-report"
+    },
+    "dependencies": {
+      "wave0": "none",
+      "wave1": "afterok:33295657",
+      "report": "afterok:33295659"
+    },
+    "scheduler_observed_dependencies": {
+      "wave0": "(null)",
+      "wave1": "afterok:33295657(unfulfilled)",
+      "report": "afterok:33295659(unfulfilled)"
+    },
+    "kill_on_invalid_dependency": {
+      "wave0": null,
+      "wave1": "Yes",
+      "report": "Yes"
+    },
+    "accepted_states": {
+      "wave0": "PENDING",
+      "wave1": "PENDING",
+      "report": "PENDING"
+    },
+    "accepted_reasons": {
+      "wave0": "JobHeldUser",
+      "wave1": "Dependency",
+      "report": "Dependency"
+    },
+    "within_wave_requeue": false,
+    "resources": {
+      "wave0": {
+        "partition": "polar4,polar3,polar,grizzly",
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "qos": "normal",
+        "time_limit": "00:10:00",
+        "nodes": "1-1",
+        "tasks": 1,
+        "cpus": 2,
+        "cpus_per_task": 2,
+        "memory": "8G",
+        "gpus": 1,
+        "tres_per_node": "gres:gpu:1",
+        "req_tres": "cpu=2,mem=8G,node=1,billing=1,gres/gpu=1"
+      },
+      "wave1": {
+        "partition": "polar4,polar3,polar,grizzly",
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "qos": "normal",
+        "time_limit": "00:10:00",
+        "nodes": "1-1",
+        "tasks": 1,
+        "cpus": 2,
+        "cpus_per_task": 2,
+        "memory": "8G",
+        "gpus": 1,
+        "tres_per_node": "gres:gpu:1",
+        "req_tres": "cpu=2,mem=8G,node=1,billing=1,gres/gpu=1"
+      },
+      "report": {
+        "partition": "cpu",
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "qos": "normal",
+        "time_limit": "00:05:00",
+        "nodes": "1-1",
+        "tasks": 1,
+        "cpus": 1,
+        "cpus_per_task": 1,
+        "memory": "1G",
+        "gpus": 0,
+        "tres_per_node": null,
+        "req_tres": "cpu=1,mem=1G,node=1"
+      }
+    },
+    "evidence_sha256": {
+      "controller_identity_raw": "8ab251408c6a326d3ff83c66869e01687bc60b9e4d9593a769d4c8532fcdd3fe",
+      "wave0_calling_raw": "d3581167ec11180cacffe1118f8801e3ed8ec49c6cae41c6c854eee00ad6e625",
+      "wave0_submitted_raw": "334687364bf6e399640c64de50a602d18b094ca4f8fa360313b9de19da3bda42",
+      "wave1_calling_raw": "6211993536d6dcd533f3c95fe736e17f1e2e1898d826926e0d54cec8f2cfdc9f",
+      "wave1_submitted_raw": "1ef5a17469fce4e9c5c1c788b3303f201ad37265b0e2a49f9a685b232e690d96",
+      "report_calling_raw": "b4251aaeaca2a401fa8bdea48d5e74cf435a56a1946ca363c731dc714539929b",
+      "report_submitted_raw": "3eca7bf5d0a672ce9669a93b3f874d1bcf3cac47656645372ebc5f0596bb6961",
+      "accepted_submission_records": "46e5c8ddaf1ec5f181d107a90811c9c59d7d8cd679333ef4cbc4818ba1771599",
+      "accepted_scheduler_evidence": "2973d098d440ddf6cfad8db3575386ec6c1fe8484a50edce032b3d16e1fffbf6",
+      "authorization_raw": "ddcfc1f6b8bbf88de2fb4e5fb2d9096f34304c83c245d4e69ffc38e1a1ca826f",
+      "submission_receipt_raw": "9e69049b664ce938b553bd41201b17a1084588fa22357fdcea2457733e41b4f4",
+      "ready_to_release_raw": "9ebc1dd37eacbaac43e8dc8c08f6519f561074bdff951f25fd1f57adae31b460",
+      "wave0_release_calling_raw": "9ad66e9c1fecb8a1b629d99b12cad1499052c8db77585157237505a0413fc523",
+      "wave0_released_raw": "d68e5ebcf8e19bf05a5163ee5be9e9adf68ffe17ba0f4d1a708c152986b5b7cb"
+    }
+  },
+  "runtime_result": {
+    "wave0_ready": {
+      "raw_sha256": "2023e18225c23d7cf430a0f8a99d870b37af3059269f6a22b8d3a5c0d3b3d2ee",
+      "record": {
+        "schema_version": 1,
+        "status": "wave0_ready",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+        "canary_token": "b95869841048e511",
+        "wave0_job_id": "33295657",
+        "checkpoint_sha256": "13f9a42beadc19fd4e0fea53614b820c2ee518a09834023f5419fae225685f8f",
+        "cuda_device_name": "NVIDIA A100-SXM4-80GB",
+        "expected_resumed_result": 66672896.0,
+        "within_wave_requeue": false
+      }
+    },
+    "checkpoint": {
+      "raw_sha256": "13f9a42beadc19fd4e0fea53614b820c2ee518a09834023f5419fae225685f8f",
+      "size": 2501,
+      "mode": "0444",
+      "tensor_dtype": "torch.float32",
+      "tensor_shape": [
+        16,
+        16
+      ],
+      "tensor_checksum": 66672640.0,
+      "scientific_state": false
+    },
+    "wave1_complete": {
+      "raw_sha256": "60e04de8603d565e423e26e47a6d4f61a1cd0bc2b9373a4c0751d98f59eb115c",
+      "record": {
+        "schema_version": 1,
+        "status": "wave1_complete",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+        "canary_token": "b95869841048e511",
+        "wave0_job_id": "33295657",
+        "wave1_job_id": "33295659",
+        "ready_sha256": "2023e18225c23d7cf430a0f8a99d870b37af3059269f6a22b8d3a5c0d3b3d2ee",
+        "checkpoint_sha256": "13f9a42beadc19fd4e0fea53614b820c2ee518a09834023f5419fae225685f8f",
+        "resumed_result": 66672896.0,
+        "within_wave_requeue": false
+      }
+    },
+    "report": {
+      "raw_sha256": "1d4e00bf032f97434fdcabfe9c1f7601ca06786937b7c7d17c1d199b4a072dfd",
+      "record": {
+        "schema_version": 1,
+        "status": "two_wave_gpu_canary_passed",
+        "campaign_id": "treewm-executable-prefix-repair-pilot-v1-launch8",
+        "canary_token": "b95869841048e511",
+        "job_ids": {
+          "wave0": "33295657",
+          "wave1": "33295659",
+          "report": "33295661"
+        },
+        "dependencies": {
+          "wave0": "none",
+          "wave1": "afterok:33295657",
+          "report": "afterok:33295659"
+        },
+        "authorization_sha256": "ddcfc1f6b8bbf88de2fb4e5fb2d9096f34304c83c245d4e69ffc38e1a1ca826f",
+        "receipt_sha256": "9e69049b664ce938b553bd41201b17a1084588fa22357fdcea2457733e41b4f4",
+        "ready_to_release_sha256": "9ebc1dd37eacbaac43e8dc8c08f6519f561074bdff951f25fd1f57adae31b460",
+        "wave0_release_sha256": "d68e5ebcf8e19bf05a5163ee5be9e9adf68ffe17ba0f4d1a708c152986b5b7cb",
+        "wave0_ready_sha256": "2023e18225c23d7cf430a0f8a99d870b37af3059269f6a22b8d3a5c0d3b3d2ee",
+        "wave1_complete_sha256": "60e04de8603d565e423e26e47a6d4f61a1cd0bc2b9373a4c0751d98f59eb115c",
+        "checkpoint_sha256": "13f9a42beadc19fd4e0fea53614b820c2ee518a09834023f5419fae225685f8f",
+        "accepted_submission_records_sha256": "46e5c8ddaf1ec5f181d107a90811c9c59d7d8cd679333ef4cbc4818ba1771599",
+        "accepted_scheduler_evidence_sha256": "2973d098d440ddf6cfad8db3575386ec6c1fe8484a50edce032b3d16e1fffbf6"
+      }
+    }
+  },
+  "scheduler_terminal_rows_schema": "JobIDRaw|JobName|State|ExitCode|ElapsedRaw|AllocNodes|NodeList|ReqTRES|AllocTRES|Submit|Eligible|Start|End|Comment",
+  "scheduler_terminal_rows": [
+    [
+      "33295657",
+      "exp23-launch8-canary-b95869841048e511-wave0",
+      "COMPLETED",
+      "0:0",
+      "25",
+      "1",
+      "batch-block5-04028",
+      "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+      "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+      "2026-08-28T22:52:10",
+      "2026-08-28T22:52:18",
+      "2026-08-28T22:52:45",
+      "2026-08-28T22:53:10",
+      "treewm-exp23-canary:b95869841048e511"
+    ],
+    [
+      "33295659",
+      "exp23-launch8-canary-b95869841048e511-wave1",
+      "COMPLETED",
+      "0:0",
+      "12",
+      "1",
+      "batch-block5-04028",
+      "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+      "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+      "2026-08-28T22:52:13",
+      "2026-08-28T22:53:16",
+      "2026-08-28T22:53:45",
+      "2026-08-28T22:53:57",
+      "treewm-exp23-canary:b95869841048e511"
+    ],
+    [
+      "33295661",
+      "exp23-launch8-canary-b95869841048e511-report",
+      "COMPLETED",
+      "0:0",
+      "6",
+      "1",
+      "cpu-00073",
+      "cpu=1,mem=1G,node=1",
+      "cpu=2,mem=1G,node=1",
+      "2026-08-28T22:52:15",
+      "2026-08-28T22:54:10",
+      "2026-08-28T22:54:10",
+      "2026-08-28T22:54:16",
+      "treewm-exp23-canary:b95869841048e511"
+    ]
+  ],
+  "scheduler_terminal_observation": {
+    "captured_at_utc": "2026-08-28T23:05:37Z",
+    "cwd": "/",
+    "environment": {
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+    },
+    "scheduler_control_plane_sha256": "b631db129a9330a869436a1487fe67d99a8692ba73eb3b1a0156de4adc349731",
+    "scheduler_control_plane_match_observed_separately": true,
+    "scheduler_control_plane_attestation_scope": "A separate read-only observation matched the root-bound control-plane digest; this is an operator observation, not a signed scheduler attestation.",
+    "argv": [
+      "/usr/local/bin/sacct",
+      "-X",
+      "-n",
+      "-j",
+      "33295657,33295659,33295661",
+      "-o",
+      "JobIDRaw,JobName,State,ExitCode,ElapsedRaw,AllocNodes,NodeList,ReqTRES,AllocTRES,Submit,Eligible,Start,End,Comment",
+      "-P"
+    ],
+    "returncode": 0,
+    "raw_stdout": "33295657|exp23-launch8-canary-b95869841048e511-wave0|COMPLETED|0:0|25|1|batch-block5-04028|billing=1,cpu=2,gres/gpu=1,mem=8G,node=1|billing=1,cpu=2,gres/gpu=1,mem=8G,node=1|2026-08-28T22:52:10|2026-08-28T22:52:18|2026-08-28T22:52:45|2026-08-28T22:53:10|treewm-exp23-canary:b95869841048e511\n33295659|exp23-launch8-canary-b95869841048e511-wave1|COMPLETED|0:0|12|1|batch-block5-04028|billing=1,cpu=2,gres/gpu=1,mem=8G,node=1|billing=1,cpu=2,gres/gpu=1,mem=8G,node=1|2026-08-28T22:52:13|2026-08-28T22:53:16|2026-08-28T22:53:45|2026-08-28T22:53:57|treewm-exp23-canary:b95869841048e511\n33295661|exp23-launch8-canary-b95869841048e511-report|COMPLETED|0:0|6|1|cpu-00073|cpu=1,mem=1G,node=1|cpu=2,mem=1G,node=1|2026-08-28T22:52:15|2026-08-28T22:54:10|2026-08-28T22:54:10|2026-08-28T22:54:16|treewm-exp23-canary:b95869841048e511\n",
+    "raw_stdout_size": 819,
+    "raw_stdout_sha256": "a5ab435ae61d32f3de41b6fb1a2cd0a382d6d21122dca5eea58cbf4d5eff04a5",
+    "raw_stderr": "",
+    "raw_stderr_size": 0,
+    "raw_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "canonical_rows_bytes": 1092,
+    "canonical_rows_sha256": "b7b204be3ef714222f5893cc727ace5ca20bb482485301ee20ac33e8320031ef"
+  },
+  "terminal_zero_active_evidence": {
+    "exact_job_ids": {
+      "captured_at_utc": "2026-08-28T23:10:48Z",
+      "argv": [
+        "/usr/local/bin/squeue",
+        "--noheader",
+        "--jobs=33295657,33295659,33295661",
+        "--format=%A|%F|%j|%T|%k"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stdout_size": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr": "",
+      "stderr_size": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "exact_job_names": {
+      "captured_at_utc": "2026-08-28T23:10:49Z",
+      "argv": [
+        "/usr/local/bin/squeue",
+        "--noheader",
+        "--name=exp23-launch8-canary-b95869841048e511-wave0,exp23-launch8-canary-b95869841048e511-wave1,exp23-launch8-canary-b95869841048e511-report",
+        "--format=%A|%F|%j|%T|%k"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stdout_size": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr": "",
+      "stderr_size": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "owner_active_scheduler_census": {
+      "captured_at_utc": "2026-08-28T23:28:04Z",
+      "argv": [
+        "/usr/local/bin/squeue",
+        "--noheader",
+        "--user=chrislin",
+        "--format=%A|%F|%j|%T|%k"
+      ],
+      "environment": {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "USER": "chrislin",
+        "LOGNAME": "chrislin",
+        "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf"
+      },
+      "returncode": 0,
+      "raw_stdout_size": 9992,
+      "raw_stdout_sha256": "1aff7458b2b7ab62fb7e8189af662d7d92c6eadcb21303366917249d4ead5a00",
+      "compressed_stdout_size": 1017,
+      "compressed_stdout_sha256": "8dccdf089806fe525f74aaeb903eced6c99e6a123642b3c378713912f7c5b988",
+      "raw_stdout_zlib_base64": "eNq9mEtv21YQhff5JenCwH3MfSjrFkU3RlEkm24I2qZloRQliHTQBPfHl1R0xrKql9uTeHVggR+Ho/nmCvTeitgci0dY903VfK7batls5k21XvXD02qz+LrqqnZx12xWlTVVb830Vznzt+YU86PYe5PsTVN+/+X2599uf51oNxPtw/6nE/3uubtprbkx5kM9n2+aeT0073ZFuKJBq1m3dfcjipnugzpM0bD2sses6oflYngp4eUOXl7Bu4f1atENO/iOm2ZFw+Vuz1fjp6RHnFjHOp5S0XCx49+joL2up1A0nOv6dOnlvu9u8M67bN1sZouGg84/bpr+CezZ7sGcs8Fnvcv77rltf9qx8qxoeN2zN6MSyhrD2vtquWibflh1zR5k+v/dl6p/XgzNSHTRZCcfTQrJhj+rx+b+3ojcH+GP/QjbUr+Fg8eu29b6bYknLk1Fw+unvHClsaFomK5ce1f11dJGXLno+qHuhqpZ1lXfNA+mepJs/qo+2/LHp9vbf3XJp6Jh6sawqRfd2zt0yN7OWvBFw8HQ7U+9dXr5wcRti9mNm3U7aoToYzhOHbfXRea4OpSYUecYXr6OH7CiN5v6CwTNRcO5Gr7L4tqvQ4qG092Np3bEXncjiDh4xnCaGK4gBhBt0XCaKFcQBUQcSsmcIforiB6zj+U/KX5m9i918tvso5cBPynGcI4arqKinwGHQwhnqXIVFT0NmKQgZ6n+KqrHYWOKBvXk7WcDKNvv+z9vvaPsiCNsu5/I7Fw00Nk4CWLis0PRQGdL0UBn+6KBznZFA52N3z7R8tlwJ/LdCXAn8N0JcCfw3QlwJ/DdmXY+Ap0NLwPfywAvA9/LAC8D38sALwPfywAvA9/LAC8D30uBl8L3UuCl8L0UeCl8LwVeCt9LgZfC91LgpfC9FHgpfC8FXgrfS4GXwvdS4KXwvfTw0vO99PDSk72c3nvkokF/xV96a2J80fDWdx/Hga5o4ABt0cABmqKBATSz3UurKXCAuWjgAFPRwAHGooEDxDu4WSABpWjgAH3RwAG6ooEDtEUDB2iKBgoww5RMMiXDlEwyJcOUTDIlw5RMMiXDlEwyJcOUTDIlw5RMMiXDlEwyJcOUTDIlw5RMMiXBlEQyJcGURDIlwZREMiXBlEQyJcGURDIlwZREMiXBlEQyJcGURDIlwZREMiXBlEQyJcKUSDIlwpRIMiXClEgyJcKUSDIlwpRIMsVjDj1pDj3m0JPm0GMOPWkOHebQkebQYQ4daQ4d5tCR5tBhDh1pDh3m0JHm0GFjO9LGdtjYjrSxHUxxJFMcTHEkUxxMcSRTLEyxJFMsTLEkUyxMsSRTLEyx/9uUfwD72idF",
+      "raw_stderr": "",
+      "raw_stderr_size": 0,
+      "raw_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "row_schema": "JobID|ArrayJobID|JobName|State|Comment",
+      "matching_predicate": "JobName startswith exp23-launch8-canary-b95869841048e511- OR Comment equals treewm-exp23-canary:b95869841048e511",
+      "matched_rows": []
+    },
+    "active_exact_job_count": 0,
+    "active_exact_name_count": 0,
+    "stray_topology_job_count": 0
+  },
+  "absent_durable_artifacts": {
+    "exact_names": [
+      "CANARY_ABORTED.json",
+      "CANARY_RECOVERY_CANCELLED.json"
+    ],
+    "forbidden_name_fragments": [
+      "ABORT",
+      "CANCEL",
+      "ERROR",
+      "FAIL",
+      "RECOVER",
+      "TEMP",
+      "TMP"
+    ],
+    "matched_file_count": 0
+  },
+  "acceptance_conclusion": {
+    "topology_canary_passed": true,
+    "production_authorization_prerequisite_satisfied": true,
+    "scalar_dependency_scope_proved": true,
+    "held_before_authorization_proved": true,
+    "release_after_receipt_proved": true,
+    "real_gpu_wave0_proved": true,
+    "checkpoint_transfer_proved": true,
+    "same_canary_wave0_to_wave1_checkpoint_transfer_completed": true,
+    "real_gpu_wave1_proved": true,
+    "report_after_wave1_proved": true,
+    "all_jobs_terminal_success": true,
+    "zero_active_jobs": true,
+    "scientific_state": false,
+    "reuse_allowed": false,
+    "resume_allowed": false,
+    "retry_allowed": false,
+    "recovery_allowed": false,
+    "checkpoint_consumption_as_scientific_state_allowed": false,
+    "result_consumption_as_scientific_measurement_allowed": false,
+    "allowed_consumption": [
+      "package provenance",
+      "production launch authorization prerequisite",
+      "topology engineering evidence"
+    ],
+    "required_successor_policy": "Every future canary must use a fresh root, token, logical job namespace, checkpoint, and result namespace. Historical numeric Slurm IDs are never authorization, release, resume, or result identities; if Slurm recycles one into a fresh exact canary namespace, it may only be signalled for cleanup after a settled exact owner, name, and token-bound-comment census. Launch8 scientific work must use its fresh scientific root, names, checkpoints, and results and must never consume canary files or identities as scientific state."
+  }
+}

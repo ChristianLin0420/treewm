@@ -124,6 +124,36 @@ census. That root, token, both job IDs, copied sources, and every state/result a
 are permanently non-reusable. Any successor canary must use a newly sealed protocol,
 fresh token, fresh root, and fresh scheduler IDs.
 
+The fresh canary2 successor ran from protocol-equivalent commit
+`b688ea652e99479ed5d8c6eccd6c137d77f9e03f` and protocol `79aaa2b6...`.
+Held wave0 `33295657` completed a real CUDA operation on an A100 and sealed checkpoint
+`13f9a42b...`; scalar-dependent wave1 `33295659` loaded that exact checkpoint and
+completed with the expected result `66672896`; scalar-dependent report `33295661`
+then sealed `CANARY_REPORT.json` with status `two_wave_gpu_canary_passed`. All three
+allocation rows are terminal `COMPLETED/0:0`, both dependency observations have
+`KillOInInvalidDependent=Yes`, and exact-ID plus exact-name active-job censuses are
+empty. The protocol-bound `canary2_acceptance_provenance.json` is the canonical
+production-authorization prerequisite: it binds the complete 24-file/285,696-byte
+point-in-time root census (map SHA-256 `60dded33...`), source/protocol identity,
+authorization/receipt/release chain, runtime lineage, exact scheduler rows, and zero
+active/stray topology. Its embedded runtime/report records and scheduler observations
+are byte-reconstructable; the larger controller lifecycle records are anchored as
+literal immutable raw digests whose ordering semantics were independently audited at
+the freeze. The live canary root is not the package evidence anchor and is never read
+by package validation. Its root, token, checkpoint, copied sources, result, and logical
+job identity are permanently evidence-only and may not enter scientific state. Within
+any future canary controller/namespace, a recycled numeric Slurm ID may only be
+signalled for cleanup after a fresh settled exact namespace census; it can never
+authorize or continue canary work. Post-acceptance package changes are limited to
+canary historical-identity, canonical-path, lock/rollback, and cleanup-only recovery
+guards in `two_wave_canary.py`, plus mandatory accepted-canary prerequisite and
+report-versus-cancel gating with cleanup-only legacy recovery in `submit.py` and
+`report.py`, with the same sealed prerequisite validated by `worker.py` and
+`train_entry.py` before scientific execution. Fresh canary DAG submission commands,
+scalar dependencies, the wave0 release payload, canary compute worker and Slurm
+scripts, and fresh scientific DAG submission commands and dependency forms remain
+unchanged.
+
 Exact protocols, manifests, inventories, claims, contracts, fingerprints, scheduler
 evidence, and journals for all seven attempts are recorded in order in
 `manifest.superseded_launches`. Launch6's run root contains 629 regular files,

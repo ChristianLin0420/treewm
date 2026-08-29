@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
+import zlib
 
 import numpy as np
 import pytest
@@ -671,6 +675,221 @@ def test_canary1_negative_provenance_rejects_symlink(tmp_path, monkeypatch):
         campaign._validate_canary1_negative_provenance(manifest, tmp_path)
 
 
+def _canary2_fixture_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict, Path]:
+    package = tmp_path / "package"
+    package.mkdir()
+    for name in campaign.ACCEPTED_CANARY_CURRENT_SOURCE_SHA256:
+        shutil.copyfile(PACKAGE / name, package / name)
+    shutil.copyfile(
+        PACKAGE / "canary2_acceptance_provenance.json",
+        package / "canary2_acceptance_provenance.json",
+    )
+    monkeypatch.setattr(campaign, "PACKAGE_RELATIVE", Path("package"))
+    manifest, _lock = contracts()
+    return manifest, package
+
+
+def _rebind_canary2_fixture(
+    manifest: dict,
+    package: Path,
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = (campaign.canonical_json(value) + "\n").encode("ascii")
+    path = package / "canary2_acceptance_provenance.json"
+    path.write_bytes(payload)
+    binding = copy.deepcopy(campaign.ACCEPTED_CANARY_ATTEMPTS[0])
+    binding["raw_sha256"] = hashlib.sha256(payload).hexdigest()
+    binding["canonical_sha256"] = campaign.stable_hash(value)
+    manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "accepted_attempts"
+    ] = [copy.deepcopy(binding)]
+    evidence = manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "production_authorization_evidence"
+    ]
+    evidence["raw_sha256"] = binding["raw_sha256"]
+    evidence["canonical_sha256"] = binding["canonical_sha256"]
+    monkeypatch.setattr(campaign, "ACCEPTED_CANARY_ATTEMPTS", [binding])
+
+
+def test_canary2_acceptance_provenance_is_exact_hermetic_and_authorizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, package = _canary2_fixture_package(tmp_path, monkeypatch)
+    opened: list[Path] = []
+    original = campaign._regular_file_bytes
+
+    def guarded(path: Path, label: str, *, max_bytes: int) -> bytes:
+        candidate = Path(path)
+        assert candidate.is_relative_to(package)
+        assert "outputs" not in candidate.parts
+        opened.append(candidate)
+        return original(candidate, label, max_bytes=max_bytes)
+
+    monkeypatch.setattr(campaign, "_regular_file_bytes", guarded)
+    campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+    assert package / "canary2_acceptance_provenance.json" in opened
+    assert len(opened) == (
+        len(campaign.ACCEPTED_CANARY_CURRENT_SOURCE_SHA256) + 1
+    )
+    evidence = manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "production_authorization_evidence"
+    ]
+    assert evidence["required"] is evidence["satisfied"] is True
+    assert evidence["scientific_runtime_input_consumption_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation,pattern",
+    (
+        ("state-mode", "state file map differs"),
+        ("wave0-token", "runtime/report lineage differs"),
+        ("terminal-state", "scheduler terminal rows differ"),
+        ("owner-stray", "owner-wide zero-stray census envelope differs"),
+        ("reuse", "terminal acceptance/no-reuse conclusion differs"),
+    ),
+)
+def test_canary2_acceptance_rejects_coherently_rebound_semantic_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    pattern: str,
+) -> None:
+    manifest, package = _canary2_fixture_package(tmp_path, monkeypatch)
+    value = json.loads(
+        (package / "canary2_acceptance_provenance.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if mutation == "state-mode":
+        value["terminal_state_file_census"]["files"][
+            "CANARY_AUTHORIZATION.json"
+        ]["mode"] = "0777"
+        state_payload = {
+            "schema_version": 1,
+            "files": value["terminal_state_file_census"]["files"],
+        }
+        changed = campaign.stable_hash(state_payload)
+        value["terminal_state_file_census"][
+            "state_file_map_canonical_sha256"
+        ] = changed
+        binding = manifest["launch_contract"]["real_gpu_two_wave_canary"][
+            "accepted_attempts"
+        ][0]
+        binding["state_file_map_canonical_sha256"] = changed
+    elif mutation == "wave0-token":
+        value["runtime_result"]["wave0_ready"]["record"][
+            "canary_token"
+        ] = "0123456789abcdef"
+    elif mutation == "terminal-state":
+        value["scheduler_terminal_rows"][0][2] = "FAILED"
+        rows = value["scheduler_terminal_rows"]
+        raw = ("\n".join("|".join(row) for row in rows) + "\n").encode("ascii")
+        scheduler = value["scheduler_terminal_observation"]
+        scheduler["raw_stdout"] = raw.decode("ascii")
+        scheduler["raw_stdout_size"] = len(raw)
+        scheduler["raw_stdout_sha256"] = hashlib.sha256(raw).hexdigest()
+        reduced = {
+            "schema_version": 1,
+            "fields": value["scheduler_terminal_rows_schema"].split("|"),
+            "rows": rows,
+        }
+        scheduler["canonical_rows_bytes"] = len(
+            campaign.canonical_json(reduced).encode("ascii")
+        )
+        scheduler["canonical_rows_sha256"] = campaign.stable_hash(reduced)
+    elif mutation == "owner-stray":
+        owner = value["terminal_zero_active_evidence"][
+            "owner_active_scheduler_census"
+        ]
+        compressed = base64.b64decode(owner["raw_stdout_zlib_base64"])
+        raw = zlib.decompress(compressed)
+        row = (
+            "999999|999999|exp23-launch8-canary-b95869841048e511-stray|"
+            "PENDING|treewm-exp23-canary:b95869841048e511"
+        )
+        raw += (row + "\n").encode("ascii")
+        compressed = zlib.compress(raw)
+        owner["raw_stdout_size"] = len(raw)
+        owner["raw_stdout_sha256"] = hashlib.sha256(raw).hexdigest()
+        owner["compressed_stdout_size"] = len(compressed)
+        owner["compressed_stdout_sha256"] = hashlib.sha256(compressed).hexdigest()
+        owner["raw_stdout_zlib_base64"] = base64.b64encode(compressed).decode(
+            "ascii"
+        )
+        owner["matched_rows"] = [row.split("|")]
+        value["terminal_zero_active_evidence"]["stray_topology_job_count"] = 1
+    else:
+        value["acceptance_conclusion"]["reuse_allowed"] = True
+    _rebind_canary2_fixture(manifest, package, value, monkeypatch)
+    if mutation == "state-mode":
+        binding = campaign.ACCEPTED_CANARY_ATTEMPTS[0]
+        binding["state_file_map_canonical_sha256"] = value[
+            "terminal_state_file_census"
+        ]["state_file_map_canonical_sha256"]
+        manifest["launch_contract"]["real_gpu_two_wave_canary"][
+            "accepted_attempts"
+        ] = [copy.deepcopy(binding)]
+    with pytest.raises(campaign.ContractError, match=pattern):
+        campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+
+
+@pytest.mark.parametrize("payload", (b"NaN\n", b"[]\n", b"{\"x\":null}\n"))
+def test_canary2_acceptance_malformed_json_is_always_contract_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    manifest, package = _canary2_fixture_package(tmp_path, monkeypatch)
+    path = package / "canary2_acceptance_provenance.json"
+    path.write_bytes(payload)
+    binding = copy.deepcopy(campaign.ACCEPTED_CANARY_ATTEMPTS[0])
+    binding["raw_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "accepted_attempts"
+    ] = [copy.deepcopy(binding)]
+    manifest["launch_contract"]["real_gpu_two_wave_canary"][
+        "production_authorization_evidence"
+    ]["raw_sha256"] = binding["raw_sha256"]
+    monkeypatch.setattr(campaign, "ACCEPTED_CANARY_ATTEMPTS", [binding])
+    with pytest.raises(campaign.ContractError):
+        campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+
+
+def test_canary2_acceptance_missing_or_symlink_artifact_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, package = _canary2_fixture_package(tmp_path, monkeypatch)
+    artifact = package / "canary2_acceptance_provenance.json"
+    artifact.unlink()
+    with pytest.raises(campaign.ContractError, match="unavailable"):
+        campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+    artifact.symlink_to(PACKAGE / "canary2_acceptance_provenance.json")
+    with pytest.raises(campaign.ContractError, match="regular nonsymlink"):
+        campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+
+
+def test_canary2_acceptance_pins_current_controller_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, package = _canary2_fixture_package(tmp_path, monkeypatch)
+    controller = package / "two_wave_canary.py"
+    controller.write_bytes(controller.read_bytes() + b"\n")
+    with pytest.raises(
+        campaign.ContractError, match="post-acceptance runtime source bytes differ"
+    ):
+        campaign._validate_canary2_acceptance_provenance(manifest, tmp_path)
+
+
+def test_manifest_schema_version_is_an_exact_integer() -> None:
+    manifest, lock = contracts()
+    manifest["schema_version"] = True
+    with pytest.raises(campaign.ContractError, match="manifest schema differs"):
+        campaign.validate_manifest(manifest, lock, REPO)
+
+
 def test_each_matched_pair_differs_only_in_three_audited_weights():
     manifest, lock = contracts()
     cells = campaign.expand_matrix(manifest)
@@ -840,6 +1059,7 @@ def test_protocol_inventory_is_closed_and_deterministic():
         "canary_gpu.slurm",
         "canary_report.slurm",
         "canary1_negative_provenance.json",
+        "canary2_acceptance_provenance.json",
         "launch7_negative_provenance.json",
         "README.md",
         "tests/test_campaign.py",

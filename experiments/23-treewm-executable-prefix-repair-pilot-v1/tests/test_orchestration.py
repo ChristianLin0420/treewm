@@ -1164,8 +1164,12 @@ def test_two_wave_transaction_killpoint_partition_is_fail_closed(submit):
 
 def test_recovery_orders_receipt_reconstruction_before_idempotent_release(submit):
     source = inspect.getsource(submit._recover_transaction_locked)
-    committed = source.index("if _lexical_exists(receipt_path):")
-    ready = source.index("if _lexical_exists(ready_path):")
+    committed = source.index(
+        "if committed_fast_path_allowed and _lexical_exists(receipt_path):"
+    )
+    ready = source.index(
+        "if committed_fast_path_allowed and _lexical_exists(ready_path):"
+    )
     validate_authorization = source.index(
         "_validated_dag_authorization(submission_root, submission_sha256, receipt)",
         ready,
@@ -4152,15 +4156,22 @@ def test_initial_exception_cancels_only_fresh_exact_scheduler_identity(
     canary = load("two_wave_canary")
     canary_source = inspect.getsource(canary.submit_real_canary)
     exception = canary_source.index("except BaseException as exc:")
-    append = canary_source.index(
-        "abort_evidence = submit._initial_exception_reconcile_and_cancel",
-        exception,
+    census = canary_source.index(
+        "submit._recovery_census_rounds(", exception
     )
-    aborted = canary_source.index('"CANARY_ABORTED.json"', append)
-    assert append < aborted
+    marker = canary_source.index(
+        "_seal_historical_recycled_cleanup_observation(", census
+    )
+    cancel = canary_source.index(
+        "submit._append_recovery_cancel_attempt(", marker
+    )
+    aborted = canary_source.index('"CANARY_ABORTED.json"', cancel)
+    assert exception < census < marker < cancel < aborted
 
 
-def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
+def _minimal_recovery_fixture(
+    tmp_path, submit, monkeypatch, *, with_prerequisite=False
+):
     repo = tmp_path / "repo"
     submission = repo / "outputs/run/state/submission"
     snapshot = submission / "source-snapshot/repo"
@@ -4189,6 +4200,19 @@ def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
         },
         **audits,
     }
+    if with_prerequisite:
+        live_manifest = json.loads(
+            (PACKAGE / "manifest.json").read_text(encoding="utf-8")
+        )
+        manifest["launch_contract"] = {
+            "real_gpu_two_wave_canary": live_manifest["launch_contract"][
+                "real_gpu_two_wave_canary"
+            ]
+        }
+        artifact_source = PACKAGE / "canary2_acceptance_provenance.json"
+        artifact_target = package / artifact_source.name
+        artifact_target.write_bytes(artifact_source.read_bytes())
+        artifact_target.chmod(0o444)
     (package / "manifest.json").write_text(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
@@ -4200,6 +4224,10 @@ def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
     snapshot.chmod(0o555)
     observation = scheduler_observation(submit)
     inventory = {"fixture": "f" * 64}
+    if with_prerequisite:
+        inventory[
+            (submit.PACKAGE_RELATIVE / "canary2_acceptance_provenance.json").as_posix()
+        ] = submit.file_sha256(package / "canary2_acceptance_provenance.json")
     contract = {
         "schema_version": 1,
         "status": "sealed_for_submission",
@@ -4220,6 +4248,14 @@ def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
         "scheduler_preclaim": {"scheduler_control_plane": observation},
         "scheduler_fallback_config": {"fixture": True},
     }
+    if with_prerequisite:
+        projection = submit._validated_production_authorization_prerequisite(
+            manifest,
+            allow_missing=False,
+            package_protocol_sha256="e" * 64,
+        )
+        assert projection is not None
+        contract["production_authorization_prerequisite"] = projection
     contract_path = submission / "SUBMISSION_CONTRACT.json"
     submission_sha256 = submit.exclusive_json(contract_path, contract)
     submit.append_journal(
@@ -4279,9 +4315,11 @@ def _minimal_recovery_fixture(tmp_path, submit, monkeypatch):
     return repo, submission, submission_sha256, lock_binding
 
 
-def _committed_recovery_fixture(tmp_path, submit, monkeypatch, *, released=False):
+def _committed_recovery_fixture(
+    tmp_path, submit, monkeypatch, *, released=False, with_prerequisite=False
+):
     repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
-        tmp_path, submit, monkeypatch
+        tmp_path, submit, monkeypatch, with_prerequisite=with_prerequisite
     )
     journal = submission / "journal"
     ids = {"wave0": "7000", "wave1": "8000", "report": "9000"}
@@ -4406,6 +4444,851 @@ def _committed_recovery_fixture(tmp_path, submit, monkeypatch, *, released=False
             submit, "_validated_wave0_release_evidence", lambda *_args, **_kwargs: None
         )
     return repo, submission, submission_sha256, receipt
+
+
+def _live_canary2_prerequisite_fixture(submit):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    value = submit._validated_production_authorization_prerequisite(
+        manifest,
+        allow_missing=False,
+        package_protocol_sha256="f" * 64,
+    )
+    assert value is not None
+    return value
+
+
+@pytest.mark.parametrize(
+    "scheduler_case",
+    (
+        "no-jobs",
+        "no-jobs-missing-scancel",
+        "live-job",
+        "live-job-missing-scontrol",
+        "live-job-committed-latch",
+        "ambiguous",
+    ),
+)
+def test_stale_snapshot_canary_prerequisite_is_cleanup_only_before_commit_or_release(
+    submit, tmp_path, monkeypatch, scheduler_case
+):
+    repo, submission, submission_sha256, _lock = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    # A pre-canary snapshot may already have reached durable READY, but it may
+    # never turn that old authority into a receipt or wave-zero release.
+    submit.append_journal(
+        submission,
+        7,
+        "READY_TO_COMMIT",
+        {
+            "schema_version": 1,
+            "status": "committed_two_wave_dag",
+            "campaign_id": submit.CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "submission_authorization_sha256": "9" * 64,
+            "array": "0-19%20",
+            "wave0_array_job_id": "7000",
+            "wave1_array_job_id": "8000",
+            "report_job_id": "9000",
+            "wave1_dependency": "afterok:7000",
+            "report_dependency": "afterok:8000",
+            "kill_on_invalid_dependency": {"wave1": "yes", "report": "yes"},
+            "within_wave_requeue": False,
+            "wave0_submitted_held": True,
+        },
+    )
+    prerequisite = _live_canary2_prerequisite_fixture(submit)
+    if scheduler_case == "live-job-missing-scontrol":
+        (tmp_path / "scontrol").unlink()
+    if scheduler_case == "no-jobs-missing-scancel":
+        (tmp_path / "scancel").unlink()
+    if scheduler_case == "live-job-committed-latch":
+        submit.exclusive_json(
+            submission / "CANCEL_REQUESTED.json",
+            {
+                "schema_version": 1,
+                "status": "cancel_requested",
+                "campaign_id": submit.CAMPAIGN_ID,
+                "submission_sha256": submission_sha256,
+                "wave0_array_job_id": "7000",
+                "wave1_array_job_id": "8000",
+                "report_job_id": "9000",
+            },
+        )
+    token = submission_sha256[:16]
+    names = {
+        role: f"exp23-launch8-{token}-{role}"
+        for role in ("wave0", "wave1", "report")
+    }
+    comment = f"treewm-exp23:{submission_sha256}"
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls = []
+    wave0_queries = 0
+    active = scheduler_case.startswith("live-job")
+
+    def runner(command, _cwd, _environment, _inherited_fds=()):
+        nonlocal active, wave0_queries
+        values = list(command)
+        calls.append(values)
+        executable = Path(values[0]).name
+        if executable == "squeue":
+            name = next(
+                item.split("=", 1)[1]
+                for item in values
+                if item.startswith("--name=")
+            )
+            if name == names["wave0"]:
+                wave0_queries += 1
+            visible = name == names["wave0"] and (
+                active
+                or (
+                    scheduler_case == "ambiguous"
+                    and wave0_queries in {1, 3}
+                )
+            )
+            stdout = (
+                f"7000|{name}|{user}|PENDING|{comment}\n" if visible else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert executable == "scancel"
+        assert values[1:] == ["7000"]
+        marker = submission / "journal/PREREQUISITE_MISSING.json"
+        assert marker.is_file()
+        marker_value = submit.read_json(marker)
+        assert marker_value["live_verified_job_ids"] == ["7000"]
+        assert marker_value["authorization_allowed"] is False
+        assert not (submission / "SUBMISSION_RECEIPT.json").exists()
+        assert not (submission / "journal/0008_WAVE0_RELEASED.json").exists()
+        active = False
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    if scheduler_case == "ambiguous":
+        with pytest.raises(
+            submit.SubmissionError,
+            match="did not settle",
+        ):
+            submit._recover_transaction_locked(
+                repo,
+                submission,
+                scheduler_runner=runner,
+                live_production_prerequisite=prerequisite,
+                report_cancel_lock_lease=_lock,
+            )
+        assert not any(Path(row[0]).name == "scancel" for row in calls)
+        assert not (submission / "CANCEL_REQUESTED.json").exists()
+        assert not (submission / "journal/PREREQUISITE_MISSING.json").exists()
+        assert not (submission / "journal/9000_RECOVERY_CANCELLED.json").exists()
+        assert not (submission / "journal/9001_PRODUCTION_PREREQUISITE_MISSING.json").exists()
+        assert not (submission / "SUBMISSION_RECEIPT.json").exists()
+        return
+
+    result = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=_lock,
+    )
+    assert result["status"] == (
+        "production_authorization_prerequisite_missing_cleanup_terminal"
+    )
+    cleanup = result["cleanup_recovery"]
+    assert cleanup["live_verified_job_ids"] == (
+        ["7000"] if scheduler_case.startswith("live-job") else []
+    )
+    assert [Path(row[0]).name for row in calls].count("scancel") == (
+        1 if scheduler_case.startswith("live-job") else 0
+    )
+    assert not any(Path(row[0]).name == "scontrol" for row in calls)
+    assert not (submission / "SUBMISSION_RECEIPT.json").exists()
+    assert not (submission / "journal/0008_WAVE0_RELEASED.json").exists()
+    marker = submit.read_json(submission / "journal/PREREQUISITE_MISSING.json")
+    assert marker["authorization_allowed"] is False
+    assert marker["receipt_publication_allowed"] is False
+    assert marker["release_allowed"] is False
+    terminal = submit.read_json(
+        submission / "journal/9001_PRODUCTION_PREREQUISITE_MISSING.json"
+    )
+    assert terminal["recovery_terminal_sha256"] == submit.file_sha256(
+        submission / "journal/9000_RECOVERY_CANCELLED.json"
+    )
+    assert terminal["report_allowed"] is False
+    if scheduler_case == "live-job-committed-latch":
+        retried = submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=prerequisite,
+            report_cancel_lock_lease=_lock,
+        )
+        assert retried["status"] == (
+            "production_authorization_prerequisite_missing_cleanup_terminal"
+        )
+        assert [Path(row[0]).name for row in calls].count("scancel") == 1
+
+
+@pytest.mark.parametrize(
+    "surface", ("contract_missing", "inventory_missing", "artifact_raw_mismatch")
+)
+def test_partial_or_detached_snapshot_canary_prerequisite_fails_before_cleanup_mutation(
+    submit, tmp_path, monkeypatch, surface
+):
+    repo, submission, _old_submission_sha256, _lock = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch, with_prerequisite=True
+    )
+    contract_path = submission / "SUBMISSION_CONTRACT.json"
+    seal_path = submission / "journal/0002_CONTRACT_SEALED.json"
+    contract = submit.read_json(contract_path)
+    artifact_key = (
+        submit.PACKAGE_RELATIVE / "canary2_acceptance_provenance.json"
+    ).as_posix()
+    if surface == "contract_missing":
+        contract.pop("production_authorization_prerequisite")
+    elif surface == "inventory_missing":
+        contract["snapshot_inventory"].pop(artifact_key)
+        contract["snapshot_inventory_sha256"] = submit.stable_hash(
+            contract["snapshot_inventory"]
+        )
+    else:
+        artifact = (
+            Path(contract["snapshot_root"])
+            / submit.PACKAGE_RELATIVE
+            / "canary2_acceptance_provenance.json"
+        )
+        artifact.chmod(0o644)
+        artifact.write_bytes(artifact.read_bytes() + b" ")
+        artifact.chmod(0o444)
+
+    if surface != "artifact_raw_mismatch":
+        contract_path.chmod(0o644)
+        contract_path.write_text(
+            json.dumps(contract, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        contract_path.chmod(0o444)
+        submission_sha256 = submit.file_sha256(contract_path)
+        seal_path.chmod(0o644)
+        seal_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record": "contract_sealed",
+                    "submission_sha256": submission_sha256,
+                    "launch_count": 20,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        seal_path.chmod(0o444)
+    before = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("detached canary evidence must fail before scheduler")
+
+    with pytest.raises(
+        submit.SubmissionError,
+        match="canary authorization binding differs|detached canary authorization",
+    ):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=_live_canary2_prerequisite_fixture(
+                submit
+            ),
+            report_cancel_lock_lease={
+                "path": str(submission / ".REPORT_CANCEL.lock"),
+                "device": 1,
+                "inode": 2,
+                "uid": os.getuid(),
+                "mode": 0o600,
+            },
+        )
+    after = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert calls == []
+    assert not os.path.lexists(submission / "CANCEL_REQUESTED.json")
+    assert not os.path.lexists(submission / "journal/PREREQUISITE_MISSING.json")
+    assert not os.path.lexists(submission / "journal/9000_RECOVERY_CANCELLED.json")
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    ("after-marker", "after-scancel", "after-recovery-terminal"),
+)
+def test_stale_snapshot_prerequisite_cleanup_resumes_every_durable_prefix(
+    submit, tmp_path, monkeypatch, crash_point
+):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    prerequisite = _live_canary2_prerequisite_fixture(submit)
+    name = f"exp23-launch8-{submission_sha256[:16]}-wave0"
+    comment = f"treewm-exp23:{submission_sha256}"
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    active = True
+    calls = []
+
+    def runner(command, _cwd, _environment, _inherited_fds=()):
+        nonlocal active
+        values = list(command)
+        calls.append(values)
+        if Path(values[0]).name == "squeue":
+            queried = next(
+                item.split("=", 1)[1]
+                for item in values
+                if item.startswith("--name=")
+            )
+            stdout = (
+                f"7000|{name}|{user}|PENDING|{comment}\n"
+                if active and queried == name
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert Path(values[0]).name == "scancel"
+        assert values[1:] == ["7000"]
+        assert (submission / "journal/PREREQUISITE_MISSING.json").is_file()
+        active = False
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    original_cancel = submit._append_recovery_cancel_attempt
+    original_append = submit.append_journal
+    if crash_point == "after-marker":
+        def crash_cancel(*_args, **_kwargs):
+            raise RuntimeError("kill after prerequisite marker")
+
+        monkeypatch.setattr(submit, "_append_recovery_cancel_attempt", crash_cancel)
+    else:
+        target = 9000 if crash_point == "after-scancel" else 9001
+
+        def crash_append(root, index, label, payload):
+            if index == target:
+                raise RuntimeError(f"kill before journal {target}")
+            return original_append(root, index, label, payload)
+
+        monkeypatch.setattr(submit, "append_journal", crash_append)
+
+    with pytest.raises(RuntimeError, match="kill"):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=prerequisite,
+            report_cancel_lock_lease=lock_binding,
+        )
+    assert (submission / "journal/PREREQUISITE_MISSING.json").is_file()
+    assert not (submission / "SUBMISSION_RECEIPT.json").exists()
+    assert not (submission / "journal/0008_WAVE0_RELEASED.json").exists()
+
+    monkeypatch.setattr(submit, "_append_recovery_cancel_attempt", original_cancel)
+    monkeypatch.setattr(submit, "append_journal", original_append)
+    recovered = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert recovered["status"] == (
+        "production_authorization_prerequisite_missing_cleanup_terminal"
+    )
+    reused = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert reused["status"] == recovered["status"]
+    assert [Path(row[0]).name for row in calls].count("scancel") == 1
+    assert not any(Path(row[0]).name == "scontrol" for row in calls)
+
+
+def test_stale_snapshot_prerequisite_cleanup_reconciles_residual_reappearance(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    prerequisite = _live_canary2_prerequisite_fixture(submit)
+    name = f"exp23-launch8-{submission_sha256[:16]}-wave0"
+    comment = f"treewm-exp23:{submission_sha256}"
+    user = submit.pwd.getpwuid(os.getuid()).pw_name
+    active_id = "7000"
+    calls = []
+
+    def runner(command, _cwd, _environment, _inherited_fds=()):
+        nonlocal active_id
+        values = list(command)
+        calls.append(values)
+        if Path(values[0]).name == "squeue":
+            queried = next(
+                item.split("=", 1)[1]
+                for item in values
+                if item.startswith("--name=")
+            )
+            stdout = (
+                f"{active_id}|{name}|{user}|PENDING|{comment}\n"
+                if active_id is not None and queried == name
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert Path(values[0]).name == "scancel"
+        assert values[1:] == [active_id]
+        active_id = None
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    first = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert first["status"] == (
+        "production_authorization_prerequisite_missing_cleanup_terminal"
+    )
+    active_id = "7001"
+    second = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert second["status"] == first["status"]
+    assert len(second["cleanup_recovery"]["residual_reconciliation_chain"]) == 1
+    third = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=prerequisite,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert third["status"] == first["status"]
+    assert len(third["cleanup_recovery"]["residual_reconciliation_chain"]) == 1
+    scancels = [
+        row for row in calls if Path(row[0]).name == "scancel"
+    ]
+    assert [row[1:] for row in scancels] == [["7000"], ["7001"]]
+    assert not any(Path(row[0]).name == "scontrol" for row in calls)
+
+
+def test_explicit_existing_root_recovery_precedes_live_manifest_activation(
+    submit, tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    submission = tmp_path / "existing-submission"
+    repo.mkdir()
+    submission.mkdir()
+    calls = []
+
+    def recover(actual_repo, actual_submission):
+        calls.append((actual_repo, actual_submission))
+        return {
+            "status": "production_authorization_prerequisite_missing_cleanup_terminal"
+        }
+
+    monkeypatch.setattr(submit, "recover_transaction", recover)
+    monkeypatch.setattr(
+        submit,
+        "read_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live manifest must not be read before explicit recovery")
+        ),
+    )
+    monkeypatch.setattr(
+        submit,
+        "activate_isolated_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("live runtime must not activate before explicit recovery")
+        ),
+    )
+    assert submit.main(
+        [
+            "--submit",
+            "--repo-root",
+            str(repo),
+            "--submission-root",
+            str(submission),
+        ]
+    ) == 2
+    assert calls == [(repo, submission)]
+
+
+def test_prerequisite_denial_evidence_survives_live_authority_restoration(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, _submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch
+    )
+    valid = _live_canary2_prerequisite_fixture(submit)
+
+    def runner(command, _cwd, _environment, _inherited_fds=()):
+        values = list(command)
+        assert Path(values[0]).name == "squeue"
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    original_append = submit.append_journal
+
+    def crash_before_9000(root, index, label, payload):
+        if index == 9000:
+            raise RuntimeError("kill after stable prerequisite marker")
+        return original_append(root, index, label, payload)
+
+    monkeypatch.setattr(submit, "append_journal", crash_before_9000)
+    with pytest.raises(RuntimeError, match="stable prerequisite marker"):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=(
+                submit._unavailable_live_production_authorization_prerequisite()
+            ),
+            report_cancel_lock_lease=lock_binding,
+        )
+    marker_path = submission / "journal/PREREQUISITE_MISSING.json"
+    marker_before = submit.read_json(marker_path)
+    assert marker_before["live_production_authorization_prerequisite"]["status"] == (
+        "live_production_authorization_prerequisite_unavailable"
+    )
+    monkeypatch.setattr(submit, "append_journal", original_append)
+    recovered = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=valid,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert recovered["status"] == (
+        "production_authorization_prerequisite_missing_cleanup_terminal"
+    )
+    assert submit.read_json(marker_path) == marker_before
+    terminal = submit.read_json(
+        submission / "journal/9001_PRODUCTION_PREREQUISITE_MISSING.json"
+    )
+    assert terminal["live_production_authorization_prerequisite"] == (
+        marker_before["live_production_authorization_prerequisite"]
+    )
+
+
+def test_durable_cleanup_precedence_survives_snapshot_authority_restoration(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, _submission_sha256, lock_binding = _minimal_recovery_fixture(
+        tmp_path, submit, monkeypatch, with_prerequisite=True
+    )
+    contract = submit.read_json(submission / "SUBMISSION_CONTRACT.json")
+    restored = contract["production_authorization_prerequisite"]
+
+    def runner(command, _cwd, _environment, _inherited_fds=()):
+        values = list(command)
+        assert Path(values[0]).name == "squeue"
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    original_append = submit.append_journal
+
+    def crash_before_9000(root, index, label, payload):
+        if index == 9000:
+            raise RuntimeError("kill after no-authority decision")
+        return original_append(root, index, label, payload)
+
+    monkeypatch.setattr(submit, "append_journal", crash_before_9000)
+    with pytest.raises(RuntimeError, match="no-authority decision"):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=(
+                submit._unavailable_live_production_authorization_prerequisite()
+            ),
+            report_cancel_lock_lease=lock_binding,
+        )
+    marker_before = submit.read_json(
+        submission / "journal/PREREQUISITE_MISSING.json"
+    )
+    assert marker_before["prerequisite_denial_reason"] == "live_unavailable"
+    monkeypatch.setattr(submit, "append_journal", original_append)
+    recovered = submit._recover_transaction_locked(
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=restored,
+        report_cancel_lock_lease=lock_binding,
+    )
+    assert recovered["status"] == (
+        "production_authorization_prerequisite_missing_cleanup_terminal"
+    )
+    assert submit.read_json(
+        submission / "journal/PREREQUISITE_MISSING.json"
+    ) == marker_before
+    assert not (submission / "SUBMISSION_RECEIPT.json").exists()
+    assert not (submission / "journal/0008_WAVE0_RELEASED.json").exists()
+
+
+def test_orphan_prerequisite_terminal_blocks_continuation_before_scheduler(
+    submit, tmp_path, monkeypatch
+):
+    repo, submission, _submission_sha256, _receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch, with_prerequisite=True
+    )
+    contract = submit.read_json(submission / "SUBMISSION_CONTRACT.json")
+    prerequisite = contract["production_authorization_prerequisite"]
+    submit.exclusive_json(
+        submission / "journal/9001_PRODUCTION_PREREQUISITE_MISSING.json",
+        {"schema_version": 1, "status": "detached_terminal_fixture"},
+    )
+    before = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("detached prerequisite terminal must precede scheduler")
+
+    with pytest.raises(
+        submit.SubmissionError,
+        match="production prerequisite terminal lacks its durable cleanup prefix",
+    ):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=prerequisite,
+            report_cancel_lock_lease={
+                "path": str(submission / ".REPORT_CANCEL.lock"),
+                "device": 1,
+                "inode": 2,
+                "uid": os.getuid(),
+                "mode": 0o600,
+            },
+        )
+    after = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert calls == []
+    assert not (submission / "CANCEL_REQUESTED.json").exists()
+    assert not (submission / "journal/0008_WAVE0_RELEASED.json").exists()
+
+
+def test_public_recovery_holds_transaction_then_report_cancel_locks(
+    submit, tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    submission = tmp_path / "run/state/submission"
+    repo.mkdir()
+    submission.mkdir(parents=True)
+    prerequisite = {"schema_version": 1, "status": "fixture"}
+    monkeypatch.setattr(
+        submit,
+        "_validated_live_production_authorization_prerequisite",
+        lambda _repo: prerequisite,
+    )
+    observed = {}
+
+    def recover_locked(
+        actual_repo,
+        actual_submission,
+        *,
+        scheduler_runner,
+        live_production_prerequisite,
+        report_cancel_lock_lease,
+    ):
+        observed["repo"] = actual_repo
+        observed["submission"] = actual_submission
+        observed["transaction"] = submit._leased_transaction_lock_binding(
+            scheduler_runner
+        )
+        observed["report"] = dict(report_cancel_lock_lease)
+        assert live_production_prerequisite == prerequisite
+        for binding in (observed["transaction"], observed["report"]):
+            descriptor = os.open(binding["path"], os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(descriptor)
+        return {"status": "fixture"}
+
+    monkeypatch.setattr(submit, "_recover_transaction_locked", recover_locked)
+    assert submit.recover_transaction(repo, submission)["status"] == "fixture"
+    assert observed["repo"] == repo
+    assert observed["submission"] == submission
+    assert observed["transaction"]["path"].endswith(".transaction.lock")
+    assert observed["report"]["path"].endswith(".REPORT_CANCEL.lock")
+
+
+@pytest.mark.parametrize("conflicting_cleanup_prefix", (False, True))
+def test_recovery_honors_report_commit_that_won_shared_lock_before_any_scheduler_call(
+    submit, report, tmp_path, monkeypatch, conflicting_cleanup_prefix
+):
+    repo, submission, submission_sha256, _receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch, with_prerequisite=True
+    )
+    contract = submit.read_json(submission / "SUBMISSION_CONTRACT.json")
+    prerequisite = contract["production_authorization_prerequisite"]
+    def unavailable_live_authority(_root):
+        raise submit.SubmissionError("live package unavailable after report commit")
+
+    monkeypatch.setattr(
+        submit,
+        "_validated_live_production_authorization_prerequisite",
+        unavailable_live_authority,
+    )
+    (tmp_path / "scontrol").unlink()
+    decision_body = {"status": "rejected"}
+    decision = {
+        **decision_body,
+        "gate_sha256": report.stable_hash(decision_body),
+    }
+    report._publish_report_locked(
+        submission,
+        submission_sha256,
+        {"schema_version": 1},
+        decision,
+        {
+            "schema_version": 1,
+            "campaign_id": submit.CAMPAIGN_ID,
+            "submission_sha256": submission_sha256,
+            "production_authorization_prerequisite": prerequisite,
+            "production_authorization_prerequisite_sha256": submit.stable_hash(
+                prerequisite
+            ),
+        },
+    )
+    if conflicting_cleanup_prefix:
+        submit.exclusive_json(
+            submission / "journal/PREREQUISITE_MISSING.json",
+            {"schema_version": 1, "status": "cleanup_only_fixture"},
+        )
+    before = {
+        str(path.relative_to(submission)): submit.file_sha256(path)
+        for path in submission.rglob("*")
+        if path.is_file()
+    }
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("scheduler must not be queried after report commit")
+
+    recover_kwargs = {
+        "scheduler_runner": runner,
+        "live_production_prerequisite": prerequisite,
+        "report_cancel_lock_lease": {
+            "path": str(submission / ".REPORT_CANCEL.lock"),
+            "device": 1,
+            "inode": 2,
+            "uid": os.getuid(),
+            "mode": 0o600,
+        },
+    }
+    if conflicting_cleanup_prefix:
+        with pytest.raises(
+            submit.SubmissionError,
+            match="report conflicts with a durable cancellation/cleanup prefix",
+        ):
+            submit._recover_transaction_locked(
+                repo, submission, **recover_kwargs
+            )
+        after = {
+            str(path.relative_to(submission)): submit.file_sha256(path)
+            for path in submission.rglob("*")
+            if path.is_file()
+        }
+        assert after == before
+        assert calls == []
+        return
+    result = submit._recover_transaction_locked(
+        repo, submission, **recover_kwargs
+    )
+    assert result["status"] == "report_already_committed_before_recovery"
+    assert result["recovery"] == "report_commit_precedence"
+    assert result["scheduler_calls"] == 0
+    assert result["new_jobs_created"] == 0
+    assert result["authorization_allowed"] is False
+    assert result["release_allowed"] is False
+    assert result["report_allowed"] is False
+    assert calls == []
+    assert not os.path.lexists(submission / "CANCEL_REQUESTED.json")
+    assert not os.path.lexists(submission / "journal/PREREQUISITE_MISSING.json")
+
+
+@pytest.mark.parametrize("boundary", ("receipt", "release"))
+def test_recovery_revalidates_canary_prerequisite_at_receipt_and_release_boundaries(
+    submit, tmp_path, monkeypatch, boundary
+):
+    repo, submission, _submission_sha256, _receipt = _committed_recovery_fixture(
+        tmp_path, submit, monkeypatch, with_prerequisite=True
+    )
+    if boundary == "receipt":
+        (submission / "SUBMISSION_RECEIPT.json").unlink()
+    contract = submit.read_json(submission / "SUBMISSION_CONTRACT.json")
+    prerequisite = contract["production_authorization_prerequisite"]
+    drifted = copy.deepcopy(prerequisite)
+    drifted["state_file_map_canonical_sha256"] = "0" * 64
+    observations = (
+        [prerequisite, drifted]
+        if boundary == "receipt"
+        else [prerequisite, prerequisite, drifted]
+    )
+
+    def observe_live(_root):
+        assert observations
+        return observations.pop(0)
+
+    monkeypatch.setattr(
+        submit,
+        "_validated_live_production_authorization_prerequisite",
+        observe_live,
+    )
+    calls = []
+
+    def runner(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("drifted canary authority must precede scheduler mutation")
+
+    with pytest.raises(
+        submit.SubmissionError,
+        match="live production authorization changed",
+    ):
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=prerequisite,
+            report_cancel_lock_lease={
+                "path": str(submission / ".REPORT_CANCEL.lock"),
+                "device": 1,
+                "inode": 2,
+                "uid": os.getuid(),
+                "mode": 0o600,
+            },
+        )
+    assert calls == []
+    assert not os.path.lexists(submission / "journal/CALLING_WAVE0_RELEASE.json")
+    assert not os.path.lexists(submission / "journal/0008_WAVE0_RELEASED.json")
+    if boundary == "receipt":
+        assert not os.path.lexists(submission / "SUBMISSION_RECEIPT.json")
 
 
 @pytest.mark.parametrize("bad_id", (7000, True))
@@ -4606,7 +5489,12 @@ def test_committed_recovery_rejects_mutable_or_raw_rewritten_terminal_prefix(
         raise AssertionError("scheduler must not be reached for invalid authority bytes")
 
     with pytest.raises(submit.SubmissionError, match=pattern):
-        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
+        )
     assert calls == []
 
 
@@ -4636,7 +5524,10 @@ def test_durable_ready_cancel_precedence_needs_no_receipt_or_scheduler_call(
         raise AssertionError("durable cancel precedence must not call the scheduler")
 
     result = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert result["status"] == "committed_two_wave_dag_cancel_requested"
     assert result["recovery"] == "durable_ready_cancel_precedence"
@@ -4679,7 +5570,10 @@ def test_recovery_rejects_one_live_scheduler_id_assigned_to_two_roles_before_mut
     }
     with pytest.raises(submit.SubmissionError, match="multiple roles"):
         submit._recover_transaction_locked(
-            repo, submission, scheduler_runner=runner
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
         )
     after = {
         str(path.relative_to(submission)): submit.file_sha256(path)
@@ -4748,7 +5642,10 @@ def test_recovery_rejects_cross_artifact_duplicate_role_claim_before_scheduler(
     }
     with pytest.raises(submit.SubmissionError, match="multiple roles"):
         submit._recover_transaction_locked(
-            repo, submission, scheduler_runner=runner
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
         )
     after = {
         str(path.relative_to(submission)): submit.file_sha256(path)
@@ -4791,7 +5688,10 @@ def test_full_recovery_never_cancels_unverified_abort_id_and_revalidates_prior(
         return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
 
     result = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert result["durable_claimed_job_ids"] == ["999999"]
     assert result["live_verified_job_ids"] == []
@@ -4818,7 +5718,10 @@ def test_full_recovery_never_cancels_unverified_abort_id_and_revalidates_prior(
         prior_calls = len(calls)
         with pytest.raises(submit.SubmissionError):
             submit._recover_transaction_locked(
-                repo, submission, scheduler_runner=runner
+                repo,
+                submission,
+                scheduler_runner=runner,
+                live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
             )
         assert len(calls) == prior_calls
     terminal_path.chmod(0o600)
@@ -4835,7 +5738,12 @@ def test_full_recovery_never_cancels_unverified_abort_id_and_revalidates_prior(
     terminal_path.chmod(0o444)
     prior_calls = len(calls)
     with pytest.raises(submit.SubmissionError, match="not derived"):
-        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
+        )
     assert len(calls) == prior_calls
 
 
@@ -4920,7 +5828,10 @@ def test_full_recovery_consumes_lost_cancel_response_with_residual_attempt(
         return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
 
     result = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert result["status"] == "recovered_terminal_after_cancel_attempts"
     assert result["durable_claimed_job_ids"] == ["7000", "7999"]
@@ -4937,7 +5848,10 @@ def test_full_recovery_consumes_lost_cancel_response_with_residual_attempt(
     active = True
     prior_calls = len(calls)
     resumed = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert len(calls) - prior_calls == 19
     assert [Path(row[0]).name for row in calls[prior_calls:]].count("scancel") == 1
@@ -4951,7 +5865,10 @@ def test_full_recovery_consumes_lost_cancel_response_with_residual_attempt(
 
     prior_calls = len(calls)
     reused = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert len(calls) - prior_calls == 9
     assert len(reused["residual_reconciliation_chain"]) == 1
@@ -4990,7 +5907,10 @@ def test_full_recovery_consumes_lost_cancel_response_with_residual_attempt(
         prior_calls = len(calls)
         with pytest.raises(submit.SubmissionError, match=expected_error):
             submit._recover_transaction_locked(
-                repo, submission, scheduler_runner=runner
+                repo,
+                submission,
+                scheduler_runner=runner,
+                live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
             )
         assert len(calls) == prior_calls
 
@@ -5046,7 +5966,10 @@ def test_recovery_latch_is_historical_not_delayed_visibility_cancel_authority(
         return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
 
     result = submit._recover_transaction_locked(
-        repo, submission, scheduler_runner=runner
+        repo,
+        submission,
+        scheduler_runner=runner,
+        live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
     )
     assert result["live_verified_job_ids"] == ["7000"]
     assert result["cancelled_live_job_ids"] == ["7000"]
@@ -5088,7 +6011,12 @@ def test_recovery_rejects_writable_historical_latch_before_scheduler_call(
         raise AssertionError("invalid latch must fail before every scheduler call")
 
     with pytest.raises(submit.SubmissionError, match="mode differs"):
-        submit._recover_transaction_locked(repo, submission, scheduler_runner=runner)
+        submit._recover_transaction_locked(
+            repo,
+            submission,
+            scheduler_runner=runner,
+            live_production_prerequisite=submit._UNENFORCED_RECOVERY_TEST_SEAM,
+        )
     assert calls == []
 
 
@@ -5737,7 +6665,12 @@ def test_event_parser_rejects_symlink_hparams(report, tmp_path):
         report.parse_event_files(tmp_path, sampler)
 
 
-def test_report_publication_is_atomic_and_idempotent(report, tmp_path):
+def test_report_publication_is_atomic_and_idempotent(report, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_prerequisite",
+        lambda *_args, **_kwargs: {},
+    )
     bundle = {"schema_version": 1, "cells": []}
     decision = {"status": "rejected", "gate_sha256": "a" * 64}
     provenance = {"schema_version": 1}
@@ -5749,6 +6682,11 @@ def test_report_publication_is_atomic_and_idempotent(report, tmp_path):
 
 
 def test_report_failure_before_rename_publishes_nothing(report, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_prerequisite",
+        lambda *_args, **_kwargs: {},
+    )
     real = report.seal_json
     calls = 0
 
@@ -5772,6 +6710,123 @@ def test_report_failure_before_rename_publishes_nothing(report, tmp_path, monkey
     assert not list(tmp_path.glob(".report.tmp.*"))
 
 
+def test_report_publication_requires_exact_successful_canary_prerequisite(
+    report, submit, tmp_path
+):
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    protocol = (PACKAGE / "protocol.sha256").read_text(encoding="ascii").strip()
+    prerequisite = report._validated_production_authorization_prerequisite(
+        manifest, protocol
+    )
+    assert prerequisite == submit._validated_production_authorization_prerequisite(
+        manifest,
+        allow_missing=False,
+        package_protocol_sha256=protocol,
+    )
+
+    def sealed_submission(name, *, include_prerequisite):
+        submission = tmp_path / name
+        snapshot = submission / "source-snapshot/repo"
+        package = snapshot / report.PACKAGE_RELATIVE
+        package.mkdir(parents=True)
+        inventory = {}
+        for filename in (
+            "manifest.json",
+            "protocol.sha256",
+            "canary2_acceptance_provenance.json",
+        ):
+            source = PACKAGE / filename
+            target = package / filename
+            target.write_bytes(source.read_bytes())
+            target.chmod(0o444)
+            inventory[(report.PACKAGE_RELATIVE / filename).as_posix()] = (
+                report.file_sha256(target)
+            )
+        contract = {
+            "schema_version": 1,
+            "status": "sealed_for_submission",
+            "campaign_id": report.CAMPAIGN_ID,
+            "submission_root": str(submission),
+            "snapshot_root": str(snapshot),
+            "snapshot_inventory": inventory,
+            "snapshot_inventory_sha256": report.stable_hash(inventory),
+            "manifest_sha256": report.stable_hash(manifest),
+            "package_protocol_sha256": protocol,
+        }
+        if include_prerequisite:
+            contract["production_authorization_prerequisite"] = prerequisite
+        submission_sha256 = report.seal_json(
+            submission / "SUBMISSION_CONTRACT.json", contract
+        )
+        return submission, submission_sha256
+
+    submission, submission_sha256 = sealed_submission(
+        "authorized", include_prerequisite=True
+    )
+    provenance = {
+        "schema_version": 1,
+        "campaign_id": report.CAMPAIGN_ID,
+        "submission_sha256": submission_sha256,
+        "production_authorization_prerequisite": prerequisite,
+        "production_authorization_prerequisite_sha256": report.stable_hash(
+            prerequisite
+        ),
+    }
+    decision_body = {"status": "rejected"}
+    decision = {
+        **decision_body,
+        "gate_sha256": report.stable_hash(decision_body),
+    }
+    commit = report.publish_report(
+        submission,
+        submission_sha256,
+        {"schema_version": 1},
+        decision,
+        provenance,
+    )
+    assert commit["status"] == "rejected"
+
+    blocked, blocked_sha256 = sealed_submission(
+        "blocked", include_prerequisite=True
+    )
+    (blocked / "journal").mkdir()
+    report.seal_json(
+        blocked / "journal/PREREQUISITE_MISSING.json",
+        {"schema_version": 1, "status": "cleanup_only"},
+    )
+    blocked_provenance = {
+        **provenance,
+        "submission_sha256": blocked_sha256,
+    }
+    with pytest.raises(report.ReportError, match="cancelled/ambiguous"):
+        report.publish_report(
+            blocked,
+            blocked_sha256,
+            {"schema_version": 1},
+            decision,
+            blocked_provenance,
+        )
+    assert not os.path.lexists(blocked / "report")
+    assert not list(blocked.glob(".report.tmp.*"))
+
+    missing, missing_sha256 = sealed_submission(
+        "missing", include_prerequisite=False
+    )
+    with pytest.raises(report.ReportError, match="contract projection"):
+        report.publish_report(
+            missing,
+            missing_sha256,
+            {"schema_version": 1},
+            decision,
+            {
+                "schema_version": 1,
+                "campaign_id": report.CAMPAIGN_ID,
+                "submission_sha256": missing_sha256,
+            },
+        )
+    assert not os.path.lexists(missing / "report")
+
+
 def test_report_rejects_broken_cancellation_latch(report, tmp_path):
     snapshot = tmp_path / "snapshot"
     submission = tmp_path / "submission"
@@ -5784,8 +6839,13 @@ def test_report_rejects_broken_cancellation_latch(report, tmp_path):
 
 @pytest.mark.parametrize("status", ["accepted_engineering_pilot", "rejected"])
 def test_report_and_cancel_terminal_states_are_mutually_exclusive(
-    report, cancel, tmp_path, status
+    report, cancel, tmp_path, status, monkeypatch
 ):
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_prerequisite",
+        lambda *_args, **_kwargs: {},
+    )
     submission = tmp_path / "submission"
     submission.mkdir()
     body = {"status": status, "reason": "fixture"}
@@ -5813,7 +6873,14 @@ def test_report_and_cancel_terminal_states_are_mutually_exclusive(
     assert not os.path.lexists(other / "report")
 
 
-def test_cancel_rejects_symlink_or_forged_report_terminal(report, cancel, tmp_path):
+def test_cancel_rejects_symlink_or_forged_report_terminal(
+    report, cancel, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_prerequisite",
+        lambda *_args, **_kwargs: {},
+    )
     receipt = {"campaign_id": cancel.CAMPAIGN_ID, "submission_sha256": "a" * 64}
     symlinked = tmp_path / "symlinked"
     symlinked.mkdir()

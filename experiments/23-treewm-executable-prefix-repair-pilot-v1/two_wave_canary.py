@@ -15,7 +15,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shutil
 import stat
 import sys
 from typing import Any, Mapping, Sequence
@@ -49,40 +51,66 @@ def require(condition: bool, message: str) -> None:
         raise CanarySubmissionError(message)
 
 
-def _failed_canary_identities(
+def _lexically_canonical_absolute(path: Path, label: str) -> Path:
+    raw = os.fspath(path)
+    require(
+        path.is_absolute()
+        and not raw.startswith("//")
+        and all(part not in {"", ".", ".."} for part in raw.split("/")[1:]),
+        f"{label} is not a canonical absolute path",
+    )
+    return path
+
+
+def _canonical_repository_root(path: Path) -> Path:
+    root = _lexically_canonical_absolute(path, "canary repository root")
+    try:
+        resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise CanarySubmissionError(f"canary repository root is unavailable: {exc}") from exc
+    require(
+        resolved == root and root.is_dir(),
+        "canary repository root is symlinked or noncanonical",
+    )
+    return root
+
+
+def _historical_canary_identities(
     manifest: Mapping[str, Any],
 ) -> tuple[set[Path], set[str], set[str]]:
     launch = manifest.get("launch_contract")
     require(isinstance(launch, Mapping), "canary launch contract differs")
     canary = launch.get("real_gpu_two_wave_canary")
     require(isinstance(canary, Mapping), "real-GPU canary contract differs")
-    attempts = canary.get("failed_attempts")
-    require(isinstance(attempts, list), "failed canary attempts differ")
+    failed = canary.get("failed_attempts")
+    accepted = canary.get("accepted_attempts")
+    require(isinstance(failed, list), "failed canary attempts differ")
+    require(isinstance(accepted, list), "accepted canary attempts differ")
+    attempts = [*failed, *accepted]
+    require(attempts, "historical canary attempts are absent")
     roots: set[Path] = set()
     tokens: set[str] = set()
     job_ids: set[str] = set()
-    for attempt in attempts:
-        require(isinstance(attempt, Mapping), "failed canary attempt differs")
+    all_job_ids: list[str] = []
+    for attempt_index, attempt in enumerate(attempts):
+        require(isinstance(attempt, Mapping), "historical canary attempt differs")
         raw_root = attempt.get("state_root")
         token = attempt.get("canary_token")
         role_ids = attempt.get("job_ids_by_role")
-        require(
-            type(raw_root) is str
-            and Path(raw_root).is_absolute()
-            and Path(raw_root) == Path(raw_root).absolute()
-            and all(part not in {"", ".", ".."} for part in Path(raw_root).parts[1:]),
-            "failed canary state root differs",
+        require(type(raw_root) is str, "historical canary state root differs")
+        historical_root = _lexically_canonical_absolute(
+            Path(raw_root), "historical canary state root"
         )
         require(
             type(token) is str
             and len(token) == 16
             and all(character in "0123456789abcdef" for character in token),
-            "failed canary token differs",
+            "historical canary token differs",
         )
         require(
             isinstance(role_ids, Mapping)
             and set(role_ids) == {"wave0", "wave1", "report"},
-            "failed canary job identities differ",
+            "historical canary job identities differ",
         )
         flattened: list[str] = []
         for role in ("wave0", "wave1", "report"):
@@ -96,19 +124,29 @@ def _failed_canary_identities(
                     and not value.startswith("0")
                     for value in values
                 ),
-                "failed canary job identities differ",
+                "historical canary job identities differ",
             )
             flattened.extend(values)
+            if attempt_index >= len(failed):
+                require(
+                    len(values) == 1,
+                    "successful historical canary job identities differ",
+                )
         require(
             len(flattened) == len(set(flattened)),
-            "failed canary job identities are not injective",
+            "historical canary job identities are not injective within one attempt",
         )
-        roots.add(Path(raw_root))
+        roots.add(historical_root)
         tokens.add(token)
         job_ids.update(flattened)
+        all_job_ids.extend(flattened)
     require(
         len(roots) == len(tokens) == len(attempts),
-        "failed canary identities are not injective",
+        "historical canary roots or tokens are not globally injective",
+    )
+    require(
+        len(job_ids) == len(all_job_ids),
+        "historical canary job identities are not globally injective",
     )
     return roots, tokens, job_ids
 
@@ -123,7 +161,9 @@ class _CanaryControllerLock:
 
     def __enter__(self) -> "_CanaryControllerLock":
         flags = (
-            (os.O_RDWR | os.O_CREAT) if self.create else os.O_RDONLY
+            (os.O_RDWR | os.O_CREAT | os.O_EXCL)
+            if self.create
+            else os.O_RDONLY
         ) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             descriptor = os.open(self.path, flags, 0o600)
@@ -139,6 +179,7 @@ class _CanaryControllerLock:
                 and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
                 and opened.st_uid == os.getuid()
                 and opened.st_nlink == 1
+                and (not self.create or opened.st_size == 0)
                 and (self.create or stat.S_IMODE(opened.st_mode) == 0o600),
                 "canary controller lock identity differs",
             )
@@ -257,60 +298,7 @@ def description() -> dict[str, Any]:
     }
 
 
-def _prepare_state(
-    repo_root: Path, state_root: Path, manifest: Mapping[str, Any]
-) -> tuple[Path, dict[str, str]]:
-    root = state_root.absolute()
-    require(
-        root == state_root
-        and root.is_absolute()
-        and all(part not in {"", ".", ".."} for part in root.parts[1:]),
-        "canary state root must be an absolute normalized path",
-    )
-    require(root.name.startswith("exp23-launch8-two-wave-canary-"), "canary state root name differs")
-    outputs = (repo_root / "outputs").absolute()
-    require(outputs.is_dir() and not outputs.is_symlink(), "repository outputs root is unavailable or symlinked")
-    dedicated_parent = (repo_root / CANARY_PARENT_RELATIVE).absolute()
-    if not os.path.lexists(dedicated_parent):
-        dedicated_parent.mkdir(mode=0o700)
-    require(
-        dedicated_parent.is_dir()
-        and not dedicated_parent.is_symlink()
-        and root.parent == dedicated_parent,
-        "canary state root is outside its dedicated parent",
-    )
-    forbidden = [Path(str(manifest["paths"]["run_root"])).absolute()]
-    current_lock = Path(str(manifest["paths"]["transaction_lock"]))
-    forbidden.append(
-        (repo_root / current_lock).absolute()
-        if not current_lock.is_absolute()
-        else current_lock.absolute()
-    )
-    for superseded in manifest.get("superseded_launches", []):
-        require(isinstance(superseded, Mapping), "superseded launch contract differs")
-        forbidden.extend(
-            Path(str(superseded[key])).absolute()
-            for key in ("run_root", "submission_root")
-        )
-        if superseded.get("transaction_lock"):
-            lock = Path(str(superseded["transaction_lock"]))
-            forbidden.append(
-                (repo_root / lock).absolute() if not lock.is_absolute() else lock.absolute()
-            )
-    failed_roots, _failed_tokens, _failed_job_ids = _failed_canary_identities(manifest)
-    forbidden.extend(failed_roots)
-    require(
-        all(
-            not root.is_relative_to(path)
-            and not path.is_relative_to(root)
-            and not dedicated_parent.is_relative_to(path)
-            and dedicated_parent != path
-            for path in forbidden
-        ),
-        "canary state namespace overlaps a scientific/superseded/failed-canary namespace",
-    )
-    require(not os.path.lexists(root), "canary state root already exists")
-    root.mkdir(mode=0o700)
+def _populate_canary_state(repo_root: Path, root: Path) -> dict[str, str]:
     (root / "logs").mkdir(mode=0o700)
     source = root / "source"
     source.mkdir(mode=0o700)
@@ -318,11 +306,16 @@ def _prepare_state(
     for name in CANARY_SOURCE_FILES:
         origin = repo_root / PACKAGE_RELATIVE / name
         info = origin.lstat()
-        require(stat.S_ISREG(info.st_mode), f"canary source is unavailable or symlinked: {name}")
+        require(
+            stat.S_ISREG(info.st_mode),
+            f"canary source is unavailable or symlinked: {name}",
+        )
         destination = source / name
         source_descriptor = os.open(
             origin,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
         )
         destination_descriptor: int | None = None
         try:
@@ -380,6 +373,168 @@ def _prepare_state(
                 os.close(destination_descriptor)
             os.close(source_descriptor)
     source.chmod(0o555)
+    return hashes
+
+
+def _remove_pre_scheduler_canary_state(
+    root: Path,
+    *,
+    expected_root_identity: tuple[int, int],
+    controller_lock: _CanaryControllerLock,
+) -> None:
+    info = root.lstat()
+    require(
+        controller_lock.descriptor is not None
+        and stat.S_ISDIR(info.st_mode)
+        and not root.is_symlink()
+        and (info.st_dev, info.st_ino) == expected_root_identity
+        and controller_lock.binding()["path"]
+        == str(root / ".CANARY_CONTROLLER.lock"),
+        "pre-scheduler canary state root changed before rollback",
+    )
+    allowed = {
+        ".CANARY_CONTROLLER.lock",
+        "CANARY_CONTROLLER_IDENTITY.json",
+        "logs",
+        "source",
+        *(f"source/{name}" for name in CANARY_SOURCE_FILES),
+    }
+    observed = {
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+    }
+    require(
+        observed <= allowed
+        and all(not path.is_symlink() for path in root.rglob("*")),
+        "pre-scheduler canary state contains unexpected rollback entries",
+    )
+    source = root / "source"
+    if os.path.lexists(source):
+        source.chmod(0o700)
+    logs = root / "logs"
+    if os.path.lexists(logs):
+        logs.chmod(0o700)
+    root.chmod(0o700)
+    shutil.rmtree(root)
+    require(not os.path.lexists(root), "pre-scheduler canary rollback failed")
+
+
+def _prepare_state(
+    repo_root: Path,
+    state_root: Path,
+    manifest: Mapping[str, Any],
+    *,
+    hold_controller_lock: bool = False,
+) -> (
+    tuple[Path, dict[str, str]]
+    | tuple[Path, dict[str, str], _CanaryControllerLock, tuple[int, int]]
+):
+    repo_root = _canonical_repository_root(repo_root)
+    root = _lexically_canonical_absolute(state_root, "canary state root")
+    require(root.name.startswith("exp23-launch8-two-wave-canary-"), "canary state root name differs")
+    historical_roots, _historical_tokens, _historical_job_ids = (
+        _historical_canary_identities(manifest)
+    )
+    require(
+        all(
+            root != historical
+            and not root.is_relative_to(historical)
+            and not historical.is_relative_to(root)
+            for historical in historical_roots
+        ),
+        "canary state namespace overlaps a historical-canary namespace",
+    )
+    outputs = (repo_root / "outputs").absolute()
+    require(outputs.is_dir() and not outputs.is_symlink(), "repository outputs root is unavailable or symlinked")
+    dedicated_parent = (repo_root / CANARY_PARENT_RELATIVE).absolute()
+    if not os.path.lexists(dedicated_parent):
+        dedicated_parent.mkdir(mode=0o700)
+    require(
+        dedicated_parent.is_dir()
+        and not dedicated_parent.is_symlink()
+        and root.parent == dedicated_parent,
+        "canary state root is outside its dedicated parent",
+    )
+    forbidden = [Path(str(manifest["paths"]["run_root"])).absolute()]
+    current_lock = Path(str(manifest["paths"]["transaction_lock"]))
+    forbidden.append(
+        (repo_root / current_lock).absolute()
+        if not current_lock.is_absolute()
+        else current_lock.absolute()
+    )
+    for superseded in manifest.get("superseded_launches", []):
+        require(isinstance(superseded, Mapping), "superseded launch contract differs")
+        forbidden.extend(
+            Path(str(superseded[key])).absolute()
+            for key in ("run_root", "submission_root")
+        )
+        if superseded.get("transaction_lock"):
+            lock = Path(str(superseded["transaction_lock"]))
+            forbidden.append(
+                (repo_root / lock).absolute() if not lock.is_absolute() else lock.absolute()
+            )
+    forbidden.extend(historical_roots)
+    require(
+        all(
+            not root.is_relative_to(path)
+            and not path.is_relative_to(root)
+            and not dedicated_parent.is_relative_to(path)
+            and dedicated_parent != path
+            for path in forbidden
+        ),
+        "canary state namespace overlaps a scientific/superseded/historical-canary namespace",
+    )
+    require(not os.path.lexists(root), "canary state root already exists")
+    root.mkdir(mode=0o700)
+    controller_lock: _CanaryControllerLock | None = None
+    root_identity: tuple[int, int] | None = None
+    try:
+        created_root = root.lstat()
+        require(
+            stat.S_ISDIR(created_root.st_mode)
+            and not root.is_symlink()
+            and created_root.st_uid == os.getuid(),
+            "new canary state root identity differs",
+        )
+        root_identity = (created_root.st_dev, created_root.st_ino)
+        controller_lock = _CanaryControllerLock(root, create=True)
+        controller_lock.__enter__()
+        hashes = _populate_canary_state(repo_root, root)
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(root_descriptor)
+        finally:
+            os.close(root_descriptor)
+    except BaseException:
+        if controller_lock is not None and controller_lock.descriptor is not None:
+            assert root_identity is not None
+            try:
+                _remove_pre_scheduler_canary_state(
+                    root,
+                    expected_root_identity=root_identity,
+                    controller_lock=controller_lock,
+                )
+            finally:
+                controller_lock.__exit__(None, None, None)
+        elif root_identity is not None:
+            current = root.lstat()
+            require(
+                stat.S_ISDIR(current.st_mode)
+                and (current.st_dev, current.st_ino) == root_identity
+                and not any(root.iterdir()),
+                "new canary state root changed before empty rollback",
+            )
+            root.rmdir()
+        raise
+    assert controller_lock is not None and root_identity is not None
+    if hold_controller_lock:
+        return root, hashes, controller_lock, root_identity
+    controller_lock.__exit__(None, None, None)
     return root, hashes
 
 
@@ -408,6 +563,8 @@ def submit_real_canary(
     scheduler_runner=None,
 ) -> dict[str, Any]:
     require(confirmation == CONFIRMATION, "real GPU canary confirmation phrase differs")
+    repo_root = _canonical_repository_root(repo_root)
+    state_root = _lexically_canonical_absolute(state_root, "canary state root")
     require(
         bool(sys.flags.isolated)
         and bool(sys.flags.no_site)
@@ -449,7 +606,9 @@ def submit_real_canary(
     protocol_sha256 = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
     pinned = Path(str(manifest["paths"]["python"])).resolve(strict=True)
     require(Path(sys.executable).resolve(strict=True) == pinned, "canary controller interpreter is not pinned")
-    _failed_roots, failed_tokens, failed_job_ids = _failed_canary_identities(manifest)
+    _historical_roots, historical_tokens, historical_job_ids = (
+        _historical_canary_identities(manifest)
+    )
     token = secrets.token_hex(8)
     require(
         type(token) is str
@@ -457,50 +616,63 @@ def submit_real_canary(
         and all(character in "0123456789abcdef" for character in token),
         "new canary token syntax differs",
     )
-    require(token not in failed_tokens, "new canary token reuses a failed canary token")
-    root, source_hashes = _prepare_state(repo_root, state_root, manifest)
-    live_source_hashes = {
-        name: submit.file_sha256(repo_root / PACKAGE_RELATIVE / name)
-        for name in CANARY_SOURCE_FILES
-    }
     require(
-        submit.exact_json_equal(live_source_hashes, source_hashes)
-        and campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
-        == protocol_sha256,
-        "canary source/protocol generation changed while snapshotting",
+        token not in historical_tokens,
+        "new canary token reuses a historical canary token",
     )
-    worker = root / "source" / "canary_worker.py"
-    gpu_script = root / "source" / "canary_gpu.slurm"
-    report_script = root / "source" / "canary_report.slurm"
-    execution = manifest["execution"]
-    control_plane = submit._scheduler_contract(execution.get("scheduler_control_plane"))
-    fallback = submit._scheduler_fallback_config(control_plane)
-    authorization = fallback["source_control_plane"]
-    sbatch = str(execution["sbatch"])
-    squeue = str(execution.get("squeue") or (Path(sbatch).parent / "squeue"))
-    scontrol = str(execution["scontrol"])
-    scancel = str(execution["scancel"])
-    for path, label in ((sbatch, "sbatch"), (squeue, "squeue"), (scontrol, "scontrol"), (scancel, "scancel")):
-        submit._regular_nonsymlink(Path(path), f"canary {label}")
-        require(os.access(path, os.X_OK), f"canary {label} is not executable")
-
-    names = {
-        "wave0": f"exp23-launch8-canary-{token}-wave0",
-        "wave1": f"exp23-launch8-canary-{token}-wave1",
-        "report": f"exp23-launch8-canary-{token}-report",
-    }
-    comment = f"treewm-exp23-canary:{token}"
-    known: dict[str, list[str]] = {role: [] for role in names}
-    active_role = "wave0"
-    observations: list[dict[str, Any]] = []
-    controller_lock = _CanaryControllerLock(root, create=True)
-    controller_lock.__enter__()
+    root, source_hashes, controller_lock, pre_scheduler_root_identity = _prepare_state(
+        repo_root,
+        state_root,
+        manifest,
+        hold_controller_lock=True,
+    )
+    controller_identity_published = False
+    pending_response_job_ids: set[str] = set()
     try:
+        live_source_hashes = {
+            name: submit.file_sha256(repo_root / PACKAGE_RELATIVE / name)
+            for name in CANARY_SOURCE_FILES
+        }
+        require(
+            submit.exact_json_equal(live_source_hashes, source_hashes)
+            and campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
+            == protocol_sha256,
+            "canary source/protocol generation changed while snapshotting",
+        )
+        worker = root / "source" / "canary_worker.py"
+        gpu_script = root / "source" / "canary_gpu.slurm"
+        report_script = root / "source" / "canary_report.slurm"
+        execution = manifest["execution"]
+        control_plane = submit._scheduler_contract(
+            execution.get("scheduler_control_plane")
+        )
+        fallback = submit._scheduler_fallback_config(control_plane)
+        authorization = fallback["source_control_plane"]
+        sbatch = str(execution["sbatch"])
+        squeue = str(execution.get("squeue") or (Path(sbatch).parent / "squeue"))
+        scontrol = str(execution["scontrol"])
+        scancel = str(execution["scancel"])
+        for path, label in (
+            (sbatch, "sbatch"),
+            (squeue, "squeue"),
+            (scontrol, "scontrol"),
+            (scancel, "scancel"),
+        ):
+            submit._regular_nonsymlink(Path(path), f"canary {label}")
+            require(os.access(path, os.X_OK), f"canary {label} is not executable")
+
+        names = {
+            "wave0": f"exp23-launch8-canary-{token}-wave0",
+            "wave1": f"exp23-launch8-canary-{token}-wave1",
+            "report": f"exp23-launch8-canary-{token}-report",
+        }
+        comment = f"treewm-exp23-canary:{token}"
+        known: dict[str, list[str]] = {role: [] for role in names}
+        active_role = "wave0"
+        observations: list[dict[str, Any]] = []
         runner = _runner_with_canary_lock_lease(runner, controller_lock)
         controller_lock_binding = controller_lock.binding()
-        submit.exclusive_json(
-            root / "CANARY_CONTROLLER_IDENTITY.json",
-            {
+        controller_identity = {
                 "schema_version": 1,
                 "status": "canary_controller_claimed",
                 "campaign_id": CAMPAIGN_ID,
@@ -516,8 +688,11 @@ def submit_real_canary(
                 "scheduler_control_plane_sha256": submit.stable_hash(
                     authorization
                 ),
-            },
+            }
+        submit.exclusive_json(
+            root / "CANARY_CONTROLLER_IDENTITY.json", controller_identity
         )
+        controller_identity_published = True
         for role, name in names.items():
             submit._assert_job_absent(
                 squeue,
@@ -570,9 +745,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        pending_response_job_ids.add(wave0_id)
         require(
-            wave0_id not in failed_job_ids,
-            "canary scheduler reused a failed canary job ID",
+            wave0_id not in historical_job_ids,
+            "canary scheduler reused a historical canary job ID",
         )
         _require_direct_canary_acceptance(submit, wave0_id, wave0_record, "wave0")
         wave0_record = {**wave0_record, "calling_sha256": wave0_calling_sha256}
@@ -640,9 +816,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        pending_response_job_ids.add(wave1_id)
         require(
-            wave1_id not in failed_job_ids,
-            "canary scheduler reused a failed canary job ID",
+            wave1_id not in historical_job_ids,
+            "canary scheduler reused a historical canary job ID",
         )
         _require_direct_canary_acceptance(submit, wave1_id, wave1_record, "wave1")
         require(
@@ -716,9 +893,10 @@ def submit_real_canary(
             expected_observation=authorization,
             observations=observations,
         )
+        pending_response_job_ids.add(report_id)
         require(
-            report_id not in failed_job_ids,
-            "canary scheduler reused a failed canary job ID",
+            report_id not in historical_job_ids,
+            "canary scheduler reused a historical canary job ID",
         )
         _require_direct_canary_acceptance(submit, report_id, report_record, "report")
         require(
@@ -897,6 +1075,15 @@ def submit_real_canary(
             "wave0_release": release,
         }
     except BaseException as exc:
+        if not controller_identity_published:
+            _remove_pre_scheduler_canary_state(
+                root,
+                expected_root_identity=pre_scheduler_root_identity,
+                controller_lock=controller_lock,
+            )
+            raise CanarySubmissionError(
+                f"real GPU canary failed before durable identity: {exc}"
+            ) from exc
         cancel_context = {
             "schema_version": 1,
             "status": "canary_scheduler_calling",
@@ -906,25 +1093,160 @@ def submit_real_canary(
             "role": "recovery_cancel",
             "controller_lock": controller_lock_binding,
         }
-        abort_evidence = submit._initial_exception_reconcile_and_cancel(
-            exception_job_ids=getattr(exc, "job_ids", ()),
-            active_role=active_role,
-            prior_claimed_ids_by_role=known,
-            role_names=names,
-            squeue=squeue,
-            scancel=scancel,
-            scheduler_comment=comment,
-            cancel_directory=root,
-            cancel_calling_prefix="CANARY_RECOVERY_CANCEL_CALLING",
-            cancel_result_prefix="CANARY_RECOVERY_CANCEL_RESULT",
-            snapshot_root=root,
-            scheduler_runner=runner,
-            control_plane=control_plane,
-            scheduler_fallback=fallback,
-            expected_observation=authorization,
-            scheduler_observations=observations,
-            cancel_context=cancel_context,
+        exception_claims = [
+            *pending_response_job_ids,
+            *getattr(exc, "job_ids", ()),
+        ]
+        require(
+            all(
+                isinstance(item, str)
+                and submit.JOB_ID.fullmatch(item) is not None
+                for item in exception_claims
+            ),
+            "canary abort response claim differs",
         )
+        abort_observations: list[dict[str, Any]] = []
+        reconciliation_errors: list[str] = []
+        try:
+            abort_rounds, abort_authority_by_role = (
+                submit._recovery_census_rounds(
+                    squeue=squeue,
+                    role_names=names,
+                    comment=comment,
+                    cwd=root,
+                    runner=runner,
+                    control_plane=control_plane,
+                    fallback=fallback,
+                    expected_observation=authorization,
+                    observations=abort_observations,
+                )
+            )
+        except BaseException as reconcile_exc:
+            abort_rounds = []
+            abort_authority_by_role = {
+                "wave0": [],
+                "wave1": [],
+                "report": [],
+            }
+            reconciliation_errors.append(repr(reconcile_exc))
+        abort_authority_ids = sorted(
+            {
+                item
+                for values in abort_authority_by_role.values()
+                for item in values
+            },
+            key=int,
+        )
+        recycled_submit_records: list[dict[str, Any]] = []
+        recycled_record = _seal_historical_recycled_cleanup_observation(
+            submit,
+            root,
+            identity=controller_identity,
+            protocol_sha256=protocol_sha256,
+            controller_lock=controller_lock_binding,
+            historical_job_ids=historical_job_ids,
+            phase="initial_submit_abort",
+            prior_terminal_name=None,
+            prior_terminal_sha256=None,
+            live_verified_job_ids_by_role=abort_authority_by_role,
+            pre_cancel_census_rounds=abort_rounds,
+            scheduler_control_plane_observations=abort_observations,
+            cancel_history_length_before=0,
+        )
+        if recycled_record is not None:
+            recycled_submit_records.append(recycled_record)
+        cancel_calling_extra_validator = (
+            _historical_cancel_calling_extra_validator(
+                submit,
+                historical_job_ids=historical_job_ids,
+                recycled_cleanup_records=recycled_submit_records,
+            )
+        )
+        recycled_submit_ids = {
+            item
+            for record in recycled_submit_records
+            for item in record["historical_recycled_job_ids"]
+        }
+        claimed_by_role: dict[str, list[str]] = {
+            "wave0": [],
+            "wave1": [],
+            "report": [],
+        }
+        assigned: dict[str, str] = {}
+        for role in ("wave0", "wave1", "report"):
+            for job_id in abort_authority_by_role[role]:
+                assigned[job_id] = role
+                claimed_by_role[role].append(job_id)
+        for role in ("wave0", "wave1", "report"):
+            for job_id in known[role]:
+                if job_id not in assigned:
+                    assigned[job_id] = role
+                    claimed_by_role[role].append(job_id)
+        for job_id in exception_claims:
+            if job_id not in assigned:
+                assigned[job_id] = active_role
+                claimed_by_role[active_role].append(job_id)
+        claimed_by_role = {
+            role: sorted(set(values), key=int)
+            for role, values in claimed_by_role.items()
+        }
+        claimed_ids = sorted(assigned, key=int)
+        cancellation = None
+        cancellation_error = None
+        cancel_history = submit._validated_recovery_cancel_history(
+            root,
+            calling_prefix="CANARY_RECOVERY_CANCEL_CALLING",
+            result_prefix="CANARY_RECOVERY_CANCEL_RESULT",
+            context=cancel_context,
+            scancel=scancel,
+            expected_control_plane=authorization,
+            fallback=fallback,
+            calling_extra_validator=cancel_calling_extra_validator,
+        )
+        if abort_authority_ids:
+            try:
+                cancel_history, cancellation = (
+                    submit._append_recovery_cancel_attempt(
+                        root,
+                        calling_prefix="CANARY_RECOVERY_CANCEL_CALLING",
+                        result_prefix="CANARY_RECOVERY_CANCEL_RESULT",
+                        context=cancel_context,
+                        scancel=scancel,
+                        job_ids=abort_authority_ids,
+                        cwd=root,
+                        runner=runner,
+                        control_plane=control_plane,
+                        fallback=fallback,
+                        expected_observation=authorization,
+                        observations=abort_observations,
+                        calling_extra=_historical_cancel_calling_extra(
+                            recycled_record
+                        ),
+                        calling_extra_validator=cancel_calling_extra_validator,
+                    )
+                )
+            except BaseException as cancel_exc:
+                cancellation_error = repr(cancel_exc)
+                cancel_history = submit._validated_recovery_cancel_history(
+                    root,
+                    calling_prefix="CANARY_RECOVERY_CANCEL_CALLING",
+                    result_prefix="CANARY_RECOVERY_CANCEL_RESULT",
+                    context=cancel_context,
+                    scancel=scancel,
+                    expected_control_plane=authorization,
+                    fallback=fallback,
+                    calling_extra_validator=cancel_calling_extra_validator,
+                )
+        abort_evidence = {
+            "known_job_ids": claimed_ids,
+            "job_ids_by_role": claimed_by_role,
+            "cancellation_authority_job_ids": abort_authority_ids,
+            "cancellation_authority_job_ids_by_role": abort_authority_by_role,
+            "reconciliation_errors": reconciliation_errors,
+            "cancellation": cancellation,
+            "cancellation_error": cancellation_error,
+            "cancel_attempt_history": cancel_history,
+        }
         abort = {
             "schema_version": 1,
             "status": "two_wave_gpu_canary_aborted",
@@ -945,6 +1267,30 @@ def submit_real_canary(
             "cancellation": abort_evidence["cancellation"],
             "cancellation_error": abort_evidence["cancellation_error"],
             "cancel_attempt_history": abort_evidence["cancel_attempt_history"],
+            "historical_numeric_id_recycled": bool(recycled_submit_records),
+            "historical_recycled_job_ids": sorted(
+                recycled_submit_ids, key=int
+            ),
+            "historical_recycled_job_ids_by_role": {
+                role: sorted(
+                    {
+                        item
+                        for record in recycled_submit_records
+                        for item in record[
+                            "historical_recycled_job_ids_by_role"
+                        ][role]
+                    },
+                    key=int,
+                )
+                for role in ("wave0", "wave1", "report")
+            },
+            "historical_recycled_evidence_sha256": [
+                {
+                    "name": record["raw_name"],
+                    "sha256": record["raw_sha256"],
+                }
+                for record in recycled_submit_records
+            ],
         }
         try:
             submit.exclusive_json(root / "CANARY_ABORTED.json", abort)
@@ -1368,6 +1714,8 @@ def _validated_canary_recovery_result(
     scheduler_control_plane_sha256: str,
     expected_control_plane: Mapping[str, Any],
     scheduler_fallback: Mapping[str, Any],
+    historical_job_ids: set[str],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     fields = {
         "schema_version",
@@ -1395,6 +1743,10 @@ def _validated_canary_recovery_result(
         "scheduler_calls",
         "controller_lock",
         "new_jobs_created",
+        "historical_numeric_id_recycled",
+        "historical_recycled_job_ids",
+        "historical_recycled_job_ids_by_role",
+        "historical_recycled_evidence_sha256",
     }
     require(set(value) == fields, "prior canary recovery fields differ")
     require(
@@ -1424,6 +1776,8 @@ def _validated_canary_recovery_result(
         scancel=scancel,
         expected_control_plane=expected_control_plane,
         scheduler_fallback=scheduler_fallback,
+        historical_job_ids=historical_job_ids,
+        recycled_cleanup_records=recycled_cleanup_records,
     )
     worker = _load_canary_worker(root)
     durable_prefix = _validated_canary_postsubmission_prefix(
@@ -1582,6 +1936,11 @@ def _validated_canary_recovery_result(
         scancel=scancel,
         expected_control_plane=expected_control_plane,
         fallback=scheduler_fallback,
+        calling_extra_validator=_historical_cancel_calling_extra_validator(
+            submit,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
+        ),
     )
     stored_history = value.get("cancel_attempt_history")
     require(
@@ -1591,6 +1950,94 @@ def _validated_canary_recovery_result(
             stored_history, disk_history[: len(stored_history)]
         ),
         "canary recovery cancellation attempt history differs",
+    )
+    raw_recycled_evidence = value.get("historical_recycled_evidence_sha256")
+    require(
+        isinstance(raw_recycled_evidence, list)
+        and len(raw_recycled_evidence) <= len(recycled_cleanup_records),
+        "canary recovery recycled-ID evidence prefix differs",
+    )
+    bound_recycled_records = list(
+        recycled_cleanup_records[: len(raw_recycled_evidence)]
+    )
+    abort_path = root / "CANARY_ABORTED.json"
+    abort_history_length = (
+        len(submit.read_json(abort_path)["cancel_attempt_history"])
+        if os.path.lexists(abort_path)
+        else 0
+    )
+    _require_historical_cancel_phase(
+        submit,
+        root,
+        stored_history,
+        start=abort_history_length,
+        historical_job_ids=historical_job_ids,
+        recycled_cleanup_records=bound_recycled_records,
+        phase="first_recovery",
+        prior_terminal_name=None,
+        prior_terminal_sha256=None,
+        allow_initial_submit_crash=not os.path.lexists(abort_path),
+    )
+    expected_recycled_evidence = [
+        {
+            "name": record["raw_name"],
+            "sha256": record["raw_sha256"],
+        }
+        for record in bound_recycled_records
+    ]
+    bound_recycled_ids = sorted(
+        {
+            item
+            for record in bound_recycled_records
+            for item in record["historical_recycled_job_ids"]
+        },
+        key=int,
+    )
+    bound_recycled_by_role = {
+        role: sorted(
+            {
+                item
+                for record in bound_recycled_records
+                for item in record[
+                    "historical_recycled_job_ids_by_role"
+                ][role]
+            },
+            key=int,
+        )
+        for role in ("wave0", "wave1", "report")
+    }
+    historical_history_ids = {
+        item
+        for attempt in stored_history
+        for item in attempt["job_ids"]
+        if item in historical_job_ids
+    }
+    require(
+        submit.exact_json_equal(
+            raw_recycled_evidence, expected_recycled_evidence
+        )
+        and value.get("historical_recycled_job_ids") == bound_recycled_ids
+        and submit.exact_json_equal(
+            value.get("historical_recycled_job_ids_by_role"),
+            bound_recycled_by_role,
+        )
+        and value.get("historical_numeric_id_recycled")
+        is bool(bound_recycled_ids)
+        and historical_job_ids.intersection(live_flat)
+        <= set(bound_recycled_ids)
+        and {
+            (role, item)
+            for role, values in live.items()
+            for item in values
+            if item in historical_job_ids
+        }
+        <= {
+            (role, item)
+            for role, values in bound_recycled_by_role.items()
+            for item in values
+        }
+        and historical_history_ids <= set(bound_recycled_ids),
+        "canary recovery recycled-ID cleanup binding differs",
     )
     last_attempt = stored_history[-1] if stored_history else None
     require(
@@ -1602,6 +2049,52 @@ def _validated_canary_recovery_result(
         ),
         "canary recovery terminal cancellation mirrors differ",
     )
+    historical_live_by_role = {
+        role: sorted(set(live[role]).intersection(historical_job_ids), key=int)
+        for role in ("wave0", "wave1", "report")
+    }
+    if any(historical_live_by_role.values()):
+        require(stored_history, "canary recovery recycled-ID history is absent")
+        first_recovery_marker = _historical_cancel_marker_for_attempt(
+            submit,
+            root,
+            stored_history[-1],
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=bound_recycled_records,
+        )
+        require(
+            first_recovery_marker is not None
+            and first_recovery_marker["phase"] == "first_recovery"
+            and first_recovery_marker["prior_terminal_name"] is None
+            and first_recovery_marker["prior_terminal_sha256"] is None
+            and first_recovery_marker["cancel_history_length_before"]
+            == len(stored_history) - 1
+            and submit.exact_json_equal(
+                first_recovery_marker[
+                    "historical_recycled_job_ids_by_role"
+                ],
+                historical_live_by_role,
+            )
+            and submit.exact_json_equal(
+                first_recovery_marker["live_verified_job_ids_by_role"], live
+            )
+            and submit.exact_json_equal(
+                first_recovery_marker["pre_cancel_census_rounds"], pre
+            )
+            and submit.exact_json_equal(
+                first_recovery_marker[
+                    "scheduler_control_plane_observations"
+                ],
+                observations[
+                    : len(
+                        first_recovery_marker[
+                            "scheduler_control_plane_observations"
+                        ]
+                    )
+                ],
+            ),
+            "canary recovery recycled-ID marker is not temporally bound",
+        )
     require(
         type(value.get("scheduler_calls")) is int
         and value.get("scheduler_calls") == len(observations),
@@ -1704,6 +2197,8 @@ def _validated_canary_abort(
     scancel: str,
     expected_control_plane: Mapping[str, Any],
     scheduler_fallback: Mapping[str, Any],
+    historical_job_ids: set[str],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
     """Bind an initial exception-path abort to its immutable cancel attempts."""
 
@@ -1724,6 +2219,11 @@ def _validated_canary_abort(
         scancel=scancel,
         expected_control_plane=expected_control_plane,
         fallback=scheduler_fallback,
+        calling_extra_validator=_historical_cancel_calling_extra_validator(
+            submit,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
+        ),
     )
     empty = {"wave0": [], "wave1": [], "report": []}
     path = root / "CANARY_ABORTED.json"
@@ -1753,6 +2253,10 @@ def _validated_canary_abort(
             "cancellation",
             "cancellation_error",
             "cancel_attempt_history",
+            "historical_numeric_id_recycled",
+            "historical_recycled_job_ids",
+            "historical_recycled_job_ids_by_role",
+            "historical_recycled_evidence_sha256",
         }
         and type(value.get("schema_version")) is int
         and value.get("schema_version") == 1
@@ -1832,10 +2336,86 @@ def _validated_canary_abort(
         == sorted(authority_flat, key=int),
         "canary initial abort flat cancellation authority differs",
     )
+    recycled_ids = value.get("historical_recycled_job_ids")
+    recycled_by_role = value.get("historical_recycled_job_ids_by_role")
+    recycled_evidence = value.get("historical_recycled_evidence_sha256")
+    require(
+        isinstance(recycled_ids, list)
+        and all(
+            isinstance(item, str) and submit.JOB_ID.fullmatch(item) is not None
+            for item in recycled_ids
+        )
+        and recycled_ids == sorted(set(recycled_ids), key=int)
+        and set(recycled_ids).issubset(historical_job_ids)
+        and isinstance(recycled_by_role, Mapping)
+        and set(recycled_by_role) == {"wave0", "wave1", "report"}
+        and all(
+            isinstance(values, list)
+            and values == sorted(set(values), key=int)
+            and set(values).issubset(recycled_ids)
+            for values in recycled_by_role.values()
+        )
+        and sorted(
+            {
+                item
+                for values in recycled_by_role.values()
+                for item in values
+            },
+            key=int,
+        )
+        == recycled_ids
+        and sum(len(values) for values in recycled_by_role.values())
+        == len(recycled_ids),
+        "canary initial abort recycled-ID evidence differs",
+    )
+    if recycled_ids:
+        require(
+            value.get("historical_numeric_id_recycled") is True
+            and isinstance(recycled_evidence, list)
+            and bool(recycled_evidence)
+            and all(
+                isinstance(row, Mapping)
+                and set(row) == {"name", "sha256"}
+                and row["name"]
+                == f"CANARY_HISTORICAL_ID_RECYCLED_{index:04d}.json"
+                and isinstance(row["sha256"], str)
+                and len(row["sha256"]) == 64
+                and os.path.lexists(root / row["name"])
+                and submit.file_sha256(root / row["name"]) == row["sha256"]
+                for index, row in enumerate(recycled_evidence)
+            )
+            and historical_job_ids.intersection(authority_flat)
+            <= set(recycled_ids)
+            and {
+                (role, item)
+                for role, values in authority.items()
+                for item in values
+                if item in historical_job_ids
+            }
+            <= {
+                (role, item)
+                for role, values in recycled_by_role.items()
+                for item in values
+            },
+            "canary initial abort recycled-ID evidence differs",
+        )
+    else:
+        require(
+            value.get("historical_numeric_id_recycled") is False
+            and recycled_evidence == []
+            and not historical_job_ids.intersection(authority_flat),
+            "canary initial abort recycled-ID evidence differs",
+        )
     abort_history = value.get("cancel_attempt_history")
     require(
         isinstance(abort_history, list)
         and len(abort_history) <= len(history)
+        and len(abort_history) <= 1
+        and (
+            not abort_history
+            or abort_history[0].get("job_ids")
+            == sorted(authority_flat, key=int)
+        )
         and submit.exact_json_equal(
             abort_history, history[: len(abort_history)]
         )
@@ -1845,12 +2425,611 @@ def _validated_canary_abort(
         ),
         "canary initial abort cancellation history differs",
     )
+    _require_historical_cancel_phase(
+        submit,
+        root,
+        abort_history,
+        start=0,
+        historical_job_ids=historical_job_ids,
+        recycled_cleanup_records=recycled_cleanup_records,
+        phase="initial_submit_abort",
+        prior_terminal_name=None,
+        prior_terminal_sha256=None,
+    )
+    if recycled_ids:
+        require(
+            len(recycled_evidence) == 1,
+            "canary initial abort recycled-ID marker prefix differs",
+        )
+        if abort_history:
+            marker = _historical_cancel_marker_for_attempt(
+                submit,
+                root,
+                abort_history[-1],
+                historical_job_ids=historical_job_ids,
+                recycled_cleanup_records=recycled_cleanup_records,
+            )
+        else:
+            matches = [
+                record
+                for record in recycled_cleanup_records
+                if record["raw_name"] == recycled_evidence[0]["name"]
+                and record["raw_sha256"] == recycled_evidence[0]["sha256"]
+            ]
+            marker = matches[0] if len(matches) == 1 else None
+        require(
+            marker is not None
+            and submit.exact_json_equal(
+                recycled_evidence[0],
+                {
+                    "name": marker["raw_name"],
+                    "sha256": marker["raw_sha256"],
+                },
+            )
+            and marker.get("phase") == "initial_submit_abort"
+            and marker.get("prior_terminal_name") is None
+            and marker.get("prior_terminal_sha256") is None
+            and type(marker.get("cancel_history_length_before")) is int
+            and marker.get("cancel_history_length_before") == 0
+            and submit.exact_json_equal(
+                marker.get("live_verified_job_ids_by_role"), authority
+            )
+            and submit.exact_json_equal(
+                marker.get("historical_recycled_job_ids_by_role"),
+                recycled_by_role,
+            )
+            and (
+                not abort_history
+                or historical_job_ids.intersection(
+                    abort_history[0]["job_ids"]
+                )
+                == set(recycled_ids)
+            ),
+            "canary initial abort recycled-ID marker is not temporally bound",
+        )
     submit._validated_successful_cancellation(
         value,
         scancel,
         list(value["cancellation_authority_job_ids"]),
     )
     return roles, history
+
+
+def _validated_historical_recycled_cleanup_records(
+    submit: Any,
+    root: Path,
+    *,
+    identity: Mapping[str, Any],
+    protocol_sha256: str,
+    role_names: Mapping[str, str],
+    squeue: str,
+    controller_lock: Mapping[str, Any],
+    expected_control_plane: Mapping[str, Any],
+    scheduler_fallback: Mapping[str, Any],
+    historical_job_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Authenticate cleanup-only observations of recycled numeric Slurm IDs."""
+
+    pattern = re.compile(r"CANARY_HISTORICAL_ID_RECYCLED_([0-9]{4})\.json")
+    indices: set[int] = set()
+    for entry in os.scandir(root):
+        match = pattern.fullmatch(entry.name)
+        if match is not None:
+            indices.add(int(match.group(1)))
+    require(
+        indices == set(range(len(indices))),
+        "historical-ID cleanup evidence is not an append-only prefix",
+    )
+    records: list[dict[str, Any]] = []
+    expected_fields = {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "state_root",
+        "canary_token",
+        "controller_identity_sha256",
+        "controller_lock",
+        "package_protocol_sha256",
+        "source_sha256",
+        "generation",
+        "phase",
+        "prior_terminal_name",
+        "prior_terminal_sha256",
+        "live_verified_job_ids",
+        "live_verified_job_ids_by_role",
+        "historical_numeric_id_recycled",
+        "historical_recycled_job_ids",
+        "historical_recycled_job_ids_by_role",
+        "pre_cancel_census_rounds",
+        "scheduler_control_plane_observations",
+        "scheduler_calls",
+        "cancel_history_length_before",
+        "supersedes_unconsumed_evidence",
+        "authorization_allowed",
+        "release_allowed",
+        "resume_allowed",
+        "result_allowed",
+    }
+    for generation in range(len(indices)):
+        path = root / f"CANARY_HISTORICAL_ID_RECYCLED_{generation:04d}.json"
+        submit._regular_nonsymlink(
+            path, f"historical-ID cleanup evidence {generation}"
+        )
+        require(
+            stat.S_IMODE(path.lstat().st_mode) == 0o444,
+            f"historical-ID cleanup evidence {generation} mode differs",
+        )
+        value = submit.read_json(path)
+        require(
+            set(value) == expected_fields
+            and type(value.get("schema_version")) is int
+            and value.get("schema_version") == 1
+            and value.get("status")
+            == "historical_numeric_scheduler_id_cleanup_only"
+            and value.get("campaign_id") == CAMPAIGN_ID
+            and value.get("state_root") == str(root)
+            and value.get("canary_token") == identity["canary_token"]
+            and value.get("controller_identity_sha256")
+            == submit.file_sha256(root / "CANARY_CONTROLLER_IDENTITY.json")
+            and submit.exact_json_equal(
+                value.get("controller_lock"), controller_lock
+            )
+            and value.get("package_protocol_sha256") == protocol_sha256
+            and submit.exact_json_equal(
+                value.get("source_sha256"), identity["source_sha256"]
+            )
+            and type(value.get("generation")) is int
+            and value.get("generation") == generation
+            and value.get("phase")
+            in {"initial_submit_abort", "first_recovery", "residual_recovery"}
+            and (
+                (
+                    value.get("phase")
+                    in {"initial_submit_abort", "first_recovery"}
+                    and value.get("prior_terminal_name") is None
+                    and value.get("prior_terminal_sha256") is None
+                )
+                or (
+                    value.get("phase") == "residual_recovery"
+                    and
+                    isinstance(value.get("prior_terminal_name"), str)
+                    and isinstance(value.get("prior_terminal_sha256"), str)
+                    and re.fullmatch(
+                        r"[0-9a-f]{64}", value["prior_terminal_sha256"]
+                    )
+                    is not None
+                )
+            )
+            and type(value.get("scheduler_calls")) is int
+            and type(value.get("cancel_history_length_before")) is int
+            and value["cancel_history_length_before"] >= 0
+            and (
+                value.get("phase") != "initial_submit_abort"
+                or (
+                    value["cancel_history_length_before"] == 0
+                    and value.get("generation") == 0
+                )
+            )
+            and value.get("historical_numeric_id_recycled") is True
+            and value.get("authorization_allowed") is False
+            and value.get("release_allowed") is False
+            and value.get("resume_allowed") is False
+            and value.get("result_allowed") is False,
+            f"historical-ID cleanup evidence {generation} identity differs",
+        )
+        supersedes = value.get("supersedes_unconsumed_evidence")
+        if supersedes is None:
+            pass
+        else:
+            require(
+                isinstance(supersedes, Mapping)
+                and set(supersedes) == {"name", "sha256"}
+                and re.fullmatch(
+                    r"CANARY_HISTORICAL_ID_RECYCLED_([0-9]{4})\.json",
+                    str(supersedes.get("name")),
+                )
+                is not None,
+                f"historical-ID cleanup evidence {generation} supersession differs",
+            )
+            superseded_generation = int(
+                re.fullmatch(
+                    r"CANARY_HISTORICAL_ID_RECYCLED_([0-9]{4})\.json",
+                    str(supersedes["name"]),
+                ).group(1)
+            )
+            require(
+                superseded_generation < generation
+                and supersedes["sha256"]
+                == records[superseded_generation]["raw_sha256"]
+                and value["cancel_history_length_before"]
+                == records[superseded_generation][
+                    "cancel_history_length_before"
+                ],
+                f"historical-ID cleanup evidence {generation} supersession differs",
+            )
+        if value["phase"] == "residual_recovery":
+            prior_name = value["prior_terminal_name"]
+            require(
+                prior_name == "CANARY_RECOVERY_CANCELLED.json"
+                or re.fullmatch(
+                    r"CANARY_RECOVERY_RECONCILED_[0-9]{4}\.json",
+                    prior_name,
+                )
+                is not None,
+                f"historical-ID cleanup evidence {generation} predecessor differs",
+            )
+            prior_path = root / prior_name
+            submit._regular_nonsymlink(
+                prior_path,
+                f"historical-ID cleanup evidence {generation} predecessor",
+            )
+            require(
+                stat.S_IMODE(prior_path.lstat().st_mode) == 0o444
+                and submit.file_sha256(prior_path)
+                == value["prior_terminal_sha256"],
+                f"historical-ID cleanup evidence {generation} predecessor differs",
+            )
+        attempts = submit._validated_scheduler_attempt_ledger(
+            value.get("scheduler_control_plane_observations"),
+            expected_control_plane=expected_control_plane,
+            fallback=scheduler_fallback,
+        )
+        rounds, reconstructed, cursor = submit._validated_recovery_census_rounds(
+            value.get("pre_cancel_census_rounds"),
+            attempts=attempts,
+            role_names=role_names,
+            squeue=squeue,
+            comment=identity["scheduler_comment"],
+            label=f"historical-ID cleanup evidence {generation}",
+            expected_start=0,
+        )
+        flattened = sorted(
+            {item for values in reconstructed.values() for item in values}, key=int
+        )
+        recycled = sorted(set(flattened).intersection(historical_job_ids), key=int)
+        recycled_by_role = {
+            role: sorted(
+                set(reconstructed[role]).intersection(historical_job_ids), key=int
+            )
+            for role in ("wave0", "wave1", "report")
+        }
+        require(
+            cursor == len(attempts)
+            and value.get("scheduler_calls") == len(attempts)
+            and submit.exact_json_equal(
+                value.get("live_verified_job_ids_by_role"), reconstructed
+            )
+            and value.get("live_verified_job_ids") == flattened
+            and value.get("historical_recycled_job_ids") == recycled
+            and submit.exact_json_equal(
+                value.get("historical_recycled_job_ids_by_role"),
+                recycled_by_role,
+            )
+            and bool(recycled),
+            f"historical-ID cleanup evidence {generation} census differs",
+        )
+        records.append(
+            {
+                **dict(value),
+                "pre_cancel_census_rounds": rounds,
+                "raw_name": path.name,
+                "raw_sha256": submit.file_sha256(path),
+            }
+        )
+    return records
+
+
+def _seal_historical_recycled_cleanup_observation(
+    submit: Any,
+    root: Path,
+    *,
+    identity: Mapping[str, Any],
+    protocol_sha256: str,
+    controller_lock: Mapping[str, Any],
+    historical_job_ids: set[str],
+    phase: str,
+    prior_terminal_name: str | None,
+    prior_terminal_sha256: str | None,
+    live_verified_job_ids_by_role: Mapping[str, list[str]],
+    pre_cancel_census_rounds: list[dict[str, Any]],
+    scheduler_control_plane_observations: list[dict[str, Any]],
+    cancel_history_length_before: int,
+    supersedes_unconsumed_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    rounds_snapshot = json.loads(
+        json.dumps(pre_cancel_census_rounds, allow_nan=False)
+    )
+    observations_snapshot = json.loads(
+        json.dumps(scheduler_control_plane_observations, allow_nan=False)
+    )
+    live_ids = sorted(
+        {
+            item
+            for values in live_verified_job_ids_by_role.values()
+            for item in values
+        },
+        key=int,
+    )
+    recycled = sorted(set(live_ids).intersection(historical_job_ids), key=int)
+    recycled_by_role = {
+        role: sorted(
+            set(live_verified_job_ids_by_role[role]).intersection(
+                historical_job_ids
+            ),
+            key=int,
+        )
+        for role in ("wave0", "wave1", "report")
+    }
+    if not recycled:
+        return None
+    generation = len(
+        [
+            entry
+            for entry in os.scandir(root)
+            if re.fullmatch(
+                r"CANARY_HISTORICAL_ID_RECYCLED_[0-9]{4}\.json",
+                entry.name,
+            )
+        ]
+    )
+    path = root / f"CANARY_HISTORICAL_ID_RECYCLED_{generation:04d}.json"
+    value = {
+        "schema_version": 1,
+        "status": "historical_numeric_scheduler_id_cleanup_only",
+        "campaign_id": CAMPAIGN_ID,
+        "state_root": str(root),
+        "canary_token": identity["canary_token"],
+        "controller_identity_sha256": submit.file_sha256(
+            root / "CANARY_CONTROLLER_IDENTITY.json"
+        ),
+        "controller_lock": dict(controller_lock),
+        "package_protocol_sha256": protocol_sha256,
+        "source_sha256": identity["source_sha256"],
+        "generation": generation,
+        "phase": phase,
+        "prior_terminal_name": prior_terminal_name,
+        "prior_terminal_sha256": prior_terminal_sha256,
+        "live_verified_job_ids": live_ids,
+        "live_verified_job_ids_by_role": dict(live_verified_job_ids_by_role),
+        "historical_numeric_id_recycled": True,
+        "historical_recycled_job_ids": recycled,
+        "historical_recycled_job_ids_by_role": recycled_by_role,
+        "pre_cancel_census_rounds": rounds_snapshot,
+        "scheduler_control_plane_observations": observations_snapshot,
+        "scheduler_calls": len(observations_snapshot),
+        "cancel_history_length_before": cancel_history_length_before,
+        "supersedes_unconsumed_evidence": (
+            {
+                "name": supersedes_unconsumed_record["raw_name"],
+                "sha256": supersedes_unconsumed_record["raw_sha256"],
+            }
+            if supersedes_unconsumed_record is not None
+            else None
+        ),
+        "authorization_allowed": False,
+        "release_allowed": False,
+        "resume_allowed": False,
+        "result_allowed": False,
+    }
+    submit.exclusive_json(path, value)
+    return {
+        **value,
+        "raw_name": path.name,
+        "raw_sha256": submit.file_sha256(path),
+    }
+
+
+def _historical_cancel_calling_extra_validator(
+    submit: Any,
+    *,
+    historical_job_ids: set[str],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]],
+):
+    """Require every recycled-ID scancel intent to name its prior sealed census."""
+
+    def validate(
+        attempt_index: int,
+        calling: Mapping[str, Any],
+        job_ids: Sequence[str],
+        expected_calling: Mapping[str, Any],
+    ) -> None:
+        historical_targets = sorted(
+            set(job_ids).intersection(historical_job_ids), key=int
+        )
+        if not historical_targets:
+            closure = calling.get("closes_unconsumed_recycled_evidence")
+            if closure is not None:
+                require(
+                    set(calling)
+                    == {*expected_calling, "closes_unconsumed_recycled_evidence"}
+                    and isinstance(closure, Mapping)
+                    and set(closure) == {"name", "sha256"}
+                    and len(
+                        [
+                            record
+                            for record in recycled_cleanup_records
+                            if record["raw_name"] == closure.get("name")
+                            and record["raw_sha256"] == closure.get("sha256")
+                            and record["cancel_history_length_before"]
+                            == attempt_index
+                        ]
+                    )
+                    == 1,
+                    f"canary cancellation intent {attempt_index} recycled-ID closure differs",
+                )
+                return
+            require(
+                set(calling) == set(expected_calling),
+                f"canary cancellation intent {attempt_index} has detached recycled-ID evidence",
+            )
+            return
+        require(
+            set(calling)
+            == {*expected_calling, "historical_recycled_evidence"},
+            f"canary cancellation intent {attempt_index} recycled-ID fields differ",
+        )
+        evidence = calling.get("historical_recycled_evidence")
+        require(
+            isinstance(evidence, Mapping)
+            and set(evidence) == {"name", "sha256"},
+            f"canary cancellation intent {attempt_index} recycled-ID evidence differs",
+        )
+        matches = [
+            record
+            for record in recycled_cleanup_records
+            if record["raw_name"] == evidence.get("name")
+            and record["raw_sha256"] == evidence.get("sha256")
+            and record["cancel_history_length_before"] == attempt_index
+            and record["live_verified_job_ids"] == list(job_ids)
+            and record["historical_recycled_job_ids"] == historical_targets
+        ]
+        require(
+            len(matches) == 1,
+            f"canary cancellation intent {attempt_index} is not bound to one prior recycled-ID census",
+        )
+
+    return validate
+
+
+def _historical_cancel_calling_extra(
+    record: Mapping[str, Any] | None,
+    *,
+    closes_unconsumed_record: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    require(
+        record is None or closes_unconsumed_record is None,
+        "canary cancellation intent cannot both supersede and close a marker",
+    )
+    if record is None and closes_unconsumed_record is None:
+        return None
+    if record is None:
+        return {
+            "closes_unconsumed_recycled_evidence": {
+                "name": closes_unconsumed_record["raw_name"],
+                "sha256": closes_unconsumed_record["raw_sha256"],
+            }
+        }
+    return {
+        "historical_recycled_evidence": {
+            "name": record["raw_name"],
+            "sha256": record["raw_sha256"],
+        }
+    }
+
+
+def _historical_cancel_marker_for_attempt(
+    submit: Any,
+    root: Path,
+    attempt: Mapping[str, Any],
+    *,
+    historical_job_ids: set[str],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if not historical_job_ids.intersection(attempt["job_ids"]):
+        return None
+    calling = submit.read_json(root / attempt["calling_name"])
+    evidence = calling.get("historical_recycled_evidence")
+    matches = [
+        record
+        for record in recycled_cleanup_records
+        if isinstance(evidence, Mapping)
+        and record["raw_name"] == evidence.get("name")
+        and record["raw_sha256"] == evidence.get("sha256")
+    ]
+    require(
+        len(matches) == 1,
+        f"canary cancellation intent {attempt['attempt_index']} marker differs",
+    )
+    return matches[0]
+
+
+def _require_historical_cancel_phase(
+    submit: Any,
+    root: Path,
+    history: Sequence[Mapping[str, Any]],
+    *,
+    start: int,
+    historical_job_ids: set[str],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]],
+    phase: str,
+    prior_terminal_name: str | None,
+    prior_terminal_sha256: str | None,
+    allow_initial_submit_crash: bool = False,
+) -> None:
+    for attempt in history[start:]:
+        marker = _historical_cancel_marker_for_attempt(
+            submit,
+            root,
+            attempt,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
+        )
+        if marker is None:
+            continue
+        initial_submit_crash = (
+            allow_initial_submit_crash
+            and attempt["attempt_index"] == 0
+            and marker["phase"] == "initial_submit_abort"
+            and marker["prior_terminal_name"] is None
+            and marker["prior_terminal_sha256"] is None
+        )
+        require(
+            initial_submit_crash
+            or (
+                marker["phase"] == phase
+                and marker["prior_terminal_name"] == prior_terminal_name
+                and marker["prior_terminal_sha256"] == prior_terminal_sha256
+            ),
+            f"canary cancellation intent {attempt['attempt_index']} marker phase/predecessor differs",
+        )
+
+
+def _unconsumed_historical_cleanup_record(
+    submit: Any,
+    root: Path,
+    history: Sequence[Mapping[str, Any]],
+    recycled_cleanup_records: Sequence[Mapping[str, Any]],
+    additional_references: Sequence[Mapping[str, Any]] = (),
+) -> Mapping[str, Any] | None:
+    referenced: set[tuple[str, str]] = set()
+    for attempt in history:
+        calling = submit.read_json(root / attempt["calling_name"])
+        evidence = calling.get("historical_recycled_evidence")
+        if isinstance(evidence, Mapping):
+            referenced.add((str(evidence.get("name")), str(evidence.get("sha256"))))
+        closure = calling.get("closes_unconsumed_recycled_evidence")
+        if isinstance(closure, Mapping):
+            referenced.add((str(closure.get("name")), str(closure.get("sha256"))))
+    for record in recycled_cleanup_records:
+        supersedes = record.get("supersedes_unconsumed_evidence")
+        if isinstance(supersedes, Mapping):
+            referenced.add(
+                (str(supersedes.get("name")), str(supersedes.get("sha256")))
+            )
+    for evidence in additional_references:
+        require(
+            isinstance(evidence, Mapping)
+            and set(evidence) == {"name", "sha256"},
+            "historical-ID terminal evidence reference differs",
+        )
+        referenced.add((str(evidence["name"]), str(evidence["sha256"])))
+    unconsumed = [
+        record
+        for record in recycled_cleanup_records
+        if (record["raw_name"], record["raw_sha256"]) not in referenced
+    ]
+    require(
+        len(unconsumed) <= 1
+        and (
+            not unconsumed
+            or (
+                unconsumed[0] is recycled_cleanup_records[-1]
+                and unconsumed[0]["cancel_history_length_before"] == len(history)
+            )
+        ),
+        "historical-ID cleanup evidence has a detached non-tail marker",
+    )
+    return unconsumed[0] if unconsumed else None
 
 
 def recover_or_cancel_real_canary(
@@ -1863,6 +3042,8 @@ def recover_or_cancel_real_canary(
     """Reconcile/cancel a hard-crashed canary without ever creating a job."""
 
     require(confirmation == CONFIRMATION, "real GPU canary confirmation phrase differs")
+    repo_root = _canonical_repository_root(repo_root)
+    state_root = _lexically_canonical_absolute(state_root, "canary recovery state root")
     require(
         bool(sys.flags.isolated)
         and bool(sys.flags.no_site)
@@ -1897,19 +3078,19 @@ def recover_or_cancel_real_canary(
         submit.exact_json_equal(validated_manifest, manifest),
         "canary recovery manifest validation differs",
     )
-    root = state_root.absolute()
+    root = state_root
     require(
         root == state_root
         and root.parent == (repo_root / CANARY_PARENT_RELATIVE).absolute()
         and root.name.startswith("exp23-launch8-two-wave-canary-"),
         "canary recovery state root differs",
     )
-    failed_roots, failed_tokens, failed_job_ids = _failed_canary_identities(
+    historical_roots, historical_tokens, historical_job_ids = _historical_canary_identities(
         manifest
     )
     require(
-        root not in failed_roots,
-        "failed canary state root cannot be recovered or read",
+        root not in historical_roots,
+        "historical canary state root cannot be recovered or read",
     )
     protocol_sha256 = campaign.verify_protocol_lock(repo_root / PACKAGE_RELATIVE)
     pinned = Path(str(manifest["paths"]["python"])).resolve(strict=True)
@@ -1951,6 +3132,10 @@ def recover_or_cancel_real_canary(
             and identity.get("state_root") == str(root)
             and isinstance(identity.get("canary_token"), str)
             and len(identity["canary_token"]) == 16
+            and all(
+                character in "0123456789abcdef"
+                for character in identity["canary_token"]
+            )
             and identity.get("package_protocol_sha256") == protocol_sha256
             and set(identity.get("source_sha256") or {}) == set(CANARY_SOURCE_FILES),
             "canary controller identity differs",
@@ -1962,8 +3147,8 @@ def recover_or_cancel_real_canary(
             "canary recovery controller-lock lineage differs",
         )
         require(
-            identity["canary_token"] not in failed_tokens,
-            "canary recovery identity reuses a failed canary token",
+            identity["canary_token"] not in historical_tokens,
+            "canary recovery identity reuses a historical canary token",
         )
         require(
             all(
@@ -2008,6 +3193,25 @@ def recover_or_cancel_real_canary(
         for path, label in ((squeue, "squeue"), (scancel, "scancel")):
             submit._regular_nonsymlink(Path(path), f"canary recovery {label}")
             require(os.access(path, os.X_OK), f"canary recovery {label} is not executable")
+        recycled_cleanup_records = _validated_historical_recycled_cleanup_records(
+            submit,
+            root,
+            identity=identity,
+            protocol_sha256=protocol_sha256,
+            role_names=expected_names,
+            squeue=squeue,
+            controller_lock=controller_lock.binding(),
+            expected_control_plane=authorization,
+            scheduler_fallback=fallback,
+            historical_job_ids=historical_job_ids,
+        )
+        cancel_calling_extra_validator = (
+            _historical_cancel_calling_extra_validator(
+                submit,
+                historical_job_ids=historical_job_ids,
+                recycled_cleanup_records=recycled_cleanup_records,
+            )
+        )
         aborted_ids_by_role, existing_cancel_history = _validated_canary_abort(
             submit,
             root,
@@ -2016,21 +3220,29 @@ def recover_or_cancel_real_canary(
             scancel=scancel,
             expected_control_plane=authorization,
             scheduler_fallback=fallback,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
         )
+        recycled_cleanup_ids = {
+            item
+            for record in recycled_cleanup_records
+            for item in record["historical_recycled_job_ids"]
+        }
+        recycled_cleanup_role_ids = {
+            (role, item)
+            for record in recycled_cleanup_records
+            for role, values in record[
+                "historical_recycled_job_ids_by_role"
+            ].items()
+            for item in values
+        }
         require(
             all(
-                not failed_job_ids.intersection(attempt["job_ids"])
+                historical_job_ids.intersection(attempt["job_ids"])
+                <= recycled_cleanup_ids
                 for attempt in existing_cancel_history
             ),
-            "canary recovery cancellation history reuses a failed canary job ID",
-        )
-        require(
-            not failed_job_ids.intersection(
-                item
-                for values in aborted_ids_by_role.values()
-                for item in values
-            ),
-            "canary recovery abort reuses a failed canary job ID",
+            "canary recovery cancellation history lacks recycled-ID cleanup evidence",
         )
         prior_path = root / "CANARY_RECOVERY_CANCELLED.json"
         if os.path.lexists(prior_path):
@@ -2053,17 +3265,31 @@ def recover_or_cancel_real_canary(
                 scheduler_control_plane_sha256=scheduler_control_plane_sha256,
                 expected_control_plane=authorization,
                 scheduler_fallback=fallback,
+                historical_job_ids=historical_job_ids,
+                recycled_cleanup_records=recycled_cleanup_records,
             )
             require(
-                not failed_job_ids.intersection(prior["claimed_job_ids"]),
-                "canary recovery result reuses a failed canary job ID",
-            )
-            require(
-                not failed_job_ids.intersection(prior["live_verified_job_ids"])
-                and not failed_job_ids.intersection(
+                historical_job_ids.intersection(
+                    prior["live_verified_job_ids"]
+                )
+                <= recycled_cleanup_ids
+                and historical_job_ids.intersection(
                     prior["cancelled_live_job_ids"]
-                ),
-                "canary recovery result used a failed canary live job ID",
+                )
+                <= recycled_cleanup_ids,
+                "canary recovery result lacks recycled-ID cleanup evidence",
+            )
+            require(
+                {
+                    (role, item)
+                    for role, values in prior[
+                        "live_verified_job_ids_by_role"
+                    ].items()
+                    for item in values
+                    if item in historical_job_ids
+                }
+                <= recycled_cleanup_role_ids,
+                "canary recovery result changed the recycled-ID cleanup role",
             )
             residual_identity = {
                 "campaign_id": CAMPAIGN_ID,
@@ -2077,6 +3303,178 @@ def recover_or_cancel_real_canary(
                 "durable_prefix_sha256": prior["durable_prefix_sha256"],
                 "controller_lock": controller_lock.binding(),
             }
+
+            def validate_residual_recycled_binding(
+                generation: int, generation_value: Mapping[str, Any]
+            ) -> None:
+                raw_live = generation_value.get("live_verified_job_ids_by_role")
+                require(
+                    isinstance(raw_live, Mapping)
+                    and set(raw_live) == {"wave0", "wave1", "report"},
+                    f"canary residual generation {generation} recycled role map differs",
+                )
+                historical_by_role = {
+                    role: sorted(
+                        set(raw_live[role]).intersection(historical_job_ids),
+                        key=int,
+                    )
+                    for role in ("wave0", "wave1", "report")
+                }
+                raw_historical_by_role = generation_value.get(
+                    "historical_recycled_job_ids_by_role"
+                )
+                evidence = generation_value.get(
+                    "historical_recycled_evidence"
+                )
+                historical_flat = {
+                    item
+                    for values in historical_by_role.values()
+                    for item in values
+                }
+                if not historical_flat:
+                    if evidence is not None:
+                        matches = [
+                            record
+                            for record in recycled_cleanup_records
+                            if isinstance(evidence, Mapping)
+                            and record["raw_name"] == evidence.get("name")
+                            and record["raw_sha256"] == evidence.get("sha256")
+                        ]
+                        generation_history = generation_value.get(
+                            "cancel_attempt_history"
+                        )
+                        require(
+                            len(matches) == 1
+                            and isinstance(generation_history, list)
+                            and matches[0]["phase"] == "residual_recovery"
+                            and matches[0]["prior_terminal_name"]
+                            == generation_value.get("previous_terminal_name")
+                            and matches[0]["prior_terminal_sha256"]
+                            == generation_value.get("previous_terminal_sha256")
+                            and matches[0]["cancel_history_length_before"]
+                            == len(generation_history)
+                            and submit.exact_json_equal(
+                                raw_historical_by_role,
+                                matches[0][
+                                    "historical_recycled_job_ids_by_role"
+                                ],
+                            ),
+                            f"canary residual generation {generation} recycled marker closure differs",
+                        )
+                        return
+                    require(
+                        evidence is None
+                        and submit.exact_json_equal(
+                            raw_historical_by_role,
+                            {"wave0": [], "wave1": [], "report": []},
+                        ),
+                        f"canary residual generation {generation} has detached recycled evidence",
+                    )
+                    return
+                require(
+                    submit.exact_json_equal(
+                        raw_historical_by_role,
+                        historical_by_role,
+                    ),
+                    f"canary residual generation {generation} recycled role binding differs",
+                )
+                require(
+                    isinstance(evidence, Mapping)
+                    and set(evidence) == {"name", "sha256"},
+                    f"canary residual generation {generation} recycled evidence differs",
+                )
+                matches = [
+                    record
+                    for record in recycled_cleanup_records
+                    if record["raw_name"] == evidence.get("name")
+                    and record["raw_sha256"] == evidence.get("sha256")
+                ]
+                require(
+                    len(matches) == 1,
+                    f"canary residual generation {generation} recycled evidence is not exact",
+                )
+                marker = matches[0]
+                marker_observations = marker[
+                    "scheduler_control_plane_observations"
+                ]
+                generation_observations = generation_value.get(
+                    "scheduler_control_plane_observations"
+                )
+                generation_history = generation_value.get(
+                    "cancel_attempt_history"
+                )
+                marker_attempt = (
+                    generation_history[marker["cancel_history_length_before"]]
+                    if isinstance(generation_history, list)
+                    and 0
+                    <= marker["cancel_history_length_before"]
+                    < len(generation_history)
+                    else None
+                )
+                marker_calling = (
+                    submit.read_json(root / marker_attempt["calling_name"])
+                    if isinstance(marker_attempt, Mapping)
+                    else None
+                )
+                require(
+                    marker["phase"] == "residual_recovery"
+                    and marker["prior_terminal_name"]
+                    == generation_value.get("previous_terminal_name")
+                    and marker["prior_terminal_sha256"]
+                    == generation_value.get("previous_terminal_sha256")
+                    and isinstance(generation_history, list)
+                    and marker["cancel_history_length_before"]
+                    == len(generation_history) - 1
+                    and isinstance(marker_calling, Mapping)
+                    and submit.exact_json_equal(
+                        marker_calling.get("historical_recycled_evidence"),
+                        evidence,
+                    )
+                    and submit.exact_json_equal(
+                        marker["live_verified_job_ids_by_role"], raw_live
+                    )
+                    and submit.exact_json_equal(
+                        marker["pre_cancel_census_rounds"],
+                        generation_value.get("pre_cancel_census_rounds"),
+                    )
+                    and isinstance(generation_observations, list)
+                    and submit.exact_json_equal(
+                        marker_observations,
+                        generation_observations[: len(marker_observations)],
+                    ),
+                    f"canary residual generation {generation} recycled temporal binding differs",
+                )
+
+            def validate_residual_phase_chain(
+                chain: Sequence[Mapping[str, Any]],
+            ) -> None:
+                previous_name = prior_path.name
+                previous_sha256 = submit.file_sha256(prior_path)
+                previous_history_length = len(
+                    prior["cancel_attempt_history"]
+                )
+                for generation, generation_value in enumerate(chain):
+                    _require_historical_cancel_phase(
+                        submit,
+                        root,
+                        generation_value["cancel_attempt_history"],
+                        start=previous_history_length,
+                        historical_job_ids=historical_job_ids,
+                        recycled_cleanup_records=recycled_cleanup_records,
+                        phase="residual_recovery",
+                        prior_terminal_name=previous_name,
+                        prior_terminal_sha256=previous_sha256,
+                    )
+                    generation_path = (
+                        root
+                        / f"CANARY_RECOVERY_RECONCILED_{generation:04d}.json"
+                    )
+                    previous_name = generation_path.name
+                    previous_sha256 = submit.file_sha256(generation_path)
+                    previous_history_length = len(
+                        generation_value["cancel_attempt_history"]
+                    )
+
             cancel_context = {
                 "schema_version": 1,
                 "status": "canary_scheduler_calling",
@@ -2105,18 +3503,42 @@ def recover_or_cancel_real_canary(
                 scancel=scancel,
                 expected_control_plane=authorization,
                 scheduler_fallback=fallback,
+                extra_fields=(
+                    "historical_recycled_evidence",
+                    "historical_recycled_job_ids_by_role",
+                ),
+                extra_validator=validate_residual_recycled_binding,
+                cancel_calling_extra_validator=cancel_calling_extra_validator,
+            )
+            validate_residual_phase_chain(residual_chain)
+            require(
+                all(
+                    historical_job_ids.intersection(
+                        generation["live_verified_job_ids"]
+                    )
+                    <= recycled_cleanup_ids
+                    and historical_job_ids.intersection(
+                        generation["cancelled_live_job_ids"]
+                    )
+                    <= recycled_cleanup_ids
+                    for generation in residual_chain
+                ),
+                "canary residual recovery lacks recycled-ID cleanup evidence",
             )
             require(
                 all(
-                    not failed_job_ids.intersection(
-                        generation["live_verified_job_ids"]
-                    )
-                    and not failed_job_ids.intersection(
-                        generation["cancelled_live_job_ids"]
-                    )
+                    {
+                        (role, item)
+                        for role, values in generation[
+                            "live_verified_job_ids_by_role"
+                        ].items()
+                        for item in values
+                        if item in historical_job_ids
+                    }
+                    <= recycled_cleanup_role_ids
                     for generation in residual_chain
                 ),
-                "canary residual recovery used a failed canary live job ID",
+                "canary residual recovery changed the recycled-ID cleanup role",
             )
             bound_history_length = len(
                 (
@@ -2124,6 +3546,55 @@ def recover_or_cancel_real_canary(
                     if residual_chain
                     else prior["cancel_attempt_history"]
                 )
+            )
+            residual_generation = len(residual_chain)
+            previous_path = (
+                root
+                / f"CANARY_RECOVERY_RECONCILED_{residual_generation - 1:04d}.json"
+                if residual_generation
+                else prior_path
+            )
+            terminal_marker_references = [
+                *prior["historical_recycled_evidence_sha256"],
+                *[
+                    generation["historical_recycled_evidence"]
+                    for generation in residual_chain
+                    if generation["historical_recycled_evidence"] is not None
+                ],
+            ]
+            unconsumed_recycled_record = (
+                _unconsumed_historical_cleanup_record(
+                    submit,
+                    root,
+                    existing_cancel_history,
+                    recycled_cleanup_records,
+                    additional_references=terminal_marker_references,
+                )
+            )
+            if unconsumed_recycled_record is not None:
+                require(
+                    unconsumed_recycled_record["phase"]
+                    == "residual_recovery"
+                    and unconsumed_recycled_record[
+                        "prior_terminal_name"
+                    ]
+                    == previous_path.name
+                    and unconsumed_recycled_record[
+                        "prior_terminal_sha256"
+                    ]
+                    == submit.file_sha256(previous_path),
+                    "unconsumed historical-ID marker predecessor differs",
+                )
+            _require_historical_cancel_phase(
+                submit,
+                root,
+                existing_cancel_history,
+                start=bound_history_length,
+                historical_job_ids=historical_job_ids,
+                recycled_cleanup_records=recycled_cleanup_records,
+                phase="residual_recovery",
+                prior_terminal_name=previous_path.name,
+                prior_terminal_sha256=submit.file_sha256(previous_path),
             )
             revalidation_observations: list[dict[str, Any]] = []
             revalidation_rounds, revalidation_active = submit._recovery_census_rounds(
@@ -2145,10 +3616,34 @@ def recover_or_cancel_real_canary(
                 },
                 key=int,
             )
-            require(
-                not failed_job_ids.intersection(revalidation_ids),
-                "canary residual recovery found a failed canary live job ID",
+            recycled_observation = _seal_historical_recycled_cleanup_observation(
+                submit,
+                root,
+                identity=identity,
+                protocol_sha256=protocol_sha256,
+                controller_lock=controller_lock.binding(),
+                historical_job_ids=historical_job_ids,
+                phase="residual_recovery",
+                prior_terminal_name=previous_path.name,
+                prior_terminal_sha256=submit.file_sha256(previous_path),
+                live_verified_job_ids_by_role=revalidation_active,
+                pre_cancel_census_rounds=revalidation_rounds,
+                scheduler_control_plane_observations=revalidation_observations,
+                cancel_history_length_before=len(existing_cancel_history),
+                supersedes_unconsumed_record=unconsumed_recycled_record,
             )
+            if recycled_observation is not None:
+                recycled_cleanup_records.append(recycled_observation)
+                recycled_cleanup_ids.update(
+                    recycled_observation["historical_recycled_job_ids"]
+                )
+                recycled_cleanup_role_ids.update(
+                    (role, item)
+                    for role, values in recycled_observation[
+                        "historical_recycled_job_ids_by_role"
+                    ].items()
+                    for item in values
+                )
             # Historical response/journal IDs are provenance only.  The fresh
             # exact-name/comment/owner census is the sole mutation authority,
             # including when a delayed scheduler acceptance was not present in
@@ -2177,6 +3672,15 @@ def recover_or_cancel_real_canary(
                             fallback=fallback,
                             expected_observation=authorization,
                             observations=revalidation_observations,
+                            calling_extra=_historical_cancel_calling_extra(
+                                recycled_observation,
+                                closes_unconsumed_record=(
+                                    unconsumed_recycled_record
+                                    if recycled_observation is None
+                                    else None
+                                ),
+                            ),
+                            calling_extra_validator=cancel_calling_extra_validator,
                         )
                     )
                     residual_calling_sha256 = residual_history[-1][
@@ -2198,12 +3702,15 @@ def recover_or_cancel_real_canary(
                         == {"wave0": [], "wave1": [], "report": []},
                         "residual canary jobs remain active after cancellation",
                     )
-                generation = len(residual_chain)
-                previous_path = (
-                    root
-                    / f"CANARY_RECOVERY_RECONCILED_{generation - 1:04d}.json"
-                    if generation
-                    else prior_path
+                generation = residual_generation
+                terminal_recycled_record = (
+                    recycled_observation
+                    if recycled_observation is not None
+                    else (
+                        unconsumed_recycled_record
+                        if not revalidation_ids
+                        else None
+                    )
                 )
                 submit.exclusive_json(
                     root
@@ -2235,6 +3742,21 @@ def recover_or_cancel_real_canary(
                         "scheduler_control_plane_observations": revalidation_observations,
                         "scheduler_calls": len(revalidation_observations),
                         "new_jobs_created": 0,
+                        "historical_recycled_evidence": (
+                            {
+                                "name": terminal_recycled_record["raw_name"],
+                                "sha256": terminal_recycled_record["raw_sha256"],
+                            }
+                            if terminal_recycled_record is not None
+                            else None
+                        ),
+                        "historical_recycled_job_ids_by_role": (
+                            terminal_recycled_record[
+                                "historical_recycled_job_ids_by_role"
+                            ]
+                            if terminal_recycled_record is not None
+                            else {"wave0": [], "wave1": [], "report": []}
+                        ),
                     },
                 )
                 residual_chain = submit._validated_residual_recovery_chain(
@@ -2256,15 +3778,58 @@ def recover_or_cancel_real_canary(
                     scancel=scancel,
                     expected_control_plane=authorization,
                     scheduler_fallback=fallback,
+                    extra_fields=(
+                        "historical_recycled_evidence",
+                        "historical_recycled_job_ids_by_role",
+                    ),
+                    extra_validator=validate_residual_recycled_binding,
+                    cancel_calling_extra_validator=cancel_calling_extra_validator,
                 )
+                validate_residual_phase_chain(residual_chain)
             return {
                 **prior,
                 "reused_recovery": True,
                 "residual_reconciliation_chain": residual_chain,
+                "historical_recycled_cleanup_records": recycled_cleanup_records,
                 "revalidation_census_rounds": revalidation_rounds,
                 "revalidation_scheduler_control_plane_observations": revalidation_observations,
                 "recovery_invocation_scheduler_calls": len(revalidation_observations),
             }
+        abort_path = root / "CANARY_ABORTED.json"
+        abort_history_length = (
+            len(submit.read_json(abort_path)["cancel_attempt_history"])
+            if os.path.lexists(abort_path)
+            else 0
+        )
+        unconsumed_recycled_record = _unconsumed_historical_cleanup_record(
+            submit,
+            root,
+            existing_cancel_history,
+            recycled_cleanup_records,
+        )
+        if unconsumed_recycled_record is not None:
+            require(
+                unconsumed_recycled_record["prior_terminal_name"] is None
+                and unconsumed_recycled_record[
+                    "prior_terminal_sha256"
+                ]
+                is None
+                and unconsumed_recycled_record["phase"]
+                in {"initial_submit_abort", "first_recovery"},
+                "unconsumed historical-ID marker phase differs",
+            )
+        _require_historical_cancel_phase(
+            submit,
+            root,
+            existing_cancel_history,
+            start=abort_history_length,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
+            phase="first_recovery",
+            prior_terminal_name=None,
+            prior_terminal_sha256=None,
+            allow_initial_submit_crash=not os.path.lexists(abort_path),
+        )
         journal_names = {
             "wave0": "CANARY_WAVE0_SUBMITTED.json",
             "wave1": "CANARY_WAVE1_SUBMITTED.json",
@@ -2406,6 +3971,7 @@ def recover_or_cancel_real_canary(
                 root=root,
                 authorization=recovery_context,
             )
+        committed_job_ids: set[str] = set()
         for filename in ("CANARY_AUTHORIZATION.json", "CANARY_SUBMISSION_RECEIPT.json"):
             path = root / filename
             if os.path.lexists(path):
@@ -2423,16 +3989,18 @@ def recover_or_cancel_real_canary(
                 )
                 for role, job_id in jobs.items():
                     claimed[role].add(job_id)
+                    committed_job_ids.add(job_id)
         require(
             len({item for values in claimed.values() for item in values})
             == sum(len(values) for values in claimed.values()),
             "canary recovery assigns one durable job ID to multiple roles",
         )
         require(
-            not failed_job_ids.intersection(
-                item for values in claimed.values() for item in values
-            ),
-            "canary recovery durable prefix reuses a failed canary job ID",
+            not historical_job_ids.intersection(
+                record["job_id"] for record in journal_values.values()
+            )
+            and not historical_job_ids.intersection(committed_job_ids),
+            "canary recovery durable prefix reuses a historical canary job ID",
         )
         durable_prefix_sha256 = _validated_canary_postsubmission_prefix(
             submit,
@@ -2460,10 +4028,6 @@ def recover_or_cancel_real_canary(
         active_ids = sorted(
             {job_id for values in active.values() for job_id in values}, key=int
         )
-        require(
-            not failed_job_ids.intersection(active_ids),
-            "canary recovery found a failed canary live job ID",
-        )
         cancel_context = {
             "schema_version": 1,
             "status": "canary_scheduler_calling",
@@ -2478,6 +4042,34 @@ def recover_or_cancel_real_canary(
         cancel_calling_sha256 = None
         post_cancel_rounds: list[dict[str, Any]] = []
         post_cancel_active = {"wave0": [], "wave1": [], "report": []}
+        recycled_observation = _seal_historical_recycled_cleanup_observation(
+            submit,
+            root,
+            identity=identity,
+            protocol_sha256=protocol_sha256,
+            controller_lock=controller_lock.binding(),
+            historical_job_ids=historical_job_ids,
+            phase="first_recovery",
+            prior_terminal_name=None,
+            prior_terminal_sha256=None,
+            live_verified_job_ids_by_role=active,
+            pre_cancel_census_rounds=pre_cancel_rounds,
+            scheduler_control_plane_observations=observations,
+            cancel_history_length_before=len(existing_cancel_history),
+            supersedes_unconsumed_record=unconsumed_recycled_record,
+        )
+        if recycled_observation is not None:
+            recycled_cleanup_records.append(recycled_observation)
+            recycled_cleanup_ids.update(
+                recycled_observation["historical_recycled_job_ids"]
+            )
+            recycled_cleanup_role_ids.update(
+                (role, item)
+                for role, values in recycled_observation[
+                    "historical_recycled_job_ids_by_role"
+                ].items()
+                for item in values
+            )
         if active_ids:
             cancel_history, cancellation = submit._append_recovery_cancel_attempt(
                 root,
@@ -2492,6 +4084,15 @@ def recover_or_cancel_real_canary(
                 fallback=fallback,
                 expected_observation=authorization,
                 observations=observations,
+                calling_extra=_historical_cancel_calling_extra(
+                    recycled_observation,
+                    closes_unconsumed_record=(
+                        unconsumed_recycled_record
+                        if recycled_observation is None
+                        else None
+                    ),
+                ),
+                calling_extra_validator=cancel_calling_extra_validator,
             )
             post_cancel_rounds, post_cancel_active = submit._recovery_census_rounds(
                 squeue=squeue,
@@ -2549,6 +4150,30 @@ def recover_or_cancel_real_canary(
             "new_jobs_created": 0,
             "scheduler_calls": len(observations),
             "controller_lock": controller_lock.binding(),
+            "historical_numeric_id_recycled": bool(recycled_cleanup_records),
+            "historical_recycled_job_ids": sorted(
+                recycled_cleanup_ids, key=int
+            ),
+            "historical_recycled_job_ids_by_role": {
+                role: sorted(
+                    {
+                        item
+                        for record in recycled_cleanup_records
+                        for item in record[
+                            "historical_recycled_job_ids_by_role"
+                        ][role]
+                    },
+                    key=int,
+                )
+                for role in ("wave0", "wave1", "report")
+            },
+            "historical_recycled_evidence_sha256": [
+                {
+                    "name": record["raw_name"],
+                    "sha256": record["raw_sha256"],
+                }
+                for record in recycled_cleanup_records
+            ],
         }
         submit.exclusive_json(prior_path, result)
         validated = _validated_canary_recovery_result(
@@ -2565,6 +4190,8 @@ def recover_or_cancel_real_canary(
             scheduler_control_plane_sha256=scheduler_control_plane_sha256,
             expected_control_plane=authorization,
             scheduler_fallback=fallback,
+            historical_job_ids=historical_job_ids,
+            recycled_cleanup_records=recycled_cleanup_records,
         )
         return {**validated, "reused_recovery": False}
 

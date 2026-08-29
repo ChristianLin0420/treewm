@@ -1043,6 +1043,33 @@ def _smoke_evidence(
     }
 
 
+def _production_prerequisite(protocol: str = "e" * 64) -> dict:
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    canary = manifest["launch_contract"]["real_gpu_two_wave_canary"]
+    attempt = canary["accepted_attempts"][0]
+    evidence = canary["production_authorization_evidence"]
+    return {
+        "schema_version": 1,
+        "status": "canary2_production_authorization_prerequisite_satisfied",
+        "attempt": "canary2",
+        "path": "canary2_acceptance_provenance.json",
+        "raw_sha256": evidence["raw_sha256"],
+        "canonical_sha256": evidence["canonical_sha256"],
+        "report_raw_sha256": evidence["report_raw_sha256"],
+        "source_protocol_sha256": evidence["source_protocol_sha256"],
+        "source_commit": attempt["source_commit"],
+        "state_root": attempt["state_root"],
+        "state_file_map_canonical_sha256": attempt[
+            "state_file_map_canonical_sha256"
+        ],
+        "canary_token": attempt["canary_token"],
+        "job_ids_by_role": copy.deepcopy(attempt["job_ids_by_role"]),
+        "accepted_attempt_sha256": worker.stable_hash(attempt),
+        "production_authorization_evidence_sha256": worker.stable_hash(evidence),
+        "sealed_package_protocol_sha256": protocol,
+    }
+
+
 def _submission(root: Path) -> tuple[Path, str]:
     root.chmod(0o700)
     snapshot = root / "source-snapshot" / "repo"
@@ -1144,6 +1171,7 @@ def _submission(root: Path) -> tuple[Path, str]:
         "launches": launches,
         "array": "0-19%20",
         "fresh_start": True,
+        "production_authorization_prerequisite": _production_prerequisite(),
     }
     path = root / worker.SUBMISSION_CONTRACT_NAME
     _write_json(path, contract)
@@ -1270,6 +1298,68 @@ def test_both_bootstraps_reject_bool_coerced_trainer_smoke_schema(
     )
     assert completed.returncode != 0
     assert "smoke contract differs" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation,pattern",
+    (
+        ("missing", "submission contract fields differ"),
+        ("bool-schema", "production authorization prerequisite differs"),
+        ("numeric-job-id", "production authorization prerequisite differs"),
+    ),
+)
+def test_both_bootstraps_require_exact_production_authorization_prerequisite(
+    tmp_path: Path, mutation: str, pattern: str
+) -> None:
+    root = tmp_path / "submission"
+    root.mkdir()
+    contract_path, _digest = _submission(root)
+    contract_path.chmod(0o600)
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        contract.pop("production_authorization_prerequisite")
+    elif mutation == "bool-schema":
+        contract["production_authorization_prerequisite"]["schema_version"] = True
+    else:
+        contract["production_authorization_prerequisite"]["job_ids_by_role"][
+            "wave0"
+        ] = [33295657]
+    contract_path.write_text(
+        json.dumps(contract, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    contract_path.chmod(0o444)
+    digest = worker.file_sha256(contract_path)
+
+    with pytest.raises(worker.LifecycleError, match=pattern):
+        worker.bootstrap_submission(root, digest)
+    with pytest.raises(train_entry.EntryContractError, match=pattern):
+        train_entry.bootstrap_submission(root, digest)
+
+
+def test_lifecycle_prerequisite_is_bound_to_the_validated_snapshot_manifest() -> None:
+    manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
+    prerequisite = _production_prerequisite()
+    worker._validated_production_authorization_prerequisite(
+        prerequisite, "e" * 64, manifest=manifest
+    )
+    train_entry._validated_production_authorization_prerequisite(
+        prerequisite, "e" * 64, manifest=manifest
+    )
+    prerequisite["raw_sha256"] = "0" * 64
+    with pytest.raises(
+        worker.LifecycleError,
+        match="submission/snapshot production authorization prerequisite differs",
+    ):
+        worker._validated_production_authorization_prerequisite(
+            prerequisite, "e" * 64, manifest=manifest
+        )
+    with pytest.raises(
+        train_entry.EntryContractError,
+        match="submission/snapshot production authorization prerequisite differs",
+    ):
+        train_entry._validated_production_authorization_prerequisite(
+            prerequisite, "e" * 64, manifest=manifest
+        )
 
 
 def test_preimport_revalidation_rejects_mutation_after_initial_snapshot_check(
@@ -1544,6 +1634,9 @@ def test_complete_receipt_status_cannot_be_overwritten() -> None:
 
 def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path: Path) -> None:
     submit = _load("exp23_lifecycle_live_submit", "submit.py")
+    sealed_manifest = json.loads(
+        (PACKAGE / "manifest.json").read_text(encoding="utf-8")
+    )
     audits = {
         "weight_audit": {"artifact_sha256": "1" * 64},
         "prefix_target_contract": {"artifact_sha256": "2" * 64},
@@ -1553,6 +1646,11 @@ def test_live_submit_contract_schema_matches_both_lifecycle_bootstraps(tmp_path:
     manifest = {
         "campaign_id": worker.CAMPAIGN_ID,
         "execution": {"scheduler_control_plane": worker.SCHEDULER_CONTROL_PLANE},
+        "launch_contract": {
+            "real_gpu_two_wave_canary": copy.deepcopy(
+                sealed_manifest["launch_contract"]["real_gpu_two_wave_canary"]
+            )
+        },
         **audits,
     }
     launches = [

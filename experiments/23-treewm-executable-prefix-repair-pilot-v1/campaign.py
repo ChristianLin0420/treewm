@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -14,6 +15,7 @@ import re
 import stat
 import sys
 from typing import Any, Mapping
+import zlib
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -80,6 +82,7 @@ PROTOCOL_FILES = (
     "canary_gpu.slurm",
     "canary_report.slurm",
     "canary1_negative_provenance.json",
+    "canary2_acceptance_provenance.json",
     "launch7_negative_provenance.json",
     "README.md",
     "tests/test_campaign.py",
@@ -138,6 +141,79 @@ FAILED_CANARY_ATTEMPTS = [{
     "recovery_allowed": False,
     "result_consumption_allowed": False,
 }]
+ACCEPTED_CANARY_ATTEMPTS = [{
+    "attempt": "canary2",
+    "path": "canary2_acceptance_provenance.json",
+    "raw_sha256": (
+        "7d1351f6d8fe900cd17698d79a5eff9d24166c1eaf50f08ab9a8ae1ea3a99fa7"
+    ),
+    "canonical_sha256": (
+        "6ee4d943b92b69f8fd3a8a304d2226a7cee1e83140093d65b705250b073ff6e0"
+    ),
+    "status": "terminal_positive_canary_provenance_frozen",
+    "source_commit": "b688ea652e99479ed5d8c6eccd6c137d77f9e03f",
+    "source_protocol_sha256": (
+        "79aaa2b6a9713034dc074c49ecbcf3daa17944c4f89287924fe13ddd3abc93d9"
+    ),
+    "state_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/exp23-launch8-two-wave-canaries/"
+        "exp23-launch8-two-wave-canary-b688ea6-79aaa2b6"
+    ),
+    "canary_token": "b95869841048e511",
+    "job_ids_by_role": {
+        "wave0": ["33295657"],
+        "wave1": ["33295659"],
+        "report": ["33295661"],
+    },
+    "state_file_map_canonical_sha256": (
+        "60dded3399d9b5406418209ffeb5020a09f22778e135c1ad79b3f413f9a7a2ce"
+    ),
+    "report_raw_sha256": (
+        "1d4e00bf032f97434fdcabfe9c1f7601ca06786937b7c7d17c1d199b4a072dfd"
+    ),
+    "scheduler_terminal_rows": 3,
+    "active_scheduler_jobs_after_terminal": 0,
+    "topology_canary_passed": True,
+    "production_authorization_prerequisite_satisfied": True,
+    "reuse_allowed": False,
+    "resume_allowed": False,
+    "retry_allowed": False,
+    "recovery_allowed": False,
+    "checkpoint_consumption_as_scientific_state_allowed": False,
+    "result_consumption_as_scientific_measurement_allowed": False,
+}]
+ACCEPTED_CANARY_CURRENT_SOURCE_SHA256 = {
+    "submit.py": "51671551e331537dc31e87e11423bd6c66e1ce981b1dbb5b85ee48c028160dfa",
+    "worker.py": "321cef217725178eda2a3c8750edd77f187631f1637614fe51fd511776ac6cd9",
+    "report.py": "510b7178f0cfdc7ba62d837dcf64bb20001f3b1828aed286829603742df63057",
+    "dag_evidence.py": "b653ba6b2c25c017144cacb7b4b17ec5f5e153ad504eab47fba101d2c71dd1bb",
+    "train_entry.py": "ac525211824eca20993f696a3e249d3c700b24eefdea48f365c8a997d64a9f33",
+    "train.slurm": "fa66ce7d7dccf626ad434b6f87dfe284a904464701549a99a0dd6e94a695c44a",
+    "report.slurm": "9930e95a9427d1fa55125387effcd1cdd65367b075b586855cd2d1ba34c1a6c9",
+    "canary_worker.py": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d",
+    "canary_gpu.slurm": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+    "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+    "two_wave_canary.py": "2f803ccaac8b4e42e821b884cfe817c7954a013648ebacd0c6fbf4411824bfe9",
+}
+ACCEPTED_CANARY_CONTROLLER_SHA256 = (
+    "b373d64f410f08d1bd692dd9bb9e732a18b06bf80b6b483c313d82d4a6499436"
+)
+ACCEPTED_CANARY_CURRENT_CONTROLLER_SHA256 = (
+    "2f803ccaac8b4e42e821b884cfe817c7954a013648ebacd0c6fbf4411824bfe9"
+)
+ACCEPTED_CANARY_POST_ACCEPTANCE_CHANGE_SCOPE = (
+    "Post-acceptance package changes are limited to canary historical-identity, "
+    "canonical-path, lock/rollback, and cleanup-only recovery guards in "
+    "two_wave_canary.py, plus mandatory accepted-canary prerequisite and "
+    "report-versus-cancel gating with cleanup-only legacy recovery in submit.py "
+    "and report.py and matching prerequisite validation in worker.py and "
+    "train_entry.py; fresh canary DAG submission commands, scalar dependency "
+    "forms, wave0 release payload, canary compute worker and Slurm scripts, and "
+    "fresh scientific DAG submission commands and dependency forms remain "
+    "unchanged"
+)
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -1388,12 +1464,74 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _regular_file_bytes(path: Path, label: str, *, max_bytes: int) -> bytes:
+    require(
+        type(max_bytes) is int and max_bytes >= 0,
+        f"{label} byte boundary differs",
+    )
+    try:
+        named_before = path.lstat()
+        require(
+            stat.S_ISREG(named_before.st_mode) and not path.is_symlink(),
+            f"{label} is not a regular nonsymlink file",
+        )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except ContractError:
+        raise
+    except OSError as exc:
+        raise ContractError(f"{label} is unavailable: {exc}") from exc
+    try:
+        opened_before = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(opened_before.st_mode)
+            and (opened_before.st_dev, opened_before.st_ino)
+            == (named_before.st_dev, named_before.st_ino)
+            and opened_before.st_size <= max_bytes,
+            f"{label} raced before read",
+        )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            block = os.read(descriptor, min(1024 * 1024, remaining))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        payload = b"".join(chunks)
+        opened_after = os.fstat(descriptor)
+        named_after = path.lstat()
+        require(
+            (opened_after.st_dev, opened_after.st_ino, opened_after.st_size)
+            == (opened_before.st_dev, opened_before.st_ino, opened_before.st_size)
+            and opened_after.st_mtime_ns == opened_before.st_mtime_ns
+            and len(payload) == opened_after.st_size
+            and (named_after.st_dev, named_after.st_ino, named_after.st_size)
+            == (opened_after.st_dev, opened_after.st_ino, opened_after.st_size)
+            and named_after.st_mtime_ns == opened_after.st_mtime_ns,
+            f"{label} raced during read",
+        )
+        return payload
+    except OSError as exc:
+        raise ContractError(f"{label} read failed: {exc}") from exc
+    finally:
+        os.close(descriptor)
+
+
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         require(key not in result, f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
@@ -2793,6 +2931,1046 @@ def _validate_canary1_negative_provenance(
     )
 
 
+def _validate_canary2_acceptance_provenance_impl(
+    manifest: Mapping[str, Any], repo: Path
+) -> None:
+    attempts = manifest["launch_contract"]["real_gpu_two_wave_canary"].get(
+        "accepted_attempts"
+    )
+    require(
+        exact_json_equal(attempts, ACCEPTED_CANARY_ATTEMPTS),
+        "successful real-GPU canary binding differs",
+    )
+    binding = ACCEPTED_CANARY_ATTEMPTS[0]
+    require(
+        exact_json_equal(
+            manifest["launch_contract"]["real_gpu_two_wave_canary"].get(
+                "production_authorization_evidence"
+            ),
+            {
+                "required": True,
+                "satisfied": True,
+                "attempt": binding["attempt"],
+                "path": binding["path"],
+                "raw_sha256": binding["raw_sha256"],
+                "canonical_sha256": binding["canonical_sha256"],
+                "source_protocol_sha256": binding["source_protocol_sha256"],
+                "report_raw_sha256": binding["report_raw_sha256"],
+                "artifact_evidence_consumption_allowed": True,
+                "scientific_runtime_input_consumption_allowed": False,
+                "accepted_compute_runtime_source_sha256": {
+                    "canary_gpu.slurm": (
+                        "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14"
+                    ),
+                    "canary_report.slurm": (
+                        "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b"
+                    ),
+                    "canary_worker.py": (
+                        "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d"
+                    ),
+                },
+                "accepted_controller_sha256": ACCEPTED_CANARY_CONTROLLER_SHA256,
+                "post_acceptance_current_controller_sha256": (
+                    ACCEPTED_CANARY_CURRENT_CONTROLLER_SHA256
+                ),
+                "post_acceptance_current_source_sha256": (
+                    ACCEPTED_CANARY_CURRENT_SOURCE_SHA256
+                ),
+                "post_acceptance_change_scope": (
+                    ACCEPTED_CANARY_POST_ACCEPTANCE_CHANGE_SCOPE
+                ),
+                "canary_rerun_required": False,
+            },
+        ),
+        "production canary-acceptance authorization differs",
+    )
+    package = repo / PACKAGE_RELATIVE
+    runtime_source_bytes = {
+        name: _regular_file_bytes(
+            package / name,
+            f"post-acceptance runtime source {name}",
+            max_bytes=4 * 1024 * 1024,
+        )
+        for name in ACCEPTED_CANARY_CURRENT_SOURCE_SHA256
+    }
+    require(
+        all(
+            hashlib.sha256(runtime_source_bytes[name]).hexdigest() == expected
+            for name, expected in (
+                ACCEPTED_CANARY_CURRENT_SOURCE_SHA256.items()
+            )
+        ),
+        "post-acceptance runtime source bytes differ",
+    )
+    failed_roots = {row["state_root"] for row in FAILED_CANARY_ATTEMPTS}
+    failed_tokens = {row["canary_token"] for row in FAILED_CANARY_ATTEMPTS}
+    failed_job_ids = {
+        job_id
+        for row in FAILED_CANARY_ATTEMPTS
+        for values in row["job_ids_by_role"].values()
+        for job_id in values
+    }
+    accepted_job_ids = {
+        job_id
+        for values in binding["job_ids_by_role"].values()
+        for job_id in values
+    }
+    require(
+        binding["state_root"] not in failed_roots
+        and binding["canary_token"] not in failed_tokens
+        and accepted_job_ids.isdisjoint(failed_job_ids),
+        "historical canary identities are not globally injective",
+    )
+    path = package / binding["path"]
+    artifact_payload = _regular_file_bytes(
+        path,
+        "canary2 acceptance provenance",
+        max_bytes=256 * 1024,
+    )
+    require(
+        hashlib.sha256(artifact_payload).hexdigest() == binding["raw_sha256"],
+        "canary2 acceptance provenance raw hash differs",
+    )
+    try:
+        value = json.loads(
+            artifact_payload.decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ContractError(
+            f"canary2 acceptance provenance JSON differs: {exc}"
+        ) from exc
+    require(
+        isinstance(value, dict),
+        "canary2 acceptance provenance JSON root differs",
+    )
+    require(
+        stable_hash(value) == binding["canonical_sha256"],
+        "canary2 acceptance provenance canonical hash differs",
+    )
+    require(
+        set(value)
+        == {
+            "schema_version",
+            "status",
+            "campaign_id",
+            "canary_attempt",
+            "scientific",
+            "observed_at_utc",
+            "scope",
+            "canonical_reconstruction",
+            "immutable_identity",
+            "terminal_state_file_census",
+            "durable_topology",
+            "runtime_result",
+            "scheduler_terminal_rows_schema",
+            "scheduler_terminal_rows",
+            "scheduler_terminal_observation",
+            "terminal_zero_active_evidence",
+            "absent_durable_artifacts",
+            "acceptance_conclusion",
+        }
+        and type(value["schema_version"]) is int
+        and value["schema_version"] == 1
+        and value["status"] == binding["status"]
+        and value["campaign_id"] == manifest["campaign_id"]
+        and value["canary_attempt"] == binding["attempt"]
+        and value["scientific"] is False
+        and value["observed_at_utc"] == "2026-08-28T23:28:04Z"
+        and value["scope"]
+        == (
+            "Terminal positive evidence for the non-scientific Launch8 two-wave "
+            "real-GPU topology canary. This evidence is a required production-"
+            "authorization prerequisite, but the canary namespace, checkpoint, "
+            "token, and scheduler job identities are permanently evidence-only "
+            "and may never be consumed as scientific state."
+        ),
+        "canary2 acceptance provenance envelope differs",
+    )
+    require(
+        exact_json_equal(
+            value["canonical_reconstruction"],
+            {
+                "canonical_json": (
+                    "UTF-8 JSON with ensure_ascii=true, allow_nan=false, object keys "
+                    "sorted lexicographically, separators comma and colon, and no "
+                    "trailing newline."
+                ),
+                "state_file_map_payload": (
+                    "Hash canonical JSON of {schema_version:1,files:"
+                    "{state_root_relative_path:{mode,sha256,size}}}; mode is a "
+                    "four-digit octal string, size is the exact raw byte count, and "
+                    "sha256 is the raw-file SHA-256."
+                ),
+                "scheduler_rows_payload": (
+                    "Split every nonempty raw stdout line on '|' into a 14-string "
+                    "array without dropping the final Comment field, then hash "
+                    "canonical JSON of {schema_version:1,fields:"
+                    "scheduler_terminal_rows_schema.split('|'),rows:"
+                    "scheduler_terminal_rows}."
+                ),
+                "scheduler_raw_stdout_payload": (
+                    "scheduler_terminal_observation.raw_stdout is the exact UTF-8 "
+                    "stdout byte sequence, including its final newline; its size and "
+                    "SHA-256 are independently bound."
+                ),
+                "owner_scheduler_census_payload": (
+                    "Base64-decode and zlib-decompress terminal_zero_active_evidence."
+                    "owner_active_scheduler_census.raw_stdout_zlib_base64 to recover "
+                    "the exact owner-wide squeue stdout; verify its byte size and "
+                    "SHA-256, parse every nonempty line as five pipe-separated "
+                    "strings, and select rows whose JobName starts with exp23-launch8-"
+                    "canary-b95869841048e511- or whose Comment equals treewm-exp23-"
+                    "canary:b95869841048e511."
+                ),
+                "scope": (
+                    "The state-file map is a point-in-time read-only census of the "
+                    "preserved successful canary root. WAVE0_READY, WAVE1_COMPLETE, "
+                    "CANARY_REPORT, sacct stdout, reduced sacct rows, and all zero-active "
+                    "scheduler observations are embedded and independently "
+                    "reconstructable. Large controller lifecycle records remain exact "
+                    "immutable raw digests in the literal state map; held-before-"
+                    "authorization and release-after-receipt semantics are independently "
+                    "pre-freeze-audited projections, not reconstructions of embedded "
+                    "record bytes. Package validation reads only this embedded artifact "
+                    "and never reads, imports, resumes, or recovers the successful canary "
+                    "root."
+                ),
+            },
+        ),
+        "canary2 canonical reconstruction differs",
+    )
+    identity = value["immutable_identity"]
+    require(
+        exact_json_equal(
+            identity,
+            {
+                "source_commit_protocol_equivalent": binding["source_commit"],
+                "source_commit_claimed_by_controller": False,
+                "source_commit_evidence": (
+                    "Independent clean HEAD, origin/main, and live-remote equality "
+                    "plus byte comparison established "
+                    "b688ea652e99479ed5d8c6eccd6c137d77f9e03f as the protocol-"
+                    "equivalent source commit; the controller itself records only "
+                    "the protocol and four source hashes."
+                ),
+                "package_protocol_sha256": binding["source_protocol_sha256"],
+                "protocol_lock_raw_sha256": (
+                    "785b52b5858876c52e03628da98f07d987e628b565d74c5ea5230cc0adb3dea1"
+                ),
+                "manifest_raw_sha256": (
+                    "225f1d27fe65a8405679f4937ed2f434d4c8d4a84dd280ec0983fc2743633baa"
+                ),
+                "manifest_canonical_sha256": (
+                    "e7b8f304d46e67a8e428e2aea851191f344578eef7cfe349a7d3a60cfd874088"
+                ),
+                "state_root": binding["state_root"],
+                "state_root_relative": (
+                    "outputs/exp23-launch8-two-wave-canaries/"
+                    "exp23-launch8-two-wave-canary-b688ea6-79aaa2b6"
+                ),
+                "canary_token": binding["canary_token"],
+                "scheduler_comment": (
+                    "treewm-exp23-canary:b95869841048e511"
+                ),
+                "controller_identity_sha256": (
+                    "8ab251408c6a326d3ff83c66869e01687bc60b9e4d9593a769d4c8532fcdd3fe"
+                ),
+                "scheduler_control_plane_sha256": (
+                    "b631db129a9330a869436a1487fe67d99a8692ba73eb3b1a0156de4adc349731"
+                ),
+                "source_sha256": {
+                    "canary_gpu.slurm": (
+                        "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14"
+                    ),
+                    "canary_report.slurm": (
+                        "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b"
+                    ),
+                    "canary_worker.py": (
+                        "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d"
+                    ),
+                    "two_wave_canary.py": (
+                        "b373d64f410f08d1bd692dd9bb9e732a18b06bf80b6b483c313d82d4a6499436"
+                    ),
+                },
+            },
+        ),
+        "canary2 immutable identity differs",
+    )
+    production_evidence = manifest["launch_contract"][
+        "real_gpu_two_wave_canary"
+    ]["production_authorization_evidence"]
+    require(
+        exact_json_equal(
+            production_evidence["accepted_compute_runtime_source_sha256"],
+            {
+                name: identity["source_sha256"][name]
+                for name in (
+                    "canary_gpu.slurm",
+                    "canary_report.slurm",
+                    "canary_worker.py",
+                )
+            },
+        )
+        and all(
+            production_evidence["post_acceptance_current_source_sha256"][name]
+            == identity["source_sha256"][name]
+            for name in (
+                "canary_gpu.slurm",
+                "canary_report.slurm",
+                "canary_worker.py",
+            )
+        )
+        and production_evidence["accepted_controller_sha256"]
+        == identity["source_sha256"]["two_wave_canary.py"]
+        and production_evidence["post_acceptance_current_controller_sha256"]
+        == production_evidence["post_acceptance_current_source_sha256"][
+            "two_wave_canary.py"
+        ],
+        "canary2 accepted/final runtime source binding differs",
+    )
+    census = value["terminal_state_file_census"]
+    files = census.get("files")
+    require(
+        set(census)
+        == {
+            "state_file_count",
+            "state_file_bytes",
+            "directory_paths",
+            "directory_modes",
+            "logs_file_count",
+            "logs_total_bytes",
+            "symlink_count",
+            "special_file_count",
+            "cache_file_count",
+            "temporary_file_count",
+            "state_file_map_canonical_sha256",
+            "files",
+        }
+        and isinstance(files, dict)
+        and type(census["state_file_count"]) is int
+        and census["state_file_count"] == len(files) == 24
+        and type(census["state_file_bytes"]) is int
+        and census["state_file_bytes"]
+        == sum(row["size"] for row in files.values())
+        == 285_696
+        and exact_json_equal(census["directory_paths"], [".", "logs", "source"])
+        and exact_json_equal(
+            census["directory_modes"],
+            {".": "0700", "logs": "0700", "source": "0555"},
+        )
+        and type(census["logs_file_count"]) is int
+        and census["logs_file_count"] == 3
+        and type(census["logs_total_bytes"]) is int
+        and census["logs_total_bytes"] == 0
+        and type(census["symlink_count"]) is int
+        and census["symlink_count"] == 0
+        and type(census["special_file_count"]) is int
+        and census["special_file_count"] == 0
+        and type(census["cache_file_count"]) is int
+        and census["cache_file_count"] == 0
+        and type(census["temporary_file_count"]) is int
+        and census["temporary_file_count"] == 0,
+        "canary2 state census summary differs",
+    )
+    expected_names = {
+        ".CANARY_CONTROLLER.lock",
+        "CANARY_AUTHORIZATION.json",
+        "CANARY_CONTROLLER_IDENTITY.json",
+        "CANARY_READY_TO_RELEASE.json",
+        "CANARY_REPORT.json",
+        "CANARY_REPORT_CALLING.json",
+        "CANARY_REPORT_SUBMITTED.json",
+        "CANARY_SUBMISSION_RECEIPT.json",
+        "CANARY_WAVE0_CALLING.json",
+        "CANARY_WAVE0_RELEASED.json",
+        "CANARY_WAVE0_RELEASE_CALLING.json",
+        "CANARY_WAVE0_SUBMITTED.json",
+        "CANARY_WAVE1_CALLING.json",
+        "CANARY_WAVE1_SUBMITTED.json",
+        "WAVE0_READY.json",
+        "WAVE1_COMPLETE.json",
+        "logs/report_33295661.out",
+        "logs/wave0_33295657.out",
+        "logs/wave1_33295659.out",
+        "source/canary_gpu.slurm",
+        "source/canary_report.slurm",
+        "source/canary_worker.py",
+        "source/two_wave_canary.py",
+        "wave0_checkpoint.pt",
+    }
+    require(set(files) == expected_names, "canary2 state file names differ")
+    require(
+        all(
+            set(row) == {"mode", "sha256", "size"}
+            and type(row["mode"]) is str
+            and re.fullmatch(r"0[0-7]{3}", row["mode"]) is not None
+            and type(row["sha256"]) is str
+            and SHA256.fullmatch(row["sha256"]) is not None
+            and type(row["size"]) is int
+            and row["size"] >= 0
+            for row in files.values()
+        ),
+        "canary2 state file row differs",
+    )
+    require(
+        stable_hash({"schema_version": 1, "files": files})
+        == census["state_file_map_canonical_sha256"]
+        == binding["state_file_map_canonical_sha256"]
+        == "60dded3399d9b5406418209ffeb5020a09f22778e135c1ad79b3f413f9a7a2ce",
+        "canary2 state file map differs",
+    )
+    empty_sha = hashlib.sha256(b"").hexdigest()
+    require(
+        files[".CANARY_CONTROLLER.lock"]
+        == {"mode": "0600", "sha256": empty_sha, "size": 0}
+        and all(
+            files[name] == {"mode": "0644", "sha256": empty_sha, "size": 0}
+            for name in (
+                "logs/report_33295661.out",
+                "logs/wave0_33295657.out",
+                "logs/wave1_33295659.out",
+            )
+        )
+        and files["CANARY_CONTROLLER_IDENTITY.json"]["sha256"]
+        == identity["controller_identity_sha256"]
+        and exact_json_equal(
+            {
+                name: files[f"source/{name}"]["sha256"]
+                for name in (
+                    "canary_gpu.slurm",
+                    "canary_report.slurm",
+                    "canary_worker.py",
+                    "two_wave_canary.py",
+                )
+            },
+            identity["source_sha256"],
+        ),
+        "canary2 census identity/source/log binding differs",
+    )
+    topology = value["durable_topology"]
+    expected_ids = {role: values[0] for role, values in binding["job_ids_by_role"].items()}
+    expected_names_by_role = {
+        role: f"exp23-launch8-canary-{binding['canary_token']}-{role}"
+        for role in ("wave0", "wave1", "report")
+    }
+    require(
+        set(topology)
+        == {
+            "job_ids",
+            "job_names",
+            "dependencies",
+            "scheduler_observed_dependencies",
+            "kill_on_invalid_dependency",
+            "accepted_states",
+            "accepted_reasons",
+            "within_wave_requeue",
+            "resources",
+            "evidence_sha256",
+        }
+        and exact_json_equal(topology["job_ids"], expected_ids)
+        and exact_json_equal(topology["job_names"], expected_names_by_role)
+        and exact_json_equal(
+            topology["dependencies"],
+            {
+                "wave0": "none",
+                "wave1": "afterok:33295657",
+                "report": "afterok:33295659",
+            },
+        )
+        and exact_json_equal(
+            topology["scheduler_observed_dependencies"],
+            {
+                "wave0": "(null)",
+                "wave1": "afterok:33295657(unfulfilled)",
+                "report": "afterok:33295659(unfulfilled)",
+            },
+        )
+        and exact_json_equal(
+            topology["kill_on_invalid_dependency"],
+            {"wave0": None, "wave1": "Yes", "report": "Yes"},
+        )
+        and exact_json_equal(
+            topology["accepted_states"],
+            {"wave0": "PENDING", "wave1": "PENDING", "report": "PENDING"},
+        )
+        and exact_json_equal(
+            topology["accepted_reasons"],
+            {"wave0": "JobHeldUser", "wave1": "Dependency", "report": "Dependency"},
+        )
+        and topology["within_wave_requeue"] is False,
+        "canary2 scalar topology differs",
+    )
+    gpu_resources = {
+        "partition": "polar4,polar3,polar,grizzly",
+        "account": "edgeai_tao-ptm_image-foundation-model-clip",
+        "qos": "normal",
+        "time_limit": "00:10:00",
+        "nodes": "1-1",
+        "tasks": 1,
+        "cpus": 2,
+        "cpus_per_task": 2,
+        "memory": "8G",
+        "gpus": 1,
+        "tres_per_node": "gres:gpu:1",
+        "req_tres": "cpu=2,mem=8G,node=1,billing=1,gres/gpu=1",
+    }
+    require(
+        exact_json_equal(
+            topology["resources"],
+            {
+                "wave0": gpu_resources,
+                "wave1": gpu_resources,
+                "report": {
+                    "partition": "cpu",
+                    "account": "edgeai_tao-ptm_image-foundation-model-clip",
+                    "qos": "normal",
+                    "time_limit": "00:05:00",
+                    "nodes": "1-1",
+                    "tasks": 1,
+                    "cpus": 1,
+                    "cpus_per_task": 1,
+                    "memory": "1G",
+                    "gpus": 0,
+                    "tres_per_node": None,
+                    "req_tres": "cpu=1,mem=1G,node=1",
+                },
+            },
+        ),
+        "canary2 accepted scheduler resources differ",
+    )
+    evidence = topology["evidence_sha256"]
+    evidence_files = {
+        "controller_identity_raw": "CANARY_CONTROLLER_IDENTITY.json",
+        "wave0_calling_raw": "CANARY_WAVE0_CALLING.json",
+        "wave0_submitted_raw": "CANARY_WAVE0_SUBMITTED.json",
+        "wave1_calling_raw": "CANARY_WAVE1_CALLING.json",
+        "wave1_submitted_raw": "CANARY_WAVE1_SUBMITTED.json",
+        "report_calling_raw": "CANARY_REPORT_CALLING.json",
+        "report_submitted_raw": "CANARY_REPORT_SUBMITTED.json",
+        "authorization_raw": "CANARY_AUTHORIZATION.json",
+        "submission_receipt_raw": "CANARY_SUBMISSION_RECEIPT.json",
+        "ready_to_release_raw": "CANARY_READY_TO_RELEASE.json",
+        "wave0_release_calling_raw": "CANARY_WAVE0_RELEASE_CALLING.json",
+        "wave0_released_raw": "CANARY_WAVE0_RELEASED.json",
+    }
+    require(
+        set(evidence)
+        == set(evidence_files)
+        | {"accepted_submission_records", "accepted_scheduler_evidence"}
+        and all(evidence[key] == files[name]["sha256"] for key, name in evidence_files.items())
+        and evidence["accepted_submission_records"]
+        == "46e5c8ddaf1ec5f181d107a90811c9c59d7d8cd679333ef4cbc4818ba1771599"
+        and evidence["accepted_scheduler_evidence"]
+        == "2973d098d440ddf6cfad8db3575386ec6c1fe8484a50edce032b3d16e1fffbf6",
+        "canary2 durable evidence hashes differ",
+    )
+    runtime = value["runtime_result"]
+    require(
+        exact_json_equal(
+            runtime,
+            {
+                "wave0_ready": {
+                    "raw_sha256": files["WAVE0_READY.json"]["sha256"],
+                    "record": {
+                        "schema_version": 1,
+                        "status": "wave0_ready",
+                        "campaign_id": manifest["campaign_id"],
+                        "canary_token": binding["canary_token"],
+                        "wave0_job_id": expected_ids["wave0"],
+                        "checkpoint_sha256": files["wave0_checkpoint.pt"]["sha256"],
+                        "cuda_device_name": "NVIDIA A100-SXM4-80GB",
+                        "expected_resumed_result": 66_672_896.0,
+                        "within_wave_requeue": False,
+                    },
+                },
+                "checkpoint": {
+                    "raw_sha256": files["wave0_checkpoint.pt"]["sha256"],
+                    "size": 2501,
+                    "mode": "0444",
+                    "tensor_dtype": "torch.float32",
+                    "tensor_shape": [16, 16],
+                    "tensor_checksum": 66_672_640.0,
+                    "scientific_state": False,
+                },
+                "wave1_complete": {
+                    "raw_sha256": files["WAVE1_COMPLETE.json"]["sha256"],
+                    "record": {
+                        "schema_version": 1,
+                        "status": "wave1_complete",
+                        "campaign_id": manifest["campaign_id"],
+                        "canary_token": binding["canary_token"],
+                        "wave0_job_id": expected_ids["wave0"],
+                        "wave1_job_id": expected_ids["wave1"],
+                        "ready_sha256": files["WAVE0_READY.json"]["sha256"],
+                        "checkpoint_sha256": files["wave0_checkpoint.pt"]["sha256"],
+                        "resumed_result": 66_672_896.0,
+                        "within_wave_requeue": False,
+                    },
+                },
+                "report": {
+                    "raw_sha256": files["CANARY_REPORT.json"]["sha256"],
+                    "record": {
+                        "schema_version": 1,
+                        "status": "two_wave_gpu_canary_passed",
+                        "campaign_id": manifest["campaign_id"],
+                        "canary_token": binding["canary_token"],
+                        "job_ids": expected_ids,
+                        "dependencies": topology["dependencies"],
+                        "authorization_sha256": evidence["authorization_raw"],
+                        "receipt_sha256": evidence["submission_receipt_raw"],
+                        "ready_to_release_sha256": evidence["ready_to_release_raw"],
+                        "wave0_release_sha256": evidence["wave0_released_raw"],
+                        "wave0_ready_sha256": files["WAVE0_READY.json"]["sha256"],
+                        "wave1_complete_sha256": files["WAVE1_COMPLETE.json"]["sha256"],
+                        "checkpoint_sha256": files["wave0_checkpoint.pt"]["sha256"],
+                        "accepted_submission_records_sha256": evidence[
+                            "accepted_submission_records"
+                        ],
+                        "accepted_scheduler_evidence_sha256": evidence[
+                            "accepted_scheduler_evidence"
+                        ],
+                    },
+                },
+            },
+        )
+        and runtime["report"]["raw_sha256"] == binding["report_raw_sha256"],
+        "canary2 runtime/report lineage differs",
+    )
+    require(
+        all(
+            hashlib.sha256(
+                (canonical_json(runtime[key]["record"]) + "\n").encode("ascii")
+            ).hexdigest()
+            == runtime[key]["raw_sha256"]
+            for key in ("wave0_ready", "wave1_complete", "report")
+        )
+        and runtime["checkpoint"]["raw_sha256"]
+        == files["wave0_checkpoint.pt"]["sha256"]
+        and runtime["checkpoint"]["size"]
+        == files["wave0_checkpoint.pt"]["size"]
+        and runtime["checkpoint"]["mode"]
+        == files["wave0_checkpoint.pt"]["mode"],
+        "canary2 reconstructed runtime artifact bytes differ",
+    )
+    expected_rows = [
+        [
+            "33295657",
+            "exp23-launch8-canary-b95869841048e511-wave0",
+            "COMPLETED",
+            "0:0",
+            "25",
+            "1",
+            "batch-block5-04028",
+            "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+            "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+            "2026-08-28T22:52:10",
+            "2026-08-28T22:52:18",
+            "2026-08-28T22:52:45",
+            "2026-08-28T22:53:10",
+            "treewm-exp23-canary:b95869841048e511",
+        ],
+        [
+            "33295659",
+            "exp23-launch8-canary-b95869841048e511-wave1",
+            "COMPLETED",
+            "0:0",
+            "12",
+            "1",
+            "batch-block5-04028",
+            "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+            "billing=1,cpu=2,gres/gpu=1,mem=8G,node=1",
+            "2026-08-28T22:52:13",
+            "2026-08-28T22:53:16",
+            "2026-08-28T22:53:45",
+            "2026-08-28T22:53:57",
+            "treewm-exp23-canary:b95869841048e511",
+        ],
+        [
+            "33295661",
+            "exp23-launch8-canary-b95869841048e511-report",
+            "COMPLETED",
+            "0:0",
+            "6",
+            "1",
+            "cpu-00073",
+            "cpu=1,mem=1G,node=1",
+            "cpu=2,mem=1G,node=1",
+            "2026-08-28T22:52:15",
+            "2026-08-28T22:54:10",
+            "2026-08-28T22:54:10",
+            "2026-08-28T22:54:16",
+            "treewm-exp23-canary:b95869841048e511",
+        ],
+    ]
+    require(
+        value["scheduler_terminal_rows_schema"]
+        == (
+            "JobIDRaw|JobName|State|ExitCode|ElapsedRaw|AllocNodes|NodeList|"
+            "ReqTRES|AllocTRES|Submit|Eligible|Start|End|Comment"
+        )
+        and exact_json_equal(value["scheduler_terminal_rows"], expected_rows)
+        and len(expected_rows) == binding["scheduler_terminal_rows"],
+        "canary2 scheduler terminal rows differ",
+    )
+    scheduler_payload = {
+        "schema_version": 1,
+        "fields": value["scheduler_terminal_rows_schema"].split("|"),
+        "rows": expected_rows,
+    }
+    scheduler_raw = (
+        "\n".join("|".join(row) for row in expected_rows) + "\n"
+    ).encode("ascii")
+    scheduler = value["scheduler_terminal_observation"]
+    require(
+        set(scheduler)
+        == {
+            "captured_at_utc",
+            "cwd",
+            "environment",
+            "scheduler_control_plane_sha256",
+            "scheduler_control_plane_match_observed_separately",
+            "scheduler_control_plane_attestation_scope",
+            "argv",
+            "returncode",
+            "raw_stdout",
+            "raw_stdout_size",
+            "raw_stdout_sha256",
+            "raw_stderr",
+            "raw_stderr_size",
+            "raw_stderr_sha256",
+            "canonical_rows_bytes",
+            "canonical_rows_sha256",
+        }
+        and scheduler["captured_at_utc"] == "2026-08-28T23:05:37Z"
+        and scheduler["cwd"] == "/"
+        and exact_json_equal(
+            scheduler["environment"],
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+            },
+        )
+        and scheduler["scheduler_control_plane_sha256"]
+        == identity["scheduler_control_plane_sha256"]
+        and scheduler["scheduler_control_plane_match_observed_separately"] is True
+        and scheduler["scheduler_control_plane_attestation_scope"]
+        == (
+            "A separate read-only observation matched the root-bound control-plane "
+            "digest; this is an operator observation, not a signed scheduler "
+            "attestation."
+        )
+        and exact_json_equal(
+            scheduler["argv"],
+            [
+                "/usr/local/bin/sacct",
+                "-X",
+                "-n",
+                "-j",
+                "33295657,33295659,33295661",
+                "-o",
+                "JobIDRaw,JobName,State,ExitCode,ElapsedRaw,AllocNodes,NodeList,ReqTRES,AllocTRES,Submit,Eligible,Start,End,Comment",
+                "-P",
+            ],
+        )
+        and type(scheduler["returncode"]) is int
+        and scheduler["returncode"] == 0
+        and scheduler["raw_stdout"].encode("ascii") == scheduler_raw
+        and type(scheduler["raw_stdout_size"]) is int
+        and scheduler["raw_stdout_size"] == len(scheduler_raw) == 819
+        and scheduler["raw_stdout_sha256"] == hashlib.sha256(scheduler_raw).hexdigest()
+        and scheduler["raw_stderr"] == ""
+        and type(scheduler["raw_stderr_size"]) is int
+        and scheduler["raw_stderr_size"] == 0
+        and scheduler["raw_stderr_sha256"] == empty_sha
+        and type(scheduler["canonical_rows_bytes"]) is int
+        and scheduler["canonical_rows_bytes"]
+        == len(canonical_json(scheduler_payload).encode("ascii"))
+        == 1092
+        and scheduler["canonical_rows_sha256"]
+        == stable_hash(scheduler_payload)
+        == "b7b204be3ef714222f5893cc727ace5ca20bb482485301ee20ac33e8320031ef",
+        "canary2 scheduler terminal evidence differs",
+    )
+    zero = value["terminal_zero_active_evidence"]
+    common_empty = {
+        "returncode": 0,
+        "stdout": "",
+        "stdout_size": 0,
+        "stdout_sha256": empty_sha,
+        "stderr": "",
+        "stderr_size": 0,
+        "stderr_sha256": empty_sha,
+    }
+    owner = zero.get("owner_active_scheduler_census")
+    require(
+        isinstance(owner, Mapping)
+        and set(owner)
+        == {
+            "captured_at_utc",
+            "argv",
+            "environment",
+            "returncode",
+            "raw_stdout_size",
+            "raw_stdout_sha256",
+            "compressed_stdout_size",
+            "compressed_stdout_sha256",
+            "raw_stdout_zlib_base64",
+            "raw_stderr",
+            "raw_stderr_size",
+            "raw_stderr_sha256",
+            "row_schema",
+            "matching_predicate",
+            "matched_rows",
+        }
+        and owner["captured_at_utc"] == "2026-08-28T23:28:04Z"
+        and exact_json_equal(
+            owner["argv"],
+            [
+                "/usr/local/bin/squeue",
+                "--noheader",
+                "--user=chrislin",
+                "--format=%A|%F|%j|%T|%k",
+            ],
+        )
+        and exact_json_equal(
+            owner["environment"],
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "TZ": "UTC",
+                "USER": "chrislin",
+                "LOGNAME": "chrislin",
+                "SLURM_CONF": "/cm/shared/apps/slurm/var/etc/cs-oci-ord/slurm.conf",
+            },
+        )
+        and type(owner["returncode"]) is int
+        and owner["returncode"] == 0
+        and type(owner["raw_stdout_size"]) is int
+        and owner["raw_stdout_size"] == 9992
+        and owner["raw_stdout_sha256"]
+        == "1aff7458b2b7ab62fb7e8189af662d7d92c6eadcb21303366917249d4ead5a00"
+        and type(owner["compressed_stdout_size"]) is int
+        and owner["compressed_stdout_size"] == 1017
+        and owner["compressed_stdout_sha256"]
+        == "8dccdf089806fe525f74aaeb903eced6c99e6a123642b3c378713912f7c5b988"
+        and type(owner["raw_stdout_zlib_base64"]) is str
+        and len(owner["raw_stdout_zlib_base64"]) == 1356
+        and owner["raw_stderr"] == ""
+        and type(owner["raw_stderr_size"]) is int
+        and owner["raw_stderr_size"] == 0
+        and owner["raw_stderr_sha256"] == empty_sha
+        and owner["row_schema"] == "JobID|ArrayJobID|JobName|State|Comment"
+        and owner["matching_predicate"]
+        == (
+            "JobName startswith exp23-launch8-canary-b95869841048e511- OR "
+            "Comment equals treewm-exp23-canary:b95869841048e511"
+        )
+        and exact_json_equal(owner["matched_rows"], []),
+        "canary2 owner-wide zero-stray census envelope differs",
+    )
+    try:
+        compressed_owner_stdout = base64.b64decode(
+            owner["raw_stdout_zlib_base64"], validate=True
+        )
+        require(
+            len(compressed_owner_stdout) == owner["compressed_stdout_size"]
+            and hashlib.sha256(compressed_owner_stdout).hexdigest()
+            == owner["compressed_stdout_sha256"],
+            "canary2 owner-wide zero-stray compressed bytes differ",
+        )
+        decompressor = zlib.decompressobj()
+        owner_stdout = decompressor.decompress(compressed_owner_stdout, 9993)
+        require(
+            decompressor.eof
+            and not decompressor.unconsumed_tail
+            and not decompressor.unused_data
+            and len(owner_stdout) <= 9992,
+            "canary2 owner-wide zero-stray decompression boundary differs",
+        )
+        owner_text = owner_stdout.decode("ascii")
+    except Exception as exc:
+        raise ContractError(
+            f"canary2 owner-wide zero-stray census bytes differ: {exc}"
+        ) from exc
+    owner_rows = [line.split("|") for line in owner_text.splitlines()]
+    require(
+        len(owner_stdout) == owner["raw_stdout_size"]
+        and hashlib.sha256(owner_stdout).hexdigest() == owner["raw_stdout_sha256"]
+        and all(len(row) == 5 and all(type(item) is str for item in row) for row in owner_rows),
+        "canary2 owner-wide zero-stray census bytes differ",
+    )
+    matched_owner_rows = [
+        row
+        for row in owner_rows
+        if row[2].startswith("exp23-launch8-canary-b95869841048e511-")
+        or row[4] == "treewm-exp23-canary:b95869841048e511"
+    ]
+    require(
+        exact_json_equal(matched_owner_rows, owner["matched_rows"]),
+        "canary2 owner-wide zero-stray census selection differs",
+    )
+    require(
+        set(zero)
+        == {
+            "exact_job_ids",
+            "exact_job_names",
+            "owner_active_scheduler_census",
+            "active_exact_job_count",
+            "active_exact_name_count",
+            "stray_topology_job_count",
+        }
+        and exact_json_equal(
+            {
+                key: zero[key]
+                for key in (
+                    "exact_job_ids",
+                    "exact_job_names",
+                    "active_exact_job_count",
+                    "active_exact_name_count",
+                    "stray_topology_job_count",
+                )
+            },
+            {
+                "exact_job_ids": {
+                    "captured_at_utc": "2026-08-28T23:10:48Z",
+                    "argv": [
+                        "/usr/local/bin/squeue",
+                        "--noheader",
+                        "--jobs=33295657,33295659,33295661",
+                        "--format=%A|%F|%j|%T|%k",
+                    ],
+                    **common_empty,
+                },
+                "exact_job_names": {
+                    "captured_at_utc": "2026-08-28T23:10:49Z",
+                    "argv": [
+                        "/usr/local/bin/squeue",
+                        "--noheader",
+                        "--name=exp23-launch8-canary-b95869841048e511-wave0,exp23-launch8-canary-b95869841048e511-wave1,exp23-launch8-canary-b95869841048e511-report",
+                        "--format=%A|%F|%j|%T|%k",
+                    ],
+                    **common_empty,
+                },
+                "active_exact_job_count": 0,
+                "active_exact_name_count": 0,
+                "stray_topology_job_count": 0,
+            },
+        )
+        and zero["active_exact_job_count"]
+        == binding["active_scheduler_jobs_after_terminal"]
+        and value["observed_at_utc"]
+        >= max(
+            scheduler["captured_at_utc"],
+            zero["exact_job_ids"]["captured_at_utc"],
+            zero["exact_job_names"]["captured_at_utc"],
+            owner["captured_at_utc"],
+        ),
+        "canary2 terminal zero-active evidence differs",
+    )
+    require(
+        exact_json_equal(
+            value["absent_durable_artifacts"],
+            {
+                "exact_names": [
+                    "CANARY_ABORTED.json",
+                    "CANARY_RECOVERY_CANCELLED.json",
+                ],
+                "forbidden_name_fragments": [
+                    "ABORT",
+                    "CANCEL",
+                    "ERROR",
+                    "FAIL",
+                    "RECOVER",
+                    "TEMP",
+                    "TMP",
+                ],
+                "matched_file_count": 0,
+            },
+        )
+        and not any(
+            fragment in name.upper()
+            for name in files
+            for fragment in ("ABORT", "CANCEL", "ERROR", "FAIL", "RECOVER", "TEMP", "TMP")
+        ),
+        "canary2 absent failure/recovery artifacts differ",
+    )
+    conclusion = value["acceptance_conclusion"]
+    require(
+        exact_json_equal(
+            conclusion,
+            {
+                "topology_canary_passed": True,
+                "production_authorization_prerequisite_satisfied": True,
+                "scalar_dependency_scope_proved": True,
+                "held_before_authorization_proved": True,
+                "release_after_receipt_proved": True,
+                "real_gpu_wave0_proved": True,
+                "checkpoint_transfer_proved": True,
+                "same_canary_wave0_to_wave1_checkpoint_transfer_completed": True,
+                "real_gpu_wave1_proved": True,
+                "report_after_wave1_proved": True,
+                "all_jobs_terminal_success": True,
+                "zero_active_jobs": True,
+                "scientific_state": False,
+                "reuse_allowed": False,
+                "resume_allowed": False,
+                "retry_allowed": False,
+                "recovery_allowed": False,
+                "checkpoint_consumption_as_scientific_state_allowed": False,
+                "result_consumption_as_scientific_measurement_allowed": False,
+                "allowed_consumption": [
+                    "package provenance",
+                    "production launch authorization prerequisite",
+                    "topology engineering evidence",
+                ],
+                "required_successor_policy": (
+                    "Every future canary must use a fresh root, token, logical job "
+                    "namespace, checkpoint, and result namespace. Historical numeric "
+                    "Slurm IDs are never authorization, release, resume, or result "
+                    "identities; if Slurm recycles one into a fresh exact canary "
+                    "namespace, it may only be signalled for cleanup after a settled "
+                    "exact owner, name, and token-bound-comment census. Launch8 "
+                    "scientific work must use its fresh scientific root, names, "
+                    "checkpoints, and results and must never consume canary files or "
+                    "identities as scientific state."
+                ),
+            },
+        )
+        and all(
+            conclusion[key] is binding[key]
+            for key in (
+                "topology_canary_passed",
+                "production_authorization_prerequisite_satisfied",
+                "reuse_allowed",
+                "resume_allowed",
+                "retry_allowed",
+                "recovery_allowed",
+                "checkpoint_consumption_as_scientific_state_allowed",
+                "result_consumption_as_scientific_measurement_allowed",
+            )
+        ),
+        "canary2 terminal acceptance/no-reuse conclusion differs",
+    )
+
+
+def _validate_canary2_acceptance_provenance(
+    manifest: Mapping[str, Any], repo: Path
+) -> None:
+    try:
+        _validate_canary2_acceptance_provenance_impl(manifest, repo)
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError(
+            f"canary2 acceptance provenance is malformed: {exc}"
+        ) from exc
+
+
 def validate_manifest(
     manifest: Mapping[str, Any],
     lock: Mapping[str, Any],
@@ -2801,7 +3979,11 @@ def validate_manifest(
     verify_resolved_config_lock: bool = True,
     verify_causal_parity_lock: bool = True,
 ) -> None:
-    require(manifest.get("schema_version") == 1, "manifest schema differs")
+    require(
+        type(manifest.get("schema_version")) is int
+        and manifest.get("schema_version") == 1,
+        "manifest schema differs",
+    )
     require(manifest.get("campaign_id") == CAMPAIGN_ID, "campaign ID differs")
     require(
         manifest.get("status") == "sealed_launch_ready_unsubmitted",
@@ -2809,6 +3991,7 @@ def validate_manifest(
     )
     require(manifest.get("formal_validation") is False, "pilot is marked formal")
     _validate_canary1_negative_provenance(manifest, Path(repo).resolve())
+    _validate_canary2_acceptance_provenance(manifest, Path(repo).resolve())
     _validate_launch7_negative_provenance(manifest, Path(repo).resolve())
     require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
     require(
@@ -2995,6 +4178,47 @@ def validate_manifest(
             "within_wave_requeue": False,
             "run_during_read_only_preflight": False,
             "failed_attempts": FAILED_CANARY_ATTEMPTS,
+            "accepted_attempts": ACCEPTED_CANARY_ATTEMPTS,
+            "production_authorization_evidence": {
+                "required": True,
+                "satisfied": True,
+                "attempt": "canary2",
+                "path": "canary2_acceptance_provenance.json",
+                "raw_sha256": ACCEPTED_CANARY_ATTEMPTS[0]["raw_sha256"],
+                "canonical_sha256": ACCEPTED_CANARY_ATTEMPTS[0][
+                    "canonical_sha256"
+                ],
+                "source_protocol_sha256": ACCEPTED_CANARY_ATTEMPTS[0][
+                    "source_protocol_sha256"
+                ],
+                "report_raw_sha256": ACCEPTED_CANARY_ATTEMPTS[0][
+                    "report_raw_sha256"
+                ],
+                "artifact_evidence_consumption_allowed": True,
+                "scientific_runtime_input_consumption_allowed": False,
+                "accepted_compute_runtime_source_sha256": {
+                    "canary_gpu.slurm": (
+                        "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14"
+                    ),
+                    "canary_report.slurm": (
+                        "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b"
+                    ),
+                    "canary_worker.py": (
+                        "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d"
+                    ),
+                },
+                "accepted_controller_sha256": ACCEPTED_CANARY_CONTROLLER_SHA256,
+                "post_acceptance_current_controller_sha256": (
+                    ACCEPTED_CANARY_CURRENT_CONTROLLER_SHA256
+                ),
+                "post_acceptance_current_source_sha256": (
+                    ACCEPTED_CANARY_CURRENT_SOURCE_SHA256
+                ),
+                "post_acceptance_change_scope": (
+                    ACCEPTED_CANARY_POST_ACCEPTANCE_CHANGE_SCOPE
+                ),
+                "canary_rerun_required": False,
+            },
         },
         "real-GPU two-wave canary contract differs",
     )

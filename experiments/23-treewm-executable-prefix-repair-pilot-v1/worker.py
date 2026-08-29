@@ -159,6 +159,27 @@ SUBMISSION_CONTRACT_FIELDS = frozenset(
         "launches",
         "array",
         "fresh_start",
+        "production_authorization_prerequisite",
+    }
+)
+PRODUCTION_AUTHORIZATION_PREREQUISITE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "attempt",
+        "path",
+        "raw_sha256",
+        "canonical_sha256",
+        "report_raw_sha256",
+        "source_protocol_sha256",
+        "source_commit",
+        "state_root",
+        "state_file_map_canonical_sha256",
+        "canary_token",
+        "job_ids_by_role",
+        "accepted_attempt_sha256",
+        "production_authorization_evidence_sha256",
+        "sealed_package_protocol_sha256",
     }
 )
 SUBMISSION_AUTHORIZATION_FIELDS = frozenset(
@@ -432,6 +453,114 @@ def _is_job_id(value: object) -> bool:
         and value[0] in "123456789"
         and all(character in "0123456789" for character in value)
     )
+
+
+def _validated_production_authorization_prerequisite(
+    value: object,
+    package_protocol_sha256: object,
+    *,
+    manifest: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    require(
+        isinstance(value, Mapping)
+        and set(value) == PRODUCTION_AUTHORIZATION_PREREQUISITE_FIELDS,
+        "production authorization prerequisite fields differ",
+    )
+    result = dict(value)
+    hash_fields = (
+        "raw_sha256",
+        "canonical_sha256",
+        "report_raw_sha256",
+        "source_protocol_sha256",
+        "state_file_map_canonical_sha256",
+        "accepted_attempt_sha256",
+        "production_authorization_evidence_sha256",
+        "sealed_package_protocol_sha256",
+    )
+    roles = result.get("job_ids_by_role")
+    state_root = result.get("state_root")
+    require(
+        type(result.get("schema_version")) is int
+        and result.get("schema_version") == 1
+        and result.get("status")
+        == "canary2_production_authorization_prerequisite_satisfied"
+        and result.get("attempt") == "canary2"
+        and result.get("path") == "canary2_acceptance_provenance.json"
+        and all(sha256_string(result.get(field)) for field in hash_fields)
+        and result.get("sealed_package_protocol_sha256")
+        == package_protocol_sha256
+        and isinstance(result.get("source_commit"), str)
+        and len(result["source_commit"]) == 40
+        and set(result["source_commit"]) <= SHA256
+        and isinstance(state_root, str)
+        and Path(state_root).is_absolute()
+        and os.path.normpath(state_root) == state_root
+        and not state_root.startswith("//")
+        and isinstance(result.get("canary_token"), str)
+        and len(result["canary_token"]) == 16
+        and set(result["canary_token"]) <= SHA256
+        and isinstance(roles, Mapping)
+        and set(roles) == {"wave0", "wave1", "report"}
+        and all(
+            isinstance(roles[role], list)
+            and len(roles[role]) == 1
+            and _is_job_id(roles[role][0])
+            for role in ("wave0", "wave1", "report")
+        )
+        and len({roles[role][0] for role in ("wave0", "wave1", "report")})
+        == 3,
+        "production authorization prerequisite differs",
+    )
+    if manifest is not None:
+        launch = manifest.get("launch_contract")
+        canary = (
+            launch.get("real_gpu_two_wave_canary")
+            if isinstance(launch, Mapping)
+            else None
+        )
+        accepted = (
+            canary.get("accepted_attempts")
+            if isinstance(canary, Mapping)
+            else None
+        )
+        evidence = (
+            canary.get("production_authorization_evidence")
+            if isinstance(canary, Mapping)
+            else None
+        )
+        require(
+            isinstance(accepted, list)
+            and len(accepted) == 1
+            and isinstance(accepted[0], Mapping)
+            and isinstance(evidence, Mapping),
+            "snapshot production authorization evidence differs",
+        )
+        attempt = accepted[0]
+        expected = {
+            "schema_version": 1,
+            "status": "canary2_production_authorization_prerequisite_satisfied",
+            "attempt": "canary2",
+            "path": "canary2_acceptance_provenance.json",
+            "raw_sha256": evidence.get("raw_sha256"),
+            "canonical_sha256": evidence.get("canonical_sha256"),
+            "report_raw_sha256": evidence.get("report_raw_sha256"),
+            "source_protocol_sha256": evidence.get("source_protocol_sha256"),
+            "source_commit": attempt.get("source_commit"),
+            "state_root": attempt.get("state_root"),
+            "state_file_map_canonical_sha256": attempt.get(
+                "state_file_map_canonical_sha256"
+            ),
+            "canary_token": attempt.get("canary_token"),
+            "job_ids_by_role": attempt.get("job_ids_by_role"),
+            "accepted_attempt_sha256": stable_hash(attempt),
+            "production_authorization_evidence_sha256": stable_hash(evidence),
+            "sealed_package_protocol_sha256": package_protocol_sha256,
+        }
+        require(
+            exact_json_equal(result, expected),
+            "submission/snapshot production authorization prerequisite differs",
+        )
+    return result
 
 
 def sha256_string(value: object) -> bool:
@@ -1039,6 +1168,10 @@ def bootstrap_submission(
     require(contract.get("formal_validation") is False, "submission formal-validation label differs")
     require(contract.get("array") == "0-19%20", "submission array differs")
     require(contract.get("fresh_start") is True, "submission is not fresh-start")
+    _validated_production_authorization_prerequisite(
+        contract.get("production_authorization_prerequisite"),
+        contract.get("package_protocol_sha256"),
+    )
     require(
         exact_json_equal(
             contract.get("scheduler_control_plane_contract"),
@@ -1653,6 +1786,11 @@ def load_launch_context(
     campaign = _load_campaign(snapshot_root)
     manifest, weight_lock = campaign.load_contract(snapshot_root)
     protocol = campaign.verify_protocol_lock(package)
+    _validated_production_authorization_prerequisite(
+        bootstrap_contract.get("production_authorization_prerequisite"),
+        protocol,
+        manifest=manifest,
+    )
     cells = campaign.expand_matrix(manifest)
     launch_path = launch_path_for(submission_root, cell_index)
     require_regular_nonsymlink(launch_path, "cell launch")

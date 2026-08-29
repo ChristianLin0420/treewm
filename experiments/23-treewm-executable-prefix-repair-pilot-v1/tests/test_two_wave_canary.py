@@ -388,8 +388,9 @@ def test_real_canary_confirmation_fails_before_state_or_scheduler(
     assert not os.path.lexists(state)
 
 
-def test_failed_canary_root_is_forbidden_even_if_prior_root_is_absent(
-    tmp_path: Path,
+@pytest.mark.parametrize("attempt_kind", ("failed", "accepted"))
+def test_historical_canary_root_is_forbidden_even_if_prior_root_is_absent(
+    tmp_path: Path, attempt_kind: str,
 ) -> None:
     repo = (tmp_path / "repo").absolute()
     (repo / "outputs").mkdir(parents=True)
@@ -406,31 +407,45 @@ def test_failed_canary_root_is_forbidden_even_if_prior_root_is_absent(
         "superseded_launches": [],
         "launch_contract": {
             "real_gpu_two_wave_canary": {
-                "failed_attempts": [
+                "failed_attempts": ([
                     {
                         "state_root": str(failed_root),
                         "canary_token": "e09ce7d5a0cef1b0",
                         "job_ids_by_role": {
                             "wave0": ["33285485"],
                             "wave1": ["33285486"],
-                            "report": [],
+                            "report": (
+                                ["33285487"] if attempt_kind == "accepted" else []
+                            ),
                         },
                     }
-                ]
-            }
-        },
+                ] if attempt_kind == "failed" else []),
+                "accepted_attempts": ([
+                    {
+                        "state_root": str(failed_root),
+                        "canary_token": "e09ce7d5a0cef1b0",
+                        "job_ids_by_role": {
+                            "wave0": ["33285485"],
+                            "wave1": ["33285486"],
+                            "report": ["33285487"],
+                        },
+                    }
+                ] if attempt_kind == "accepted" else []),
+                }
+            },
     }
     assert not os.path.lexists(failed_root)
     with pytest.raises(
         controller.CanarySubmissionError,
-        match="scientific/superseded/failed-canary namespace",
+        match="historical-canary namespace",
     ):
         controller._prepare_state(repo, failed_root, manifest)
     assert not os.path.lexists(failed_root)
 
 
-def test_failed_canary_token_is_rejected_before_state_or_scheduler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("attempt_kind", ("failed", "accepted"))
+def test_historical_canary_token_is_rejected_before_state_or_scheduler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attempt_kind: str
 ) -> None:
     state = (
         tmp_path / "exp23-launch8-two-wave-canary-failed-token"
@@ -442,7 +457,7 @@ def test_failed_canary_token_is_rejected_before_state_or_scheduler(
         "paths": {"python": sys.executable},
         "launch_contract": {
             "real_gpu_two_wave_canary": {
-                "failed_attempts": [
+                "failed_attempts": ([
                     {
                         "state_root": str(
                             tmp_path
@@ -455,7 +470,21 @@ def test_failed_canary_token_is_rejected_before_state_or_scheduler(
                             "report": [],
                         },
                     }
-                ]
+                ] if attempt_kind == "failed" else []),
+                "accepted_attempts": ([
+                    {
+                        "state_root": str(
+                            tmp_path
+                            / "exp23-launch8-two-wave-canary-accepted-attempt"
+                        ),
+                        "canary_token": "e09ce7d5a0cef1b0",
+                        "job_ids_by_role": {
+                            "wave0": ["33285485"],
+                            "wave1": ["33285486"],
+                            "report": ["33285487"],
+                        },
+                    }
+                ] if attempt_kind == "accepted" else []),
             }
         },
     }
@@ -504,7 +533,7 @@ def test_failed_canary_token_is_rejected_before_state_or_scheduler(
             monkeypatch.delitem(controller.sys.modules, name)
     with pytest.raises(
         controller.CanarySubmissionError,
-        match="reuses a failed canary token",
+        match="reuses a historical canary token",
     ):
         controller.submit_real_canary(
             tmp_path,
@@ -515,8 +544,9 @@ def test_failed_canary_token_is_rejected_before_state_or_scheduler(
     assert not os.path.lexists(state)
 
 
-def test_failed_canary_root_recovery_is_rejected_before_any_root_access(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("attempt_kind", ("failed", "accepted"))
+def test_historical_canary_root_recovery_is_rejected_before_any_root_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attempt_kind: str
 ) -> None:
     repo = tmp_path.absolute()
     failed_root = (
@@ -531,7 +561,7 @@ def test_failed_canary_root_recovery_is_rejected_before_any_root_access(
         "paths": {"python": sys.executable},
         "launch_contract": {
             "real_gpu_two_wave_canary": {
-                "failed_attempts": [
+                "failed_attempts": ([
                     {
                         "state_root": str(failed_root),
                         "canary_token": "e09ce7d5a0cef1b0",
@@ -541,7 +571,18 @@ def test_failed_canary_root_recovery_is_rejected_before_any_root_access(
                             "report": [],
                         },
                     }
-                ]
+                ] if attempt_kind == "failed" else []),
+                "accepted_attempts": ([
+                    {
+                        "state_root": str(failed_root),
+                        "canary_token": "e09ce7d5a0cef1b0",
+                        "job_ids_by_role": {
+                            "wave0": ["33285485"],
+                            "wave1": ["33285486"],
+                            "report": ["33285487"],
+                        },
+                    }
+                ] if attempt_kind == "accepted" else []),
             }
         },
     }
@@ -608,7 +649,7 @@ def test_failed_canary_root_recovery_is_rejected_before_any_root_access(
             monkeypatch.delitem(controller.sys.modules, name)
     with pytest.raises(
         controller.CanarySubmissionError,
-        match="failed canary state root cannot be recovered or read",
+        match="historical canary state root cannot be recovered or read",
     ):
         controller.recover_or_cancel_real_canary(
             repo,
@@ -648,7 +689,8 @@ def test_failed_canary_alias_symlink_recovery_never_follows_the_target(
                             "report": [],
                         },
                     }
-                ]
+                ],
+                "accepted_attempts": [],
             }
         },
     }
@@ -757,39 +799,32 @@ def test_recovery_controller_lock_is_existing_and_metadata_read_only(
 
 @pytest.mark.parametrize(
     "reuse_kind,expected_error",
-    (
-        ("token", "reuses a failed canary token"),
-        ("abort-job", "abort reuses a failed canary job ID"),
-        ("prior-job", "recovery result reuses a failed canary job ID"),
         (
-            "prior-live-job",
-            "recovery result used a failed canary live job ID",
-        ),
-        (
-            "residual-chain-job",
-            "residual recovery used a failed canary live job ID",
-        ),
-        (
-            "residual-live-job",
-            "residual recovery found a failed canary live job ID",
-        ),
+            ("token", "reuses a historical canary token"),
+            (
+                "prior-live-job",
+                "recovery result lacks recycled-ID cleanup evidence",
+            ),
+            (
+                "residual-chain-job",
+                "residual recovery lacks recycled-ID cleanup evidence",
+            ),
         (
             "authorization-job",
-            "durable prefix reuses a failed canary job ID",
+            "durable prefix reuses a historical canary job ID",
         ),
-        ("live-job", "recovery found a failed canary live job ID"),
-        (
-            "history-job",
-            "cancellation history reuses a failed canary job ID",
-        ),
-        (
-            "prior-history-job",
-            "cancellation history reuses a failed canary job ID",
-        ),
-        (
-            "residual-history-job",
-            "cancellation history reuses a failed canary job ID",
-        ),
+            (
+                "history-job",
+                "cancellation history lacks recycled-ID cleanup evidence",
+            ),
+            (
+                "prior-history-job",
+                "cancellation history lacks recycled-ID cleanup evidence",
+            ),
+            (
+                "residual-history-job",
+                "cancellation history lacks recycled-ID cleanup evidence",
+            ),
     ),
 )
 def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
@@ -837,7 +872,8 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
                             "report": [],
                         },
                     }
-                ]
+                ],
+                "accepted_attempts": [],
             }
         },
     }
@@ -962,6 +998,9 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
     prior_fixture = {
         "claimed_job_ids": [],
         "live_verified_job_ids": [],
+        "live_verified_job_ids_by_role": {
+            "wave0": [], "wave1": [], "report": []
+        },
         "cancelled_live_job_ids": [],
         "controller_identity_sha256": "c" * 64,
         "durable_prefix_sha256": "d" * 64,
@@ -971,6 +1010,7 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
         prior_fixture["claimed_job_ids"] = ["33285485"]
     if reuse_kind == "prior-live-job":
         prior_fixture["live_verified_job_ids"] = ["33285485"]
+        prior_fixture["live_verified_job_ids_by_role"]["wave0"] = ["33285485"]
         prior_fixture["cancelled_live_job_ids"] = ["33285485"]
     if reuse_kind in {
         "prior-job",
@@ -988,9 +1028,14 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
             submit,
             "_validated_residual_recovery_chain",
             lambda *_args, **_kwargs: [
-                {
-                    "live_verified_job_ids": ["33285485"],
-                    "cancelled_live_job_ids": ["33285485"],
+                    {
+                        "live_verified_job_ids": ["33285485"],
+                        "live_verified_job_ids_by_role": {
+                            "wave0": ["33285485"],
+                            "wave1": [],
+                            "report": [],
+                        },
+                        "cancelled_live_job_ids": ["33285485"],
                     "cancel_attempt_history": [],
                 }
             ],
@@ -1109,7 +1154,7 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
             "wave1",
             {"wave0": "7000", "wave1": "7000", "report": "9000"},
             [],
-            "fresh scheduler authority differs",
+            "assigned one job ID to multiple roles",
             ["wave0", "wave1"],
             ["wave0"],
             [],
@@ -1118,7 +1163,7 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
             "report",
             {"wave0": "7000", "wave1": "8000", "report": "8000"},
             [],
-            "fresh scheduler authority differs",
+            "assigned one job ID to multiple roles",
             ["wave0", "wave1", "report"],
             ["wave0", "wave1"],
             [],
@@ -1127,10 +1172,37 @@ def test_canary_recovery_rejects_failed_identity_before_scheduler_or_write(
             "failed-wave0",
             {"wave0": "33285485", "wave1": "8000", "report": "9000"},
             ["33285485", "33285486"],
-            "reused a failed canary job ID",
+            "reused a historical canary job ID",
             ["wave0"],
             [],
             ["33285485"],
+        ),
+        (
+            "accepted-wave0",
+            {"wave0": "6000", "wave1": "8000", "report": "9000"},
+            [],
+            "reused a historical canary job ID",
+            ["wave0"],
+            [],
+            ["6000"],
+        ),
+        (
+            "accepted-wave1",
+            {"wave0": "7000", "wave1": "6001", "report": "9000"},
+            [],
+            "reused a historical canary job ID",
+            ["wave0", "wave1"],
+            ["wave0"],
+            ["6001", "7000"],
+        ),
+        (
+            "accepted-report",
+            {"wave0": "7000", "wave1": "8000", "report": "6002"},
+            [],
+            "reused a historical canary job ID",
+            ["wave0", "wave1", "report"],
+            ["wave0", "wave1"],
+            ["6002", "7000", "8000"],
         ),
     ),
 )
@@ -1186,7 +1258,25 @@ def test_canary_duplicate_cross_role_job_id_never_reaches_release_or_scancel(
                     ]
                     if failed_job_ids
                     else []
-                )
+                ),
+                "accepted_attempts": (
+                    []
+                    if failed_job_ids
+                    else [
+                        {
+                            "state_root": str(
+                                tmp_path
+                                / "exp23-launch8-two-wave-canary-accepted-anchor"
+                            ),
+                            "canary_token": "abcdef0123456789",
+                            "job_ids_by_role": {
+                                "wave0": ["6000"],
+                                "wave1": ["6001"],
+                                "report": ["6002"],
+                            },
+                        }
+                    ]
+                ),
             }
         },
     }
@@ -1220,8 +1310,17 @@ def test_canary_duplicate_cross_role_job_id_never_reaches_release_or_scancel(
     monkeypatch.setattr(controller.os, "access", lambda *_args: True)
     monkeypatch.setattr(controller.secrets, "token_hex", lambda _size: "0123456789abcdef")
 
-    def prepare(_repo: Path, root: Path, _manifest: dict):
+    def prepare(
+        _repo: Path,
+        root: Path,
+        _manifest: dict,
+        *,
+        hold_controller_lock: bool = False,
+    ):
         root.mkdir(mode=0o700)
+        created = root.lstat()
+        lock = controller._CanaryControllerLock(root, create=True)
+        lock.__enter__()
         (root / "logs").mkdir(mode=0o700)
         source = root / "source"
         source.mkdir(mode=0o700)
@@ -1233,6 +1332,9 @@ def test_canary_duplicate_cross_role_job_id_never_reaches_release_or_scancel(
             destination.chmod(0o444)
             hashes[name] = hashlib.sha256(payload).hexdigest()
         source.chmod(0o555)
+        if hold_controller_lock:
+            return root, hashes, lock, (created.st_dev, created.st_ino)
+        lock.__exit__(None, None, None)
         return root, hashes
 
     monkeypatch.setattr(controller, "_prepare_state", prepare)
@@ -1359,6 +1461,358 @@ def test_canary_duplicate_cross_role_job_id_never_reaches_release_or_scancel(
     assert not os.path.lexists(state / "CANARY_SUBMISSION_RECEIPT.json")
     assert not os.path.lexists(state / "CANARY_READY_TO_RELEASE.json")
     assert not os.path.lexists(state / "CANARY_WAVE0_RELEASED.json")
+    historical_ids = set(failed_job_ids) or {"6000", "6001", "6002"}
+    recycled_ids = sorted(
+        historical_ids.intersection(expected_cancel_ids), key=int
+    )
+    if recycled_ids:
+        marker_path = state / "CANARY_HISTORICAL_ID_RECYCLED_0000.json"
+        marker = worker.read_json(marker_path, "historical-ID cleanup marker")
+        assert marker["phase"] == "initial_submit_abort"
+        assert marker["historical_recycled_job_ids"] == recycled_ids
+        assert marker["authorization_allowed"] is False
+        assert marker["release_allowed"] is False
+        assert marker["resume_allowed"] is False
+        assert marker["result_allowed"] is False
+        abort = worker.read_json(state / "CANARY_ABORTED.json", "canary abort")
+        assert abort["historical_numeric_id_recycled"] is True
+        assert abort["historical_recycled_job_ids"] == recycled_ids
+        assert abort["historical_recycled_evidence_sha256"] == [
+            {
+                "name": marker_path.name,
+                "sha256": hashlib.sha256(marker_path.read_bytes()).hexdigest(),
+            }
+        ]
+        cancel_calling = worker.read_json(
+            state / "CANARY_RECOVERY_CANCEL_CALLING_0000.json",
+            "historical-ID cancel calling",
+        )
+        assert cancel_calling["historical_recycled_evidence"] == {
+            "name": marker_path.name,
+            "sha256": hashlib.sha256(marker_path.read_bytes()).hexdigest(),
+        }
+        assert marker["cancel_history_length_before"] == 0
+    else:
+        assert not os.path.lexists(
+            state / "CANARY_HISTORICAL_ID_RECYCLED_0000.json"
+        )
+
+
+@pytest.mark.parametrize("settled", (True, False))
+def test_calling_only_recycled_id_recovery_requires_settled_cleanup_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settled: bool,
+) -> None:
+    for name in list(sys.modules):
+        if name == "treewm" or name.startswith("treewm."):
+            monkeypatch.delitem(sys.modules, name)
+    repo = (tmp_path / "repo").absolute()
+    package = repo / controller.PACKAGE_RELATIVE
+    package.mkdir(parents=True)
+    executables: dict[str, str] = {}
+    for name in ("sbatch", "scontrol", "squeue", "scancel"):
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+        path.chmod(0o755)
+        executables[name] = str(path)
+    historical_root = (
+        repo
+        / controller.CANARY_PARENT_RELATIVE
+        / "exp23-launch8-two-wave-canary-accepted-anchor"
+    )
+    root = (
+        repo
+        / controller.CANARY_PARENT_RELATIVE
+        / f"exp23-launch8-two-wave-canary-recycled-{'settled' if settled else 'drift'}"
+    )
+    root.mkdir(parents=True, mode=0o700)
+    source = root / "source"
+    source.mkdir(mode=0o700)
+    source_sha256 = {}
+    for name in controller.CANARY_SOURCE_FILES:
+        payload = (PACKAGE / name).read_bytes()
+        (package / name).write_bytes(payload)
+        destination = source / name
+        destination.write_bytes(payload)
+        destination.chmod(0o444)
+        source_sha256[name] = hashlib.sha256(payload).hexdigest()
+    source.chmod(0o555)
+    manifest = {
+        "campaign_id": worker.CAMPAIGN_ID,
+        "status": "sealed_launch_ready_unsubmitted",
+        "formal_validation": False,
+        "paths": {"python": sys.executable},
+        "execution": {
+            **executables,
+            "scheduler_control_plane": {},
+        },
+        "launch_contract": {
+            "real_gpu_two_wave_canary": {
+                "failed_attempts": [],
+                "accepted_attempts": [
+                    {
+                        "state_root": str(historical_root),
+                        "canary_token": "abcdef0123456789",
+                        "job_ids_by_role": {
+                            "wave0": ["6000"],
+                            "wave1": ["6001"],
+                            "report": ["6002"],
+                        },
+                    }
+                ],
+            }
+        },
+    }
+    (package / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    lock_path = root / ".CANARY_CONTROLLER.lock"
+    lock_path.touch(mode=0o600)
+    lock_path.chmod(0o600)
+    lock_info = lock_path.lstat()
+    lock_binding = {
+        "path": str(lock_path),
+        "device": lock_info.st_dev,
+        "inode": lock_info.st_ino,
+        "uid": os.getuid(),
+        "mode": 0o600,
+    }
+    token = "0123456789abcdef"
+    observation = {"schema_version": 1, "mode": "fixture"}
+    names = {
+        role: f"exp23-launch8-canary-{token}-{role}"
+        for role in ("wave0", "wave1", "report")
+    }
+    identity = {
+        "schema_version": 1,
+        "status": "canary_controller_claimed",
+        "campaign_id": worker.CAMPAIGN_ID,
+        "scientific": False,
+        "state_root": str(root),
+        "canary_token": token,
+        "job_names": names,
+        "scheduler_comment": f"treewm-exp23-canary:{token}",
+        "controller_lock": lock_binding,
+        "source_sha256": source_sha256,
+        "package_protocol_sha256": "a" * 64,
+        "scheduler_control_plane": observation,
+        "scheduler_control_plane_sha256": submit.stable_hash(observation),
+    }
+    worker.seal_json(root / "CANARY_CONTROLLER_IDENTITY.json", identity)
+    calling_authorization = {
+        "canary_token": token,
+        "job_ids": {"wave0": "6000", "wave1": "8000", "report": "9000"},
+        "job_names": names,
+        "scheduler_comment": identity["scheduler_comment"],
+        "scheduler_executables": {
+            "submit": executables["sbatch"],
+            "control": executables["scontrol"],
+        },
+        "scheduler_control_plane": observation,
+        "scheduler_control_plane_sha256": submit.stable_hash(observation),
+        "controller_lock": lock_binding,
+    }
+    worker.seal_json(
+        root / "CANARY_WAVE0_CALLING.json",
+        _calling_payload(root, calling_authorization, "wave0"),
+    )
+    fake_campaign = SimpleNamespace(
+        load_contract=lambda _repo: (copy.deepcopy(manifest), {}),
+        verify_protocol_lock=lambda _package: "a" * 64,
+    )
+    monkeypatch.setattr(controller, "_load_submit", lambda _repo: submit)
+    monkeypatch.setattr(controller, "_load_campaign", lambda _repo: fake_campaign)
+    monkeypatch.setattr(submit, "_scheduler_contract", lambda _value: {})
+    monkeypatch.setattr(
+        submit,
+        "_scheduler_fallback_config",
+        lambda _value: {"source_control_plane": observation},
+    )
+    monkeypatch.setattr(
+        submit, "_scheduler_control_plane_observation", lambda _value: observation
+    )
+    monkeypatch.setattr(submit, "_scheduler_environment", lambda _value: {})
+    monkeypatch.setattr(submit.time, "sleep", lambda _seconds: None)
+    original_flags = controller.sys.flags
+
+    class IsolatedFlags:
+        isolated = 1
+        no_site = 1
+        dont_write_bytecode = 1
+        safe_path = 1
+
+        def __getattr__(self, name):
+            return getattr(original_flags, name)
+
+    monkeypatch.setattr(controller.sys, "flags", IsolatedFlags())
+    monkeypatch.setattr(controller.sys, "dont_write_bytecode", True)
+    for key in list(controller.os.environ):
+        if key.startswith("TREEWM_") or key in {"RANK", "WORLD_SIZE", "LOCAL_RANK"}:
+            monkeypatch.delenv(key)
+    expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
+    calls: list[list[str]] = []
+    wave0_queries = 0
+    active = True
+
+    def runner(command, _cwd, _environment, inherited_fds):
+        nonlocal wave0_queries, active
+        values = list(command)
+        calls.append(values)
+        assert inherited_fds
+        if Path(values[0]).name == "squeue":
+            name = next(
+                item.split("=", 1)[1]
+                for item in values
+                if item.startswith("--name=")
+            )
+            if name == names["wave0"]:
+                wave0_queries += 1
+            visible = active and name == names["wave0"] and (
+                settled or wave0_queries in {1, 3}
+            )
+            stdout = (
+                f"6000|{name}|{expected_user}|PENDING|{identity['scheduler_comment']}\n"
+                if visible
+                else ""
+            )
+            return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
+        assert Path(values[0]).name == "scancel"
+        assert values[1:] == ["6000"]
+        active = False
+        return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
+
+    if not settled:
+        with pytest.raises(
+            submit.SubmissionError,
+            match="did not settle",
+        ):
+            controller.recover_or_cancel_real_canary(
+                repo,
+                root,
+                controller.CONFIRMATION,
+                scheduler_runner=runner,
+            )
+        assert not any(Path(row[0]).name == "scancel" for row in calls)
+        assert not os.path.lexists(
+            root / "CANARY_HISTORICAL_ID_RECYCLED_0000.json"
+        )
+        assert not os.path.lexists(root / "CANARY_RECOVERY_CANCELLED.json")
+        return
+
+    original_append = submit._append_recovery_cancel_attempt
+
+    def crash_after_marker(*_args, **_kwargs):
+        raise submit.SubmissionError("fixture crash after recycled-ID marker")
+
+    monkeypatch.setattr(
+        submit, "_append_recovery_cancel_attempt", crash_after_marker
+    )
+    with pytest.raises(
+        submit.SubmissionError,
+        match="fixture crash after recycled-ID marker",
+    ):
+        controller.recover_or_cancel_real_canary(
+            repo,
+            root,
+            controller.CONFIRMATION,
+            scheduler_runner=runner,
+        )
+    first_marker_path = root / "CANARY_HISTORICAL_ID_RECYCLED_0000.json"
+    assert os.path.lexists(first_marker_path)
+    assert not os.path.lexists(root / "CANARY_RECOVERY_CANCEL_CALLING_0000.json")
+    monkeypatch.setattr(
+        submit, "_append_recovery_cancel_attempt", original_append
+    )
+    original_exclusive = submit.exclusive_json
+
+    def crash_before_terminal(path, value, *args, **kwargs):
+        if Path(path).name == "CANARY_RECOVERY_CANCELLED.json":
+            raise submit.SubmissionError(
+                "fixture crash after recycled-ID cancel result"
+            )
+        return original_exclusive(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(submit, "exclusive_json", crash_before_terminal)
+    with pytest.raises(
+        submit.SubmissionError,
+        match="fixture crash after recycled-ID cancel result",
+    ):
+        controller.recover_or_cancel_real_canary(
+            repo,
+            root,
+            controller.CONFIRMATION,
+            scheduler_runner=runner,
+        )
+    assert os.path.lexists(root / "CANARY_RECOVERY_CANCEL_CALLING_0000.json")
+    assert os.path.lexists(root / "CANARY_RECOVERY_CANCEL_RESULT_0000.json")
+    assert not os.path.lexists(root / "CANARY_RECOVERY_CANCELLED.json")
+    monkeypatch.setattr(submit, "exclusive_json", original_exclusive)
+    result = controller.recover_or_cancel_real_canary(
+        repo,
+        root,
+        controller.CONFIRMATION,
+        scheduler_runner=runner,
+    )
+    assert result["status"] == "canary_recovered_terminal_after_cancel_attempts"
+    assert result["claimed_job_ids"] == []
+    assert result["live_verified_job_ids"] == []
+    assert result["historical_numeric_id_recycled"] is True
+    assert result["historical_recycled_job_ids"] == ["6000"]
+    assert result["historical_recycled_job_ids_by_role"] == {
+        "wave0": ["6000"], "wave1": [], "report": []
+    }
+    assert [Path(row[0]).name for row in calls].count("scancel") == 1
+    marker_path = root / "CANARY_HISTORICAL_ID_RECYCLED_0001.json"
+    marker = worker.read_json(
+        marker_path,
+        "recycled cleanup marker",
+    )
+    assert marker["phase"] == "first_recovery"
+    assert marker["supersedes_unconsumed_evidence"] == {
+        "name": first_marker_path.name,
+        "sha256": hashlib.sha256(first_marker_path.read_bytes()).hexdigest(),
+    }
+    assert marker["historical_recycled_job_ids_by_role"] == {
+        "wave0": ["6000"], "wave1": [], "report": []
+    }
+    calling = worker.read_json(
+        root / "CANARY_RECOVERY_CANCEL_CALLING_0000.json",
+        "recycled cleanup calling",
+    )
+    assert calling["historical_recycled_evidence"] == {
+        "name": marker_path.name,
+        "sha256": hashlib.sha256(marker_path.read_bytes()).hexdigest(),
+    }
+    # Coherently rehashing the entire cancel-result/terminal suffix cannot
+    # detach the pre-cancel recycled-ID marker from the mutation intent.
+    calling_path = root / "CANARY_RECOVERY_CANCEL_CALLING_0000.json"
+    calling.pop("historical_recycled_evidence")
+    _rewrite_sealed_json(calling_path, calling)
+    calling_sha256 = hashlib.sha256(calling_path.read_bytes()).hexdigest()
+    cancel_result_path = root / "CANARY_RECOVERY_CANCEL_RESULT_0000.json"
+    cancel_result = worker.read_json(cancel_result_path, "cancel result")
+    cancel_result["calling_sha256"] = calling_sha256
+    _rewrite_sealed_json(cancel_result_path, cancel_result)
+    result_sha256 = hashlib.sha256(cancel_result_path.read_bytes()).hexdigest()
+    terminal_path = root / "CANARY_RECOVERY_CANCELLED.json"
+    terminal = worker.read_json(terminal_path, "recovery terminal")
+    terminal["cancel_calling_sha256"] = calling_sha256
+    terminal["cancel_attempt_history"][0]["calling_sha256"] = calling_sha256
+    terminal["cancel_attempt_history"][0]["result_sha256"] = result_sha256
+    _rewrite_sealed_json(terminal_path, terminal)
+    calls_before = list(calls)
+    with pytest.raises(
+        controller.CanarySubmissionError,
+        match="recycled-ID fields differ",
+    ):
+        controller.recover_or_cancel_real_canary(
+            repo,
+            root,
+            controller.CONFIRMATION,
+            scheduler_runner=runner,
+        )
+    assert calls == calls_before
 
 
 def test_canary_worker_authenticates_exact_graph_and_report(
@@ -1879,6 +2333,12 @@ def test_canary_initial_abort_rejects_non_string_job_ids_without_scheduler_or_wr
         "cancellation": None,
         "cancellation_error": "fixture no call",
         "cancel_attempt_history": [],
+        "historical_numeric_id_recycled": False,
+        "historical_recycled_job_ids": [],
+        "historical_recycled_job_ids_by_role": {
+            "wave0": [], "wave1": [], "report": []
+        },
+        "historical_recycled_evidence_sha256": [],
     }
     if surface == "claimed_role":
         value["job_ids_by_role"]["wave0"] = [bad_id]
@@ -1903,6 +2363,7 @@ def test_canary_initial_abort_rejects_non_string_job_ids_without_scheduler_or_wr
             scancel="/fixture/scancel",
             expected_control_plane={"schema_version": 1},
             scheduler_fallback={},
+            historical_job_ids=set(),
         )
     after = {
         entry.name: hashlib.sha256(entry.read_bytes()).hexdigest()
@@ -1996,6 +2457,12 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
         "scheduler_calls": 9,
         "controller_lock": authorization["controller_lock"],
         "new_jobs_created": 0,
+        "historical_numeric_id_recycled": False,
+        "historical_recycled_job_ids": [],
+        "historical_recycled_job_ids_by_role": {
+            "wave0": [], "wave1": [], "report": []
+        },
+        "historical_recycled_evidence_sha256": [],
     }
     assert controller._validated_canary_recovery_result(
         submit,
@@ -2013,6 +2480,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
         ],
         expected_control_plane={"schema_version": 1},
         scheduler_fallback={},
+        historical_job_ids=set(),
+        recycled_cleanup_records=[],
     ) == value
     immutable_before = {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -2058,6 +2527,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
                     ],
                     expected_control_plane={"schema_version": 1},
                     scheduler_fallback={},
+                    historical_job_ids=set(),
+                    recycled_cleanup_records=[],
                 )
     boolean_jobs = copy.deepcopy(value)
     boolean_jobs["new_jobs_created"] = False
@@ -2078,6 +2549,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
             ],
             expected_control_plane={"schema_version": 1},
             scheduler_fallback={},
+            historical_job_ids=set(),
+            recycled_cleanup_records=[],
         )
     immutable_after = {
         str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -2133,6 +2606,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
                 ],
                 expected_control_plane={"schema_version": 1},
                 scheduler_fallback={},
+                historical_job_ids=set(),
+                recycled_cleanup_records=[],
             )
     forged = copy.deepcopy(value)
     forged["pre_cancel_census_rounds"][0]["job_ids_by_role"]["wave0"] = ["7000"]
@@ -2153,6 +2628,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
             ],
             expected_control_plane={"schema_version": 1},
             scheduler_fallback={},
+            historical_job_ids=set(),
+            recycled_cleanup_records=[],
         )
     bool_coerced = copy.deepcopy(value)
     for attempt in bool_coerced["scheduler_control_plane_observations"]:
@@ -2174,6 +2651,8 @@ def test_canary_terminal_recovery_census_cannot_be_forged_empty(tmp_path: Path) 
             ],
             expected_control_plane={"schema_version": 1},
             scheduler_fallback={},
+            historical_job_ids=set(),
+            recycled_cleanup_records=[],
         )
 
 
@@ -2218,7 +2697,24 @@ def test_real_canary_recovery_entrypoint_consumes_lost_cancel_and_rechecks_prior
         "formal_validation": False,
         "paths": {"python": sys.executable},
         "launch_contract": {
-            "real_gpu_two_wave_canary": {"failed_attempts": []}
+            "real_gpu_two_wave_canary": {
+                "failed_attempts": [
+                    {
+                        "state_root": str(
+                            repo
+                            / controller.CANARY_PARENT_RELATIVE
+                            / "exp23-launch8-two-wave-canary-prior-anchor"
+                        ),
+                        "canary_token": "abcdef0123456789",
+                        "job_ids_by_role": {
+                            "wave0": ["6000"],
+                            "wave1": ["6001"],
+                            "report": ["6002"],
+                        },
+                    }
+                ],
+                "accepted_attempts": [],
+            }
         },
         "execution": {
             **executables,
@@ -2385,29 +2881,35 @@ def test_real_canary_recovery_entrypoint_consumes_lost_cancel_and_rechecks_prior
             },
             "reconciliation_errors": ["scancel: lost scheduler response"],
             "cancellation": None,
-            "cancellation_error": "lost scheduler response",
-            "cancel_attempt_history": initial_history,
-        },
-    )
-    active = True
+                "cancellation_error": "lost scheduler response",
+                "cancel_attempt_history": initial_history,
+                "historical_numeric_id_recycled": False,
+                "historical_recycled_job_ids": [],
+                "historical_recycled_job_ids_by_role": {
+                    "wave0": [], "wave1": [], "report": []
+                },
+                "historical_recycled_evidence_sha256": [],
+            },
+        )
+    active_job_id: str | None = "7000"
     calls = []
     expected_user = submit.pwd.getpwuid(os.getuid()).pw_name
 
     def runner(command, _cwd, _environment, inherited_fds):
-        nonlocal active
+        nonlocal active_job_id
         values = list(command)
         calls.append(values)
         assert inherited_fds
         if Path(values[0]).name == "squeue":
             name = next(item.split("=", 1)[1] for item in values if item.startswith("--name="))
             stdout = (
-                f"7000|{names['wave0']}|{expected_user}|PENDING|{identity['scheduler_comment']}\n"
-                if active and name == names["wave0"]
+                f"{active_job_id}|{names['wave0']}|{expected_user}|PENDING|{identity['scheduler_comment']}\n"
+                if active_job_id is not None and name == names["wave0"]
                 else ""
             )
             return subprocess.CompletedProcess(values, 0, stdout=stdout, stderr="")
-        assert Path(values[0]).name == "scancel" and values[-1] == "7000"
-        active = False
+        assert Path(values[0]).name == "scancel" and values[-1] == active_job_id
+        active_job_id = None
         return subprocess.CompletedProcess(values, 0, stdout="", stderr="")
 
     result = controller.recover_or_cancel_real_canary(
@@ -2440,7 +2942,46 @@ def test_real_canary_recovery_entrypoint_consumes_lost_cancel_and_rechecks_prior
     assert "next(iter(claimed" not in recovery_source
     assert 'journal_values[role]["job_id"]' in recovery_source
 
-    active = True
+    active_job_id = "6000"
+    prior_calls = len(calls)
+    original_exclusive = submit.exclusive_json
+
+    def crash_before_residual_terminal(path, value, *args, **kwargs):
+        if Path(path).name == "CANARY_RECOVERY_RECONCILED_0000.json":
+            raise submit.SubmissionError(
+                "fixture crash after residual recycled-ID cancel result"
+            )
+        return original_exclusive(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(submit, "exclusive_json", crash_before_residual_terminal)
+    with pytest.raises(
+        submit.SubmissionError,
+        match="fixture crash after residual recycled-ID cancel result",
+    ):
+        controller.recover_or_cancel_real_canary(
+            repo,
+            root,
+            controller.CONFIRMATION,
+            scheduler_runner=runner,
+        )
+    assert len(calls) - prior_calls == 19
+    assert [Path(row[0]).name for row in calls[prior_calls:]].count("scancel") == 1
+    residual_marker_path = root / "CANARY_HISTORICAL_ID_RECYCLED_0000.json"
+    residual_marker = worker.read_json(
+        residual_marker_path, "residual recycled-ID marker"
+    )
+    assert residual_marker["phase"] == "residual_recovery"
+    assert residual_marker["cancel_history_length_before"] == 2
+    residual_calling = worker.read_json(
+        root / "CANARY_RECOVERY_CANCEL_CALLING_0002.json",
+        "residual recycled-ID calling",
+    )
+    assert residual_calling["historical_recycled_evidence"] == {
+        "name": residual_marker_path.name,
+        "sha256": hashlib.sha256(residual_marker_path.read_bytes()).hexdigest(),
+    }
+    assert not os.path.lexists(root / "CANARY_RECOVERY_RECONCILED_0000.json")
+    monkeypatch.setattr(submit, "exclusive_json", original_exclusive)
     prior_calls = len(calls)
     resumed = controller.recover_or_cancel_real_canary(
         repo,
@@ -2448,14 +2989,16 @@ def test_real_canary_recovery_entrypoint_consumes_lost_cancel_and_rechecks_prior
         controller.CONFIRMATION,
         scheduler_runner=runner,
     )
-    assert len(calls) - prior_calls == 19
-    assert [Path(row[0]).name for row in calls[prior_calls:]].count("scancel") == 1
+    assert len(calls) - prior_calls == 9
+    assert not any(
+        Path(row[0]).name == "scancel" for row in calls[prior_calls:]
+    )
     chain = resumed["residual_reconciliation_chain"]
     assert len(chain) == 1
     assert chain[0]["previous_terminal_name"] == "CANARY_RECOVERY_CANCELLED.json"
-    assert chain[0]["live_verified_job_ids"] == ["7000"]
+    assert chain[0]["live_verified_job_ids"] == []
     assert chain[0]["status"] == (
-        "canary_recovered_residual_terminal_after_residual_cancel"
+        "canary_recovered_residual_terminal_no_active_jobs"
     )
 
     prior_calls = len(calls)

@@ -1357,7 +1357,77 @@
           "recovery_allowed": false,
           "result_consumption_allowed": false
         }
-      ]
+      ],
+      "accepted_attempts": [
+        {
+          "attempt": "canary2",
+          "path": "canary2_acceptance_provenance.json",
+          "raw_sha256": "7d1351f6d8fe900cd17698d79a5eff9d24166c1eaf50f08ab9a8ae1ea3a99fa7",
+          "canonical_sha256": "6ee4d943b92b69f8fd3a8a304d2226a7cee1e83140093d65b705250b073ff6e0",
+          "status": "terminal_positive_canary_provenance_frozen",
+          "source_commit": "b688ea652e99479ed5d8c6eccd6c137d77f9e03f",
+          "source_protocol_sha256": "79aaa2b6a9713034dc074c49ecbcf3daa17944c4f89287924fe13ddd3abc93d9",
+          "state_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/exp23-launch8-two-wave-canaries/exp23-launch8-two-wave-canary-b688ea6-79aaa2b6",
+          "canary_token": "b95869841048e511",
+          "job_ids_by_role": {
+            "wave0": [
+              "33295657"
+            ],
+            "wave1": [
+              "33295659"
+            ],
+            "report": [
+              "33295661"
+            ]
+          },
+          "state_file_map_canonical_sha256": "60dded3399d9b5406418209ffeb5020a09f22778e135c1ad79b3f413f9a7a2ce",
+          "report_raw_sha256": "1d4e00bf032f97434fdcabfe9c1f7601ca06786937b7c7d17c1d199b4a072dfd",
+          "scheduler_terminal_rows": 3,
+          "active_scheduler_jobs_after_terminal": 0,
+          "topology_canary_passed": true,
+          "production_authorization_prerequisite_satisfied": true,
+          "reuse_allowed": false,
+          "resume_allowed": false,
+          "retry_allowed": false,
+          "recovery_allowed": false,
+          "checkpoint_consumption_as_scientific_state_allowed": false,
+          "result_consumption_as_scientific_measurement_allowed": false
+        }
+      ],
+      "production_authorization_evidence": {
+        "required": true,
+        "satisfied": true,
+        "attempt": "canary2",
+        "path": "canary2_acceptance_provenance.json",
+        "raw_sha256": "7d1351f6d8fe900cd17698d79a5eff9d24166c1eaf50f08ab9a8ae1ea3a99fa7",
+        "canonical_sha256": "6ee4d943b92b69f8fd3a8a304d2226a7cee1e83140093d65b705250b073ff6e0",
+        "source_protocol_sha256": "79aaa2b6a9713034dc074c49ecbcf3daa17944c4f89287924fe13ddd3abc93d9",
+        "report_raw_sha256": "1d4e00bf032f97434fdcabfe9c1f7601ca06786937b7c7d17c1d199b4a072dfd",
+        "artifact_evidence_consumption_allowed": true,
+        "scientific_runtime_input_consumption_allowed": false,
+        "accepted_compute_runtime_source_sha256": {
+          "canary_gpu.slurm": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+          "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+          "canary_worker.py": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d"
+        },
+        "accepted_controller_sha256": "b373d64f410f08d1bd692dd9bb9e732a18b06bf80b6b483c313d82d4a6499436",
+        "post_acceptance_current_controller_sha256": "2f803ccaac8b4e42e821b884cfe817c7954a013648ebacd0c6fbf4411824bfe9",
+        "post_acceptance_current_source_sha256": {
+          "canary_gpu.slurm": "cdfa25456ea26544450ff00681590adf1e81ef03eeb1434597c0777f6552ec14",
+          "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
+          "canary_worker.py": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d",
+          "dag_evidence.py": "b653ba6b2c25c017144cacb7b4b17ec5f5e153ad504eab47fba101d2c71dd1bb",
+          "report.py": "510b7178f0cfdc7ba62d837dcf64bb20001f3b1828aed286829603742df63057",
+          "report.slurm": "9930e95a9427d1fa55125387effcd1cdd65367b075b586855cd2d1ba34c1a6c9",
+          "submit.py": "51671551e331537dc31e87e11423bd6c66e1ce981b1dbb5b85ee48c028160dfa",
+          "train_entry.py": "ac525211824eca20993f696a3e249d3c700b24eefdea48f365c8a997d64a9f33",
+          "train.slurm": "fa66ce7d7dccf626ad434b6f87dfe284a904464701549a99a0dd6e94a695c44a",
+          "two_wave_canary.py": "2f803ccaac8b4e42e821b884cfe817c7954a013648ebacd0c6fbf4411824bfe9",
+          "worker.py": "321cef217725178eda2a3c8750edd77f187631f1637614fe51fd511776ac6cd9"
+        },
+        "post_acceptance_change_scope": "Post-acceptance package changes are limited to canary historical-identity, canonical-path, lock/rollback, and cleanup-only recovery guards in two_wave_canary.py, plus mandatory accepted-canary prerequisite and report-versus-cancel gating with cleanup-only legacy recovery in submit.py and report.py and matching prerequisite validation in worker.py and train_entry.py; fresh canary DAG submission commands, scalar dependency forms, wave0 release payload, canary compute worker and Slurm scripts, and fresh scientific DAG submission commands and dependency forms remain unchanged",
+        "canary_rerun_required": false
+      }
     },
     "source_snapshot": "immutable, read-only, nonsymlinked, byte-verified source/config/package snapshot bound to commit, runtime, protocol, manifest, audit, and resolved launch identities",
     "fresh_namespace": true,

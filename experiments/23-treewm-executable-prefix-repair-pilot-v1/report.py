@@ -153,6 +153,19 @@ def _lexical_exists(path: str | Path, label: str | None = None) -> bool:
     return _lstat_if_present(path, label) is not None
 
 
+def _durable_cleanup_prefix_exists(submission_root: Path) -> bool:
+    journal = submission_root / "journal"
+    return any(
+        _lexical_exists(path)
+        for path in (
+            submission_root / "CANCEL_REQUESTED.json",
+            journal / "PREREQUISITE_MISSING.json",
+            journal / "9000_RECOVERY_CANCELLED.json",
+            journal / "9001_PRODUCTION_PREREQUISITE_MISSING.json",
+        )
+    )
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(
         value,
@@ -198,6 +211,275 @@ def sha256_string(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= SHA256
 
 
+def _validated_production_authorization_prerequisite(
+    manifest: Mapping[str, Any], package_protocol_sha256: str
+) -> dict[str, Any]:
+    """Project the exact positive-canary evidence frozen by submission.
+
+    The snapshot campaign validator authenticates the complete provenance artifact.
+    This compact, duplicated projection is intentional: an older snapshot reporter
+    that does not know about the accepted-canary gate cannot manufacture the field
+    now required in every Launch8 submission contract and report provenance record.
+    """
+
+    launch = manifest.get("launch_contract")
+    canary = (
+        launch.get("real_gpu_two_wave_canary")
+        if isinstance(launch, Mapping)
+        else None
+    )
+    evidence = (
+        canary.get("production_authorization_evidence")
+        if isinstance(canary, Mapping)
+        else None
+    )
+    accepted = canary.get("accepted_attempts") if isinstance(canary, Mapping) else None
+    require(
+        isinstance(evidence, Mapping)
+        and isinstance(accepted, list)
+        and len(accepted) == 1
+        and isinstance(accepted[0], Mapping),
+        "successful canary production-authorization prerequisite differs",
+    )
+    attempt = accepted[0]
+    sha_fields = (
+        "raw_sha256",
+        "canonical_sha256",
+        "report_raw_sha256",
+        "source_protocol_sha256",
+    )
+    require(
+        evidence.get("attempt") == "canary2"
+        and evidence.get("path") == "canary2_acceptance_provenance.json"
+        and evidence.get("required") is True
+        and evidence.get("satisfied") is True
+        and evidence.get("artifact_evidence_consumption_allowed") is True
+        and evidence.get("scientific_runtime_input_consumption_allowed") is False
+        and attempt.get("attempt") == "canary2"
+        and attempt.get("status") == "terminal_positive_canary_provenance_frozen"
+        and attempt.get("production_authorization_prerequisite_satisfied") is True
+        and attempt.get("topology_canary_passed") is True
+        and type(attempt.get("active_scheduler_jobs_after_terminal")) is int
+        and attempt.get("active_scheduler_jobs_after_terminal") == 0
+        and all(
+            sha256_string(evidence.get(field))
+            and evidence.get(field) == attempt.get(field)
+            for field in sha_fields
+        )
+        and evidence.get("path") == attempt.get("path"),
+        "successful canary production-authorization evidence differs",
+    )
+    raw_roles = attempt.get("job_ids_by_role")
+    require(
+        isinstance(raw_roles, Mapping)
+        and set(raw_roles) == {"wave0", "wave1", "report"},
+        "successful canary production-authorization job IDs differ",
+    )
+    roles: dict[str, list[str]] = {}
+    for role in ("wave0", "wave1", "report"):
+        values = raw_roles[role]
+        require(
+            isinstance(values, list)
+            and len(values) == 1
+            and isinstance(values[0], str)
+            and bool(values[0])
+            and values[0][0] in "123456789"
+            and all(character in "0123456789" for character in values[0]),
+            f"successful canary production-authorization {role} ID differs",
+        )
+        roles[role] = list(values)
+    require(
+        len({item for values in roles.values() for item in values}) == 3,
+        "successful canary production-authorization job IDs are not injective",
+    )
+    token = attempt.get("canary_token")
+    state_root = attempt.get("state_root")
+    source_commit = attempt.get("source_commit")
+    state_map = attempt.get("state_file_map_canonical_sha256")
+    require(
+        isinstance(token, str)
+        and len(token) == 16
+        and set(token) <= SHA256
+        and isinstance(state_root, str)
+        and Path(state_root).is_absolute()
+        and os.path.normpath(state_root) == state_root
+        and not state_root.startswith("//")
+        and isinstance(source_commit, str)
+        and len(source_commit) == 40
+        and set(source_commit) <= SHA256
+        and sha256_string(state_map)
+        and sha256_string(package_protocol_sha256),
+        "successful canary production-authorization identity differs",
+    )
+    return {
+        "schema_version": 1,
+        "status": "canary2_production_authorization_prerequisite_satisfied",
+        "attempt": "canary2",
+        "path": "canary2_acceptance_provenance.json",
+        "raw_sha256": evidence["raw_sha256"],
+        "canonical_sha256": evidence["canonical_sha256"],
+        "report_raw_sha256": evidence["report_raw_sha256"],
+        "source_protocol_sha256": evidence["source_protocol_sha256"],
+        "source_commit": source_commit,
+        "state_root": state_root,
+        "state_file_map_canonical_sha256": state_map,
+        "canary_token": token,
+        "job_ids_by_role": roles,
+        "accepted_attempt_sha256": stable_hash(attempt),
+        "production_authorization_evidence_sha256": stable_hash(evidence),
+        "sealed_package_protocol_sha256": package_protocol_sha256,
+    }
+
+
+def _validated_snapshot_production_authorization_prerequisite(
+    submission_root: Path,
+    submission_sha256: str,
+    *,
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authenticate the hermetic snapshot evidence that authorizes reporting."""
+
+    submission = nonsymlink_directory(submission_root, "submission root")
+    contract_path = contained_regular(
+        submission / "SUBMISSION_CONTRACT.json",
+        submission,
+        "report successful-canary submission contract",
+    )
+    contract_payload, contract_sha256, contract_info = _authenticated_regular_bytes(
+        contract_path,
+        "report successful-canary submission contract",
+        capture=True,
+    )
+    assert contract_payload is not None
+    require(
+        stat.S_IMODE(contract_info.st_mode) == 0o444
+        and contract_sha256 == submission_sha256,
+        "report successful-canary submission contract bytes differ",
+    )
+    contract = _decode_json_object(contract_path, contract_payload)
+    require(
+        type(contract.get("schema_version")) is int
+        and contract.get("schema_version") == 1
+        and contract.get("status") == "sealed_for_submission"
+        and contract.get("campaign_id") == CAMPAIGN_ID
+        and contract.get("submission_root") == str(submission),
+        "report successful-canary submission contract identity differs",
+    )
+    snapshot = nonsymlink_directory(
+        Path(str(contract.get("snapshot_root", ""))),
+        "report successful-canary snapshot root",
+    )
+    require(
+        snapshot == submission / "source-snapshot" / "repo"
+        and contract.get("snapshot_root") == str(snapshot),
+        "report successful-canary snapshot root differs",
+    )
+    inventory = contract.get("snapshot_inventory")
+    require(
+        isinstance(inventory, Mapping) and bool(inventory),
+        "report successful-canary snapshot inventory is absent",
+    )
+    normalized: dict[str, str] = {}
+    for raw_relative, raw_digest in inventory.items():
+        require(
+            isinstance(raw_relative, str),
+            "report successful-canary snapshot inventory path differs",
+        )
+        relative = str(
+            _safe_relative(
+                raw_relative, "report successful-canary snapshot inventory path"
+            )
+        )
+        require(
+            sha256_string(raw_digest) and relative not in normalized,
+            f"report successful-canary snapshot inventory row differs: {relative}",
+        )
+        normalized[relative] = raw_digest
+    require(
+        stable_hash(normalized) == contract.get("snapshot_inventory_sha256"),
+        "report successful-canary snapshot inventory hash differs",
+    )
+
+    required_relatives = {
+        "manifest": PACKAGE_RELATIVE / "manifest.json",
+        "protocol": PACKAGE_RELATIVE / "protocol.sha256",
+        "artifact": PACKAGE_RELATIVE / "canary2_acceptance_provenance.json",
+    }
+    payloads: dict[str, bytes] = {}
+    raw_hashes: dict[str, str] = {}
+    for label, relative in required_relatives.items():
+        relative_text = relative.as_posix()
+        require(
+            relative_text in normalized,
+            f"report successful-canary {label} is absent from snapshot inventory",
+        )
+        path = contained_regular(
+            snapshot / relative,
+            snapshot,
+            f"report successful-canary {label}",
+        )
+        payload, digest, info = _authenticated_regular_bytes(
+            path, f"report successful-canary {label}", capture=True
+        )
+        assert payload is not None
+        require(
+            stat.S_IMODE(info.st_mode) == 0o444
+            and digest == normalized[relative_text],
+            f"report successful-canary {label} bytes differ",
+        )
+        payloads[label] = payload
+        raw_hashes[label] = digest
+
+    manifest_path = snapshot / required_relatives["manifest"]
+    manifest = _decode_json_object(manifest_path, payloads["manifest"])
+    require(
+        stable_hash(manifest) == contract.get("manifest_sha256"),
+        "report successful-canary manifest binding differs",
+    )
+    try:
+        protocol = payloads["protocol"].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ReportError(
+            f"report successful-canary protocol lock is not ASCII: {exc}"
+        ) from exc
+    protocol_value = protocol.removesuffix("\n")
+    require(
+        protocol == f"{protocol_value}\n"
+        and sha256_string(protocol_value)
+        and protocol_value == contract.get("package_protocol_sha256"),
+        "report successful-canary protocol binding differs",
+    )
+    prerequisite = _validated_production_authorization_prerequisite(
+        manifest, protocol_value
+    )
+    require(
+        exact_json_equal(
+            contract.get("production_authorization_prerequisite"), prerequisite
+        ),
+        "report successful-canary contract projection differs",
+    )
+    artifact_path = snapshot / required_relatives["artifact"]
+    artifact = _decode_json_object(artifact_path, payloads["artifact"])
+    require(
+        raw_hashes["artifact"] == prerequisite["raw_sha256"]
+        and stable_hash(artifact) == prerequisite["canonical_sha256"],
+        "report successful-canary provenance artifact binding differs",
+    )
+    if provenance is not None:
+        require(
+            provenance.get("campaign_id") == CAMPAIGN_ID
+            and provenance.get("submission_sha256") == submission_sha256
+            and exact_json_equal(
+                provenance.get("production_authorization_prerequisite"),
+                prerequisite,
+            )
+            and provenance.get("production_authorization_prerequisite_sha256")
+            == stable_hash(prerequisite),
+            "report provenance successful-canary prerequisite differs",
+        )
+    return prerequisite
+
+
 def _pairs(path: Path):
     def hook(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -209,24 +491,28 @@ def _pairs(path: Path):
     return hook
 
 
+def _decode_json_object(path: Path, payload: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_pairs(path),
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ReportError(f"non-finite JSON value in {path}: {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportError(f"cannot read {path}: {exc}") from exc
+    require(isinstance(value, dict), f"JSON root is not an object: {path}")
+    return value
+
+
 def read_json(path: str | Path) -> dict[str, Any]:
     source = Path(path)
     payload, _digest, _info = _authenticated_regular_bytes(
         source, f"JSON artifact {source}", capture=True
     )
     assert payload is not None
-    try:
-        value = json.loads(
-            payload.decode("utf-8"),
-            object_pairs_hook=_pairs(source),
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                ReportError(f"non-finite JSON value in {source}: {token}")
-            ),
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ReportError(f"cannot read {source}: {exc}") from exc
-    require(isinstance(value, dict), f"JSON root is not an object: {source}")
-    return value
+    return _decode_json_object(source, payload)
 
 
 def regular_nonsymlink(path: Path, label: str) -> Path:
@@ -874,6 +1160,10 @@ def verify_snapshot_inventory(
             require(int(row["mode"]) & 0o222 == 0, f"snapshot directory is writable: {relative}")
     require(actual_files == set(normalized), "snapshot file coverage differs")
     require(actual_dirs == expected_dirs, "snapshot directory coverage differs")
+
+    _validated_snapshot_production_authorization_prerequisite(
+        submission, submission_sha256
+    )
 
     receipt_path = submission / "SUBMISSION_RECEIPT.json"
     contained_regular(receipt_path, submission, "submission receipt")
@@ -1872,7 +2162,7 @@ def assemble_report(
     submission_root = nonsymlink_directory(submission_root, "submission root")
     require(sha256_string(submission_sha256), "submission SHA256 is malformed")
     require(
-        not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"),
+        not _durable_cleanup_prefix_exists(submission_root),
         "cancelled/ambiguous submission cannot report",
     )
     contract, receipt = verify_snapshot_inventory(
@@ -1903,6 +2193,16 @@ def assemble_report(
     manifest, _weight_lock = campaign.load_contract(snapshot_root)
     require(manifest == bootstrap_manifest, "manifest changed during report bootstrap")
     protocol = campaign.verify_protocol_lock(package)
+    production_authorization_prerequisite = (
+        _validated_production_authorization_prerequisite(manifest, protocol)
+    )
+    require(
+        exact_json_equal(
+            contract.get("production_authorization_prerequisite"),
+            production_authorization_prerequisite,
+        ),
+        "report successful-canary prerequisite differs from submission contract",
+    )
     worker_contract = worker.validate_submission_contract(
         submission_root,
         submission_sha256,
@@ -2061,6 +2361,12 @@ def assemble_report(
         "schema_version": 1,
         "campaign_id": CAMPAIGN_ID,
         "submission_sha256": submission_sha256,
+        "production_authorization_prerequisite": (
+            production_authorization_prerequisite
+        ),
+        "production_authorization_prerequisite_sha256": stable_hash(
+            production_authorization_prerequisite
+        ),
         "outcome_blind_phase": outcome_blind_phase,
         "event_artifacts": event_provenance,
         "terminal_artifacts": terminal_provenance,
@@ -2218,8 +2524,8 @@ def _publish_report_locked(
             os.close(staging_fd)
         _fsync_directory(submission_root)
         require(
-            not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"),
-            "cancellation latch appeared before report commit",
+            not _durable_cleanup_prefix_exists(submission_root),
+            "cancellation/cleanup prefix appeared before report commit",
         )
         require(not _lexical_exists(report_root), "report publication target appeared concurrently")
         os.rename(staging, report_root)
@@ -2279,6 +2585,20 @@ def _publish_report_locked(
     return commit
 
 
+def _validated_report_publication_prerequisite(
+    submission_root: Path,
+    submission_sha256: str,
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind publication to the positive-canary projection in the sealed contract."""
+
+    return _validated_snapshot_production_authorization_prerequisite(
+        submission_root,
+        submission_sha256,
+        provenance=provenance,
+    )
+
+
 def publish_report(
     submission_root: Path,
     submission_sha256: str,
@@ -2290,8 +2610,11 @@ def publish_report(
 
     submission_root = nonsymlink_directory(submission_root, "submission root")
     with _ReportCancelLock(submission_root):
+        _validated_report_publication_prerequisite(
+            submission_root, submission_sha256, provenance
+        )
         require(
-            not _lexical_exists(submission_root / "CANCEL_REQUESTED.json"),
+            not _durable_cleanup_prefix_exists(submission_root),
             "cancelled/ambiguous submission cannot publish a report",
         )
         return _publish_report_locked(
