@@ -76,6 +76,8 @@ PROTOCOL_FILES = (
     "cancel.py",
     "report.py",
     "report.slurm",
+    "report_repair.py",
+    "report_repair.slurm",
     "dag_evidence.py",
     "two_wave_canary.py",
     "canary_worker.py",
@@ -89,6 +91,7 @@ PROTOCOL_FILES = (
     "tests/test_gate.py",
     "tests/test_lifecycle.py",
     "tests/test_orchestration.py",
+    "tests/test_report_repair.py",
     "tests/test_two_wave_canary.py",
 )
 SNAPSHOT_IMPORT_FILES = {
@@ -187,7 +190,7 @@ ACCEPTED_CANARY_ATTEMPTS = [{
 ACCEPTED_CANARY_CURRENT_SOURCE_SHA256 = {
     "submit.py": "51671551e331537dc31e87e11423bd6c66e1ce981b1dbb5b85ee48c028160dfa",
     "worker.py": "321cef217725178eda2a3c8750edd77f187631f1637614fe51fd511776ac6cd9",
-    "report.py": "510b7178f0cfdc7ba62d837dcf64bb20001f3b1828aed286829603742df63057",
+    "report.py": "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add",
     "dag_evidence.py": "b653ba6b2c25c017144cacb7b4b17ec5f5e153ad504eab47fba101d2c71dd1bb",
     "train_entry.py": "ac525211824eca20993f696a3e249d3c700b24eefdea48f365c8a997d64a9f33",
     "train.slurm": "fa66ce7d7dccf626ad434b6f87dfe284a904464701549a99a0dd6e94a695c44a",
@@ -209,11 +212,161 @@ ACCEPTED_CANARY_POST_ACCEPTANCE_CHANGE_SCOPE = (
     "two_wave_canary.py, plus mandatory accepted-canary prerequisite and "
     "report-versus-cancel gating with cleanup-only legacy recovery in submit.py "
     "and report.py and matching prerequisite validation in worker.py and "
-    "train_entry.py; fresh canary DAG submission commands, scalar dependency "
+    "train_entry.py, plus a one-generation append-only terminal-report repair "
+    "controller and a repair-only publication mode in report.py after the "
+    "original Launch8 reporter failed during immutable publication; fresh canary "
+    "DAG submission commands, scalar dependency "
     "forms, wave0 release payload, canary compute worker and Slurm scripts, and "
     "fresh scientific DAG submission commands and dependency forms remain "
     "unchanged"
 )
+TERMINAL_REPORT_REPAIR_POLICY = {
+    "schema_version": 1,
+    "status": "authorized_source_available_unexecuted",
+    "scientific": False,
+    "attempt": 1,
+    "generation_count": 1,
+    "default_action": "read-only --describe",
+    "test_action": "--test-only",
+    "explicit_submit_flag": "--submit-real-report-repair",
+    "recovery_action": "--recover-or-cancel-report-repair",
+    "confirmation_phrase": "SUBMIT_EXP23_LAUNCH8_REPORT_REPAIR_0001",
+    "controller": "report_repair.py",
+    "batch": "report_repair.slurm",
+    "publisher": "report.py --publish-repair",
+    "submission_root": (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+        "state/submission"
+    ),
+    "submission_sha256": (
+        "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418"
+    ),
+    "original_terminal_report": {
+        "source_commit": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "package_protocol_sha256": (
+            "2c0231b61197fe67790432c78a896272a55c3497a777d490598b53a6be67342f"
+        ),
+        "snapshot_inventory_sha256": (
+            "9bff89010f792d1aed8b3b691567655daab8f83135d6421798b5efea29a2f2c5"
+        ),
+        "submission_authorization_sha256": (
+            "371ae8df4add6338b98469eca6a287902cb69325dfda9d5be6ce5b1600e6fd55"
+        ),
+        "submission_receipt_sha256": (
+            "58d1fd0f004efae049afd51e9592a79e963ba3fc8c2d3aae8a4af0bb7791a6a7"
+        ),
+        "report_calling_sha256": (
+            "e0fd250dcd21fc7a0a62b5da0fe2c3d95401a24e6ad92c4e806082867e623047"
+        ),
+        "report_submitted_sha256": (
+            "923f49755df3fcab99a547e0347b158ed42daef20cd640e24c605848b0769e57"
+        ),
+        "job_id": "33311218",
+        "job_name": "exp23-launch8-bbeaa71f8f37f22c-report",
+        "scheduler_comment": (
+            "treewm-exp23:"
+            "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418"
+        ),
+        "state": "FAILED",
+        "exit_code": "2:0",
+        "elapsed_raw": "355",
+        "allocated_nodes": "1",
+        "node_list": "cpu-00090",
+        "start": "2026-08-29T08:28:49",
+        "end": "2026-08-29T08:34:44",
+        "log_path": "logs/report_33311218.out",
+        "log_mode": 0o600,
+        "log_size": 384,
+        "log_sha256": (
+            "2c5a23103e00fc07196886c62e7c9d069ed1b011fb9f44095a4242cc926e43a6"
+        ),
+        "terminal_scheduler_observation_required_before_submit": True,
+        "active_original_or_repair_jobs_required": 0,
+        "published_report_required_absent": True,
+        "staging_and_cleanup_prefixes_required_absent": True,
+    },
+    "deterministic_reassembly": {
+        "status": "rejected",
+        "report_bundle_sha256": (
+            "b9102090021c103fa2362663d1a51310d239d50223108dba0106758b199d9b83"
+        ),
+        "report_bundle_file_sha256": (
+            "1a72e7968c5bc1639845eb18a64584db2204310c70c6301cdcccf804f576f139"
+        ),
+        "report_bundle_file_size": 424_013_704,
+        "gate_sha256": (
+            "d41b37f6806c77f15557ecd0329596da8385c02db5b06cecfb29247bb5f4682a"
+        ),
+        "gate_decision_file_sha256": (
+            "53a7af1c91e4b09b8a04fdab7c1c0192d2076a88eb495855d9eafe39601f64b6"
+        ),
+        "gate_decision_file_size": 704_147,
+        "original_provenance_v1_sha256": (
+            "3fca5a3893cfd2e948f922438ee57bcc03e7763cfdb615500429700153820f77"
+        ),
+        "original_provenance_v1_file_sha256": (
+            "3e99d102d6f5faa92699fb9bed4e1607e00a08349f03107048153c8d0764e858"
+        ),
+        "original_provenance_v1_file_size": 236_577,
+        "worker_receipt_map_sha256": (
+            "ab1ced2e9b736edede8e1353297682feb800865f03da0c25b681208ce7d8cfc8"
+        ),
+        "original_report_commit_payload_sha256": (
+            "a52fd230482818d2d9bc52e2b0433d95b31fccd945c0a6ec95b8e9aa1834611c"
+        ),
+    },
+    "repair_source_sha256": {
+        "report.py": (
+            "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add"
+        ),
+        "report_repair.py": (
+            "dc7995049a8be5738c924ddf9818e9a5b33a5bcaa83e326486c63568fc65084d"
+        ),
+        "report_repair.slurm": (
+            "15ce6712f16c0655b4ad3d544987aec25574531cfc02b470c1ed9395bd363962"
+        ),
+    },
+    "publication_contract": {
+        "provenance_schema_version": 2,
+        "publication_authority_required": True,
+        "report_commit_schema_version": 1,
+        "report_commit_exact_key_count": 14,
+        "report_commit_last": True,
+        "no_replace_publication": True,
+        "sealed_json_mode": "0444",
+        "report_directory_mode": "0555",
+        "deterministic_reassembly_allowed": True,
+        "scientific_input_change_allowed": False,
+        "gate_change_allowed": False,
+        "scientific_status_change_allowed": False,
+        "scientific_bundle_schema_changed": False,
+        "report_commit_schema_changed": False,
+        "exp24_adapter_change_required": False,
+    },
+    "scheduler_protocol": {
+        "submit_held": True,
+        "settled_census_rounds": 3,
+        "fresh_owner_wide_empty_census_before_submit_calling": True,
+        "transaction_then_report_cancel_lock": True,
+        "authorization_before_release": True,
+        "historical_numeric_id_cleanup_only": True,
+        "ambiguous_identity_cleanup_only": True,
+        "broad_namespace_ambiguity_cleanup_only": True,
+        "retry_after_terminal_repair_failure_allowed": False,
+        "slurm_walltime_seconds": 14_400,
+        "release_evidence_wait_seconds": 10_800,
+        "minimum_assembly_budget_seconds": 3_600,
+        "release_wait_clock": "time.monotonic",
+        "release_poll_seconds": 0.25,
+        "terminal_worker_accounting_required": True,
+        "terminal_worker_failure_blocks_publication": True,
+        "sealed_source_root_bound_in_sbatch_argv": True,
+        "publisher_nofollow_same_fd_hash_before_exec": True,
+    },
+    "actual_repair_submit_performed": False,
+}
 SUPERSEDED_LAUNCHES = [{
     "campaign_id": "treewm-executable-prefix-repair-pilot-v1",
     "run_root": (
@@ -3993,7 +4146,53 @@ def validate_manifest(
     _validate_canary1_negative_provenance(manifest, Path(repo).resolve())
     _validate_canary2_acceptance_provenance(manifest, Path(repo).resolve())
     _validate_launch7_negative_provenance(manifest, Path(repo).resolve())
-    require(manifest["package_policy"]["launch_surface"] is True, "launch surface disabled")
+    require(
+        exact_json_equal(
+            manifest.get("package_policy"),
+            {
+                "launch_surface": True,
+                "allowed_actions": [
+                    "verify_package",
+                    "render_matrix",
+                    "evaluate_supplied_report_bundle",
+                    "rerun_outcome_blind_weight_audit",
+                    "scheduler_control_plane_test",
+                    "static_launch_test",
+                    "dry_run",
+                    "explicit_submit",
+                    "terminal_report_repair_describe",
+                    "terminal_report_repair_test",
+                    "explicit_terminal_report_repair_submit",
+                    "explicit_terminal_report_repair_recovery",
+                ],
+                "forbidden_actions": [
+                    "implicit_submit",
+                    "import_checkpoint",
+                    "import_optimizer",
+                    "select_at_midpoint",
+                    "drop_cell",
+                    "write_exp20_exp21_exp22",
+                    "consume_exp20_outcomes",
+                    "implicit_report_retry",
+                    "manual_report_publication",
+                    "second_report_repair_generation",
+                    "scientific_recomputation",
+                    "scientific_input_change",
+                    "gate_change",
+                ],
+                "submission_policy": (
+                    "No command submits unless submit.py is invoked with --submit "
+                    "under the pinned interpreter, except the exact one-generation "
+                    "terminal-report repair bound by launch_contract."
+                    "terminal_report_repair, which requires report_repair.py "
+                    "--submit-real-report-repair plus its exact confirmation phrase. "
+                    "All default, --describe, --scheduler-test, and --test-only "
+                    "actions are read-only."
+                ),
+            },
+        ),
+        "package action policy differs",
+    )
     require(
         manifest.get("superseded_launches") == SUPERSEDED_LAUNCHES,
         "superseded launch identities differ",
@@ -4222,6 +4421,25 @@ def validate_manifest(
         },
         "real-GPU two-wave canary contract differs",
     )
+    require(
+        exact_json_equal(
+            launch.get("terminal_report_repair"), TERMINAL_REPORT_REPAIR_POLICY
+        ),
+        "terminal report repair contract differs",
+    )
+    repair_package = Path(repo).resolve() / PACKAGE_RELATIVE
+    for repair_name, repair_sha256 in TERMINAL_REPORT_REPAIR_POLICY[
+        "repair_source_sha256"
+    ].items():
+        repair_payload = _regular_file_bytes(
+            repair_package / repair_name,
+            f"terminal report repair source {repair_name}",
+            max_bytes=8 * 1024 * 1024,
+        )
+        require(
+            hashlib.sha256(repair_payload).hexdigest() == repair_sha256,
+            f"terminal report repair source hash differs: {repair_name}",
+        )
     execution = manifest["execution"]
     require("srun" not in execution, "srun execution path reintroduced")
     require(execution["scontrol"] == "/usr/local/bin/scontrol", "scontrol path differs")
@@ -4257,7 +4475,12 @@ def validate_manifest(
         and "predeclared afterok wave one" in execution["training_lifecycle"]
         and "no srun, compute-side scheduler client, or within-wave requeue"
         in execution["process_topology"]
-        and execution["scheduler_client_placement"].startswith("Only submit.py"),
+        and execution["scheduler_client_placement"]
+        == (
+            "Only submit.py, cancel.py, report_repair.py, and submission-host "
+            "recovery may execute scontrol/squeue/sbatch/scancel. Compute "
+            "worker.py, train.slurm, report.py, and report_repair.slurm never do."
+        ),
         "two-wave process topology differs",
     )
     validate_snapshot_import_files(repo)

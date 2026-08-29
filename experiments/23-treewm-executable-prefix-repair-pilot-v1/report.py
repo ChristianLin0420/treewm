@@ -2,12 +2,17 @@
 """Assemble, gate, and atomically publish the terminal Exp23 report.
 
 The default/``--test-only`` action is read-only.  ``report.slurm`` uses the explicit
-``--publish`` action after the complete twenty-cell array succeeds.
+``--publish`` action after the complete twenty-cell array succeeds.  A separately
+authorized, append-only engineering repair may use ``--publish-repair``; it never
+changes the scientific assembly or gate inputs.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import ctypes
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -15,6 +20,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import struct
 import sys
@@ -31,6 +37,34 @@ REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 BOUNDARIES = (5_000, 25_000)
 SHA256 = frozenset("0123456789abcdef")
+REPAIR_WALLTIME_SECONDS = 14_400
+REPAIR_RELEASE_EVIDENCE_WAIT_SECONDS = 10_800
+REPAIR_ASSEMBLY_BUDGET_SECONDS = 3_600
+REPAIR_RELEASE_POLL_SECONDS = 0.25
+REPAIR_WORKER_HANDOFF = {
+    "schema_version": 1,
+    "slurm_walltime_seconds": REPAIR_WALLTIME_SECONDS,
+    "release_evidence_wait_seconds": REPAIR_RELEASE_EVIDENCE_WAIT_SECONDS,
+    "minimum_assembly_budget_seconds": REPAIR_ASSEMBLY_BUDGET_SECONDS,
+    "clock": "time.monotonic",
+    "poll_interval_seconds": REPAIR_RELEASE_POLL_SECONDS,
+}
+REPAIR_SACCT_FIELDS = (
+    "JobIDRaw",
+    "JobName",
+    "User",
+    "State",
+    "ExitCode",
+    "ElapsedRaw",
+    "AllocNodes",
+    "NodeList",
+    "Submit",
+    "Eligible",
+    "Start",
+    "End",
+    "Comment",
+    "Reason",
+)
 WORKER_COMPLETE_KEYS = frozenset(
     {
         "schema_version",
@@ -122,6 +156,163 @@ AUTHORIZATION_KEYS = frozenset(
         "authorized_at_utc",
     }
 )
+REPORT_REPAIR_AUTHORIZATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "original_report_job_id",
+        "repair_report_job_id",
+        "repair_job_name",
+        "scheduler_comment",
+        "snapshot_root",
+        "snapshot_inventory_sha256",
+        "original_package_protocol_sha256",
+        "original_failure_evidence",
+        "original_failure_evidence_sha256",
+        "worker_receipt_map",
+        "worker_receipt_map_sha256",
+        "repair_source_root",
+        "repair_source_commit",
+        "repair_package_protocol_sha256",
+        "repair_source_files",
+        "repair_source_files_sha256",
+        "submit_calling_sha256",
+        "submitted_evidence",
+        "submitted_evidence_sha256",
+        "scheduler_authority_census",
+        "scheduler_authority_census_sha256",
+        "worker_handoff",
+        "expected_reassembly",
+        "publication_allowed",
+        "deterministic_reassembly_allowed",
+        "scientific_input_change_allowed",
+        "gate_change_allowed",
+        "scheduler_submission_allowed",
+        "authorized_at_utc",
+    }
+)
+REPORT_REPAIR_SUBMIT_CALLING_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "original_failure_evidence",
+        "original_failure_evidence_sha256",
+        "repair_source_root",
+        "repair_source_commit",
+        "repair_package_protocol_sha256",
+        "repair_source_files",
+        "repair_source_files_sha256",
+        "scheduler_pre_submit_census",
+        "scheduler_pre_submit_census_sha256",
+        "command",
+        "scheduler_environment",
+        "transaction_lock",
+        "report_cancel_lock",
+        "called_at_utc",
+    }
+)
+REPORT_REPAIR_RELEASE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "repair_report_job_id",
+        "authorization_sha256",
+        "release_attempts",
+        "release_attempts_sha256",
+        "post_release_census",
+        "post_release_census_sha256",
+        "worker_liveness_observation",
+        "worker_liveness_observation_sha256",
+        "released_at_utc",
+    }
+)
+REPORT_REPAIR_RELEASE_CALLING_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "release_attempt",
+        "repair_report_job_id",
+        "authorization_sha256",
+        "command",
+        "scheduler_environment",
+        "transaction_lock",
+        "report_cancel_lock",
+        "called_at_utc",
+    }
+)
+REPORT_REPAIR_RELEASE_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "release_attempt",
+        "repair_report_job_id",
+        "authorization_sha256",
+        "release_calling_sha256",
+        "mode",
+        "scheduler_evidence",
+        "observed_at_utc",
+    }
+)
+REPORT_REPAIR_FAILURE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "submission_sha256",
+        "attempt",
+        "original_report_job_id",
+        "original_report_job_name",
+        "scheduler_comment",
+        "original_report_calling_sha256",
+        "original_report_submitted_sha256",
+        "submission_authorization_sha256",
+        "submission_receipt_sha256",
+        "snapshot_root",
+        "snapshot_inventory_sha256",
+        "original_source_commit",
+        "original_package_protocol_sha256",
+        "report_log",
+        "terminal_scheduler_observation",
+        "pre_submit_active_census",
+        "worker_receipt_map",
+        "worker_receipt_map_sha256",
+        "expected_reassembly",
+        "publication_state",
+        "observed_at_utc",
+    }
+)
+EXPECTED_REPAIR_REASSEMBLY = {
+    "schema_version": 1,
+    "status": "rejected",
+    "report_bundle_sha256": "b9102090021c103fa2362663d1a51310d239d50223108dba0106758b199d9b83",
+    "gate_sha256": "d41b37f6806c77f15557ecd0329596da8385c02db5b06cecfb29247bb5f4682a",
+    "report_bundle_file_sha256": "1a72e7968c5bc1639845eb18a64584db2204310c70c6301cdcccf804f576f139",
+    "gate_decision_file_sha256": "53a7af1c91e4b09b8a04fdab7c1c0192d2076a88eb495855d9eafe39601f64b6",
+    "original_provenance_v1_file_sha256": "3e99d102d6f5faa92699fb9bed4e1607e00a08349f03107048153c8d0764e858",
+    "original_provenance_v1_sha256": "3fca5a3893cfd2e948f922438ee57bcc03e7763cfdb615500429700153820f77",
+    "report_bundle_file_size": 424_013_704,
+    "gate_decision_file_size": 704_147,
+    "original_provenance_v1_file_size": 236_577,
+    "worker_marker_aggregate_sha256": "ab1ced2e9b736edede8e1353297682feb800865f03da0c25b681208ce7d8cfc8",
+    "deterministic_reassembly_allowed": True,
+    "scientific_input_change_allowed": False,
+    "gate_change_allowed": False,
+}
 
 
 class ReportError(RuntimeError):
@@ -153,7 +344,7 @@ def _lexical_exists(path: str | Path, label: str | None = None) -> bool:
     return _lstat_if_present(path, label) is not None
 
 
-def _durable_cleanup_prefix_exists(submission_root: Path) -> bool:
+def _durable_original_cleanup_prefix_exists(submission_root: Path) -> bool:
     journal = submission_root / "journal"
     return any(
         _lexical_exists(path)
@@ -164,6 +355,55 @@ def _durable_cleanup_prefix_exists(submission_root: Path) -> bool:
             journal / "9001_PRODUCTION_PREREQUISITE_MISSING.json",
         )
     )
+
+
+def _durable_repair_stop_prefix_exists(submission_root: Path) -> bool:
+    journal = submission_root / "journal"
+    try:
+        names = {
+            entry.name
+            for entry in os.scandir(journal)
+            if entry.name.startswith("REPORT_REPAIR_")
+            or entry.name.startswith("CALLING_REPORT_REPAIR_")
+        }
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ReportError(f"cannot inventory durable cleanup prefix: {exc}") from exc
+    allowed_positive = {
+        "REPORT_REPAIR_0001_ORIGINAL_FAILURE.json",
+        "CALLING_REPORT_REPAIR_0001_SUBMIT.json",
+        "REPORT_REPAIR_0001_SUBMITTED.json",
+        "REPORT_REPAIR_0001_AUTHORIZED.json",
+        "REPORT_REPAIR_0001_RELEASED.json",
+    }
+    allowed_positive_patterns = (
+        re.compile(r"CALLING_REPORT_REPAIR_0001_RELEASE_[0-9]{4}\.json\Z"),
+        re.compile(r"REPORT_REPAIR_0001_RELEASE_RESULT_[0-9]{4}\.json\Z"),
+    )
+    if any(
+        name not in allowed_positive
+        and not any(pattern.fullmatch(name) for pattern in allowed_positive_patterns)
+        for name in names
+    ):
+        return True
+    release_result_pattern = allowed_positive_patterns[1]
+    for name in sorted(names):
+        if not release_result_pattern.fullmatch(name):
+            continue
+        try:
+            value = read_json(journal / name)
+        except (OSError, ReportError, ValueError, TypeError):
+            return True
+        if value.get("mode") == "lost_response_reconciled_ambiguous_identity":
+            return True
+    return False
+
+
+def _durable_cleanup_prefix_exists(submission_root: Path) -> bool:
+    return _durable_original_cleanup_prefix_exists(
+        submission_root
+    ) or _durable_repair_stop_prefix_exists(submission_root)
 
 
 def canonical_json(value: object) -> str:
@@ -209,6 +449,10 @@ def file_sha256(path: str | Path) -> str:
 
 def sha256_string(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and set(value) <= SHA256
+
+
+def git_commit_string(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 40 and set(value) <= SHA256
 
 
 def _validated_production_authorization_prerequisite(
@@ -982,6 +1226,17 @@ class _ReportCancelLock:
             os.fsync(descriptor)
             _fsync_directory(root)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            opened_after_lock = os.fstat(descriptor)
+            named_after_lock = self.path.lstat()
+            require(
+                stat.S_ISREG(opened_after_lock.st_mode)
+                and _file_identity(opened_after_lock)
+                == _file_identity(named_after_lock)
+                and opened_after_lock.st_uid == os.getuid()
+                and opened_after_lock.st_nlink == 1
+                and stat.S_IMODE(opened_after_lock.st_mode) == 0o600,
+                "report/cancel lock binding changed while waiting for flock",
+            )
         except BaseException:
             os.close(descriptor)
             raise
@@ -1074,6 +1329,10 @@ def verify_snapshot_inventory(
     snapshot_root: Path,
     submission_root: Path,
     submission_sha256: str,
+    *,
+    require_publish_job: bool = False,
+    repair_attempt: int | None = None,
+    repair_authorization_sha256: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Authenticate the contract/receipt and exact read-only snapshot using stdlib only."""
 
@@ -1461,8 +1720,35 @@ def verify_snapshot_inventory(
         "wave-zero release identity/state differs",
     )
     scheduler_job = os.environ.get("SLURM_JOB_ID")
-    if scheduler_job is not None:
-        require(scheduler_job == report_id, "active report Slurm job differs from committed receipt")
+    if repair_attempt is not None or repair_authorization_sha256 is not None:
+        require(
+            type(repair_attempt) is int
+            and repair_attempt == 1
+            and sha256_string(repair_authorization_sha256),
+            "report repair publication arguments differ",
+        )
+        authority = _validated_report_repair_authorization(
+            submission,
+            submission_sha256,
+            receipt,
+            attempt=repair_attempt,
+            expected_raw_sha256=str(repair_authorization_sha256),
+        )
+        require(
+            scheduler_job is not None
+            and scheduler_job == authority["repair_report_job_id"],
+            "active repair-report Slurm job differs from repair authorization",
+        )
+    elif require_publish_job:
+        require(
+            scheduler_job is not None and scheduler_job == report_id,
+            "active report Slurm job is absent or differs from committed receipt",
+        )
+    elif scheduler_job is not None:
+        require(
+            scheduler_job == report_id,
+            "active report Slurm job differs from committed receipt",
+        )
     return contract, receipt
 
 
@@ -1472,6 +1758,1222 @@ def contained_regular(path: Path, root: Path, label: str) -> Path:
     expected_root = nonsymlink_directory(root, f"{label} root")
     require(resolved.is_relative_to(expected_root), f"{label} escapes its declared root")
     return resolved
+
+
+def _receipt_file_map(submission_root: Path) -> dict[str, Any]:
+    files: dict[str, Any] = {}
+    for index in range(20):
+        relative = Path("tasks") / f"cell-{index:02d}" / "WORKER_COMPLETE.json"
+        path = contained_regular(
+            submission_root / relative,
+            submission_root,
+            f"cell{index} repair worker receipt",
+        )
+        info = path.lstat()
+        require(
+            stat.S_IMODE(info.st_mode) == 0o444
+            and info.st_uid == os.getuid()
+            and info.st_nlink == 1,
+            f"cell{index} repair worker receipt identity differs",
+        )
+        files[relative.as_posix()] = {
+            "mode": 0o444,
+            "size": info.st_size,
+            "sha256": file_sha256(path),
+        }
+    return {"schema_version": 1, "files": files}
+
+
+def _repair_authorization_path(submission_root: Path, attempt: int) -> Path:
+    return (
+        submission_root
+        / "journal"
+        / f"REPORT_REPAIR_{attempt:04d}_AUTHORIZED.json"
+    )
+
+
+def _repair_release_path(submission_root: Path, attempt: int) -> Path:
+    return (
+        submission_root
+        / "journal"
+        / f"REPORT_REPAIR_{attempt:04d}_RELEASED.json"
+    )
+
+
+def _wait_for_repair_release_evidence(
+    submission_root: Path,
+    submission_sha256: str,
+    *,
+    attempt: int,
+    authorization_sha256: str,
+    monotonic: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> None:
+    require(type(attempt) is int and attempt == 1, "report repair wait attempt differs")
+    require(sha256_string(authorization_sha256), "report repair wait authorization hash differs")
+    require(
+        REPAIR_RELEASE_EVIDENCE_WAIT_SECONDS + REPAIR_ASSEMBLY_BUDGET_SECONDS
+        == REPAIR_WALLTIME_SECONDS,
+        "report repair wait/assembly walltime budget differs",
+    )
+    authorization_path = _repair_authorization_path(submission_root, attempt)
+    payload, digest, info = _authenticated_regular_bytes(
+        authorization_path, "report repair wait authorization", capture=True
+    )
+    assert payload is not None
+    require(
+        stat.S_IMODE(info.st_mode) == 0o444
+        and info.st_uid == os.getuid()
+        and info.st_nlink == 1
+        and digest == authorization_sha256,
+        "report repair wait authorization identity/hash differs",
+    )
+    authorization = _decode_json_object(authorization_path, payload)
+    job_id = authorization.get("repair_report_job_id")
+    require(
+        set(authorization) == REPORT_REPAIR_AUTHORIZATION_KEYS
+        and type(authorization.get("schema_version")) is int
+        and authorization.get("schema_version") == 1
+        and authorization.get("status") == "authorized_terminal_report_repair"
+        and authorization.get("campaign_id") == CAMPAIGN_ID
+        and authorization.get("submission_sha256") == submission_sha256
+        and type(authorization.get("attempt")) is int
+        and authorization.get("attempt") == attempt
+        and isinstance(job_id, str)
+        and job_id.isdigit()
+        and job_id[0] in "123456789"
+        and exact_json_equal(
+            authorization.get("worker_handoff"), REPAIR_WORKER_HANDOFF
+        )
+        and authorization.get("publication_allowed") is True
+        and authorization.get("scheduler_submission_allowed") is False,
+        "report repair wait authorization fields differ",
+    )
+    require(
+        os.environ.get("SLURM_JOB_ID") == job_id
+        and os.environ.get("SLURM_RESTART_COUNT") == "0"
+        and "SLURM_ARRAY_JOB_ID" not in os.environ
+        and "SLURM_ARRAY_TASK_ID" not in os.environ,
+        "active report repair scheduler identity/restart differs",
+    )
+    started = monotonic()
+    require(
+        isinstance(started, (int, float))
+        and not isinstance(started, bool)
+        and math.isfinite(float(started)),
+        "report repair monotonic clock differs",
+    )
+    deadline = float(started) + REPAIR_RELEASE_EVIDENCE_WAIT_SECONDS
+    release_path = _repair_release_path(submission_root, attempt)
+    while True:
+        require(
+            not _durable_original_cleanup_prefix_exists(submission_root)
+            and not _durable_repair_stop_prefix_exists(submission_root),
+            "repair cleanup/terminal authority won before release evidence",
+        )
+        release_info = _lstat_if_present(release_path, "report repair release evidence")
+        if release_info is not None:
+            require(
+                stat.S_ISREG(release_info.st_mode)
+                and stat.S_IMODE(release_info.st_mode) == 0o444
+                and release_info.st_uid == os.getuid()
+                and release_info.st_nlink == 1,
+                "report repair release evidence identity differs",
+            )
+            return
+        now = monotonic()
+        require(
+            isinstance(now, (int, float))
+            and not isinstance(now, bool)
+            and math.isfinite(float(now))
+            and float(now) >= float(started),
+            "report repair monotonic clock regressed",
+        )
+        remaining = deadline - float(now)
+        require(remaining > 0, "report repair release-evidence wait exhausted")
+        sleep(min(REPAIR_RELEASE_POLL_SECONDS, remaining))
+
+
+def _repair_stream_bytes(value: object, label: str) -> bytes:
+    require(
+        isinstance(value, Mapping)
+        and set(value) == {"encoding", "size", "sha256", "data"}
+        and value.get("encoding") == "base64"
+        and type(value.get("size")) is int
+        and value["size"] >= 0
+        and sha256_string(value.get("sha256"))
+        and isinstance(value.get("data"), str),
+        f"{label} stream evidence differs",
+    )
+    try:
+        payload = base64.b64decode(value["data"], validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ReportError(f"{label} stream base64 differs: {exc}") from exc
+    require(
+        len(payload) == value["size"]
+        and hashlib.sha256(payload).hexdigest() == value["sha256"],
+        f"{label} stream payload differs",
+    )
+    return payload
+
+
+def _validated_repair_command_evidence(
+    value: object,
+    *,
+    expected_argv: Sequence[str] | None,
+    label: str,
+) -> dict[str, Any]:
+    require(
+        isinstance(value, Mapping)
+        and set(value)
+        == {"argv", "environment", "returncode", "stdout", "stderr"}
+        and isinstance(value.get("argv"), list)
+        and all(isinstance(item, str) for item in value["argv"])
+        and isinstance(value.get("environment"), Mapping)
+        and all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value["environment"].items()
+        )
+        and type(value.get("returncode")) is int,
+        f"{label} command evidence differs",
+    )
+    if expected_argv is not None:
+        require(value["argv"] == list(expected_argv), f"{label} command differs")
+    _repair_stream_bytes(value["stdout"], f"{label} stdout")
+    _repair_stream_bytes(value["stderr"], f"{label} stderr")
+    return dict(value)
+
+
+def _validated_repair_census(
+    value: object,
+    *,
+    submission_sha256: str,
+    label: str,
+) -> dict[str, Any]:
+    require(
+        isinstance(value, Mapping)
+        and set(value) == {"schema_version", "rounds", "settled_rows", "captured_at_utc"}
+        and type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and isinstance(value.get("rounds"), list)
+        and len(value["rounds"]) == 3
+        and isinstance(value.get("settled_rows"), list)
+        and isinstance(value.get("captured_at_utc"), str)
+        and bool(value["captured_at_utc"]),
+        f"{label} census shape differs",
+    )
+    reconstructed: list[list[dict[str, str]]] = []
+    for index, round_value in enumerate(value["rounds"]):
+        require(
+            isinstance(round_value, Mapping)
+            and set(round_value) == {"round", "raw", "relevant_rows"}
+            and type(round_value.get("round")) is int
+            and round_value.get("round") == index
+            and isinstance(round_value.get("relevant_rows"), list),
+            f"{label} census round differs",
+        )
+        raw = _validated_repair_command_evidence(
+            round_value["raw"], expected_argv=None, label=f"{label} round {index}"
+        )
+        require(
+            raw["argv"][0:2] == ["/usr/local/bin/squeue", "--noheader"]
+            and any(item.startswith("--user=") for item in raw["argv"])
+            and "--format=%A|%j|%u|%T|%k|%r" in raw["argv"]
+            and raw["returncode"] == 0
+            and _repair_stream_bytes(raw["stderr"], f"{label} round {index} stderr")
+            == b"",
+            f"{label} census command differs",
+        )
+        stdout_payload = _repair_stream_bytes(
+            raw["stdout"], f"{label} round {index} stdout"
+        )
+        try:
+            stdout_text = stdout_payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ReportError(f"{label} census stdout is not UTF-8: {exc}") from exc
+        owner_options = [item for item in raw["argv"] if item.startswith("--user=")]
+        require(len(owner_options) == 1, f"{label} census owner option differs")
+        expected_owner = owner_options[0].split("=", 1)[1]
+        parsed_relevant: list[dict[str, str]] = []
+        for line in stdout_text.splitlines():
+            if not line:
+                continue
+            fields = line.split("|", 5)
+            require(len(fields) == 6, f"{label} census raw row differs")
+            job_id, job_name, owner, state, comment, reason = fields
+            require(
+                job_id.isdigit() and job_id[0] in "123456789",
+                f"{label} census raw job ID differs",
+            )
+            if job_name.startswith("exp23-launch8-") or comment.startswith(
+                "treewm-exp23"
+            ):
+                require(owner == expected_owner, f"{label} census raw owner differs")
+                parsed_relevant.append(
+                    {
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "owner": owner,
+                        "state": state,
+                        "comment": comment,
+                        "reason": reason,
+                    }
+                )
+        rows: list[dict[str, str]] = []
+        for row in round_value["relevant_rows"]:
+            require(
+                isinstance(row, Mapping)
+                and set(row)
+                == {"job_id", "job_name", "owner", "state", "comment", "reason"}
+                and isinstance(row.get("job_id"), str)
+                and row["job_id"].isdigit()
+                and row["job_id"][0] in "123456789"
+                and all(isinstance(row.get(key), str) for key in row),
+                f"{label} census row differs",
+            )
+            rows.append(dict(row))
+        require(
+            exact_json_equal(rows, parsed_relevant),
+            f"{label} census parsed/raw rows differ",
+        )
+        reconstructed.append(rows)
+    require(
+        exact_json_equal(reconstructed[-2], reconstructed[-1])
+        and exact_json_equal(value["settled_rows"], reconstructed[-1]),
+        f"{label} census did not settle",
+    )
+    return dict(value)
+
+
+def _validated_repair_worker_liveness(
+    value: Mapping[str, Any],
+    *,
+    post_release: Mapping[str, Any],
+    repair_authorization: Mapping[str, Any],
+    authority_environment: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    submission_sha256: str,
+) -> dict[str, Any]:
+    job_id = str(repair_authorization["repair_report_job_id"])
+    mode = value.get("mode")
+    if mode == "active_squeue_identity":
+        require(
+            set(value)
+            == {
+                "schema_version",
+                "mode",
+                "repair_report_job_id",
+                "state",
+                "reason",
+                "scheduler_census_sha256",
+            }
+            and type(value.get("schema_version")) is int
+            and value.get("schema_version") == 1
+            and value.get("repair_report_job_id") == job_id
+            and value.get("scheduler_census_sha256") == stable_hash(post_release),
+            "report repair squeue worker liveness differs",
+        )
+        rows = [
+            row
+            for row in post_release["settled_rows"]
+            if row["job_name"] == repair_authorization["repair_job_name"]
+            and row["comment"] == repair_authorization["scheduler_comment"]
+        ]
+        require(
+            len(post_release["settled_rows"]) == 1
+            and len(rows) == 1
+            and rows[0]["job_id"] == job_id
+            and rows[0]["state"]
+            in {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED"}
+            and not (
+                rows[0]["state"] == "PENDING"
+                and rows[0]["reason"] in {"JobHeldUser", "JobHeldAdmin"}
+            )
+            and value.get("state") == rows[0]["state"]
+            and value.get("reason") == rows[0]["reason"],
+            "report repair squeue worker liveness identity differs",
+        )
+    elif mode == "active_accounting_identity":
+        require(
+            set(value)
+            == {
+                "schema_version",
+                "mode",
+                "repair_report_job_id",
+                "accounting_observation",
+                "accounting_observation_sha256",
+            }
+            and type(value.get("schema_version")) is int
+            and value.get("schema_version") == 1
+            and value.get("repair_report_job_id") == job_id
+            and isinstance(value.get("accounting_observation"), Mapping)
+            and value.get("accounting_observation_sha256")
+            == stable_hash(value["accounting_observation"]),
+            "report repair accounting worker liveness differs",
+        )
+        observation = value["accounting_observation"]
+        require(
+            set(observation)
+            == {
+                "schema_version",
+                "captured_at_utc",
+                "scheduler_control_plane",
+                "raw",
+                "canonical",
+                "canonical_sha256",
+                "parsed_row",
+            }
+            and type(observation.get("schema_version")) is int
+            and observation.get("schema_version") == 1
+            and isinstance(observation.get("captured_at_utc"), str)
+            and bool(observation["captured_at_utc"])
+            and exact_json_equal(
+                observation.get("scheduler_control_plane"),
+                contract.get("scheduler_control_plane_contract"),
+            )
+            and isinstance(observation.get("canonical"), Mapping)
+            and observation.get("canonical_sha256")
+            == stable_hash(observation["canonical"])
+            and isinstance(observation.get("parsed_row"), Mapping),
+            "report repair accounting liveness observation differs",
+        )
+        raw = _validated_repair_command_evidence(
+            observation.get("raw"),
+            expected_argv=[
+                "/usr/local/bin/sacct",
+                "-X",
+                "-n",
+                "-j",
+                job_id,
+                "-o",
+                ",".join(REPAIR_SACCT_FIELDS),
+                "-P",
+            ],
+            label="report repair worker accounting",
+        )
+        require(
+            exact_json_equal(raw["environment"], authority_environment)
+            and raw["returncode"] == 0
+            and _repair_stream_bytes(
+                raw["stderr"], "report repair worker accounting stderr"
+            )
+            == b"",
+            "report repair worker accounting command differs",
+        )
+        stdout = _repair_stream_bytes(
+            raw["stdout"], "report repair worker accounting stdout"
+        )
+        try:
+            text = stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ReportError(
+                f"report repair worker accounting stdout is not UTF-8: {exc}"
+            ) from exc
+        lines = [line for line in text.splitlines() if line]
+        require(len(lines) == 1, "report repair worker accounting row count differs")
+        row = lines[0].split("|")
+        require(
+            len(row) == len(REPAIR_SACCT_FIELDS),
+            "report repair worker accounting field count differs",
+        )
+        parsed = dict(zip(REPAIR_SACCT_FIELDS, row, strict=True))
+        state = parsed["State"].split(maxsplit=1)[0].removesuffix("+")
+        require(
+            parsed["JobIDRaw"] == job_id
+            and parsed["JobName"] == repair_authorization["repair_job_name"]
+            and parsed["User"] == authority_environment["USER"]
+            and parsed["Comment"] == repair_authorization["scheduler_comment"]
+            and state
+            in {
+                "PENDING",
+                "RUNNING",
+                "CONFIGURING",
+                "COMPLETING",
+                "SUSPENDED",
+                "RESIZING",
+                "STAGE_OUT",
+            }
+            and not (
+                state == "PENDING"
+                and parsed["Reason"] in {"JobHeldUser", "JobHeldAdmin"}
+            )
+            and exact_json_equal(observation["parsed_row"], parsed)
+            and exact_json_equal(
+                observation["canonical"],
+                {
+                    "schema_version": 1,
+                    "fields": list(REPAIR_SACCT_FIELDS),
+                    "rows": [row],
+                },
+            )
+            and not post_release["settled_rows"]
+            and not [
+                item
+                for item in post_release["settled_rows"]
+                if item["job_name"] == repair_authorization["repair_job_name"]
+                and item["comment"] == repair_authorization["scheduler_comment"]
+            ],
+            "report repair accounting worker liveness identity differs",
+        )
+    else:
+        raise ReportError("report repair worker liveness mode differs")
+    return dict(value)
+
+
+def _original_report_timeline_is_ordered(parsed: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(parsed.get("Submit"), str)
+        and bool(parsed["Submit"])
+        and isinstance(parsed.get("Eligible"), str)
+        and bool(parsed["Eligible"])
+        and isinstance(parsed.get("Start"), str)
+        and bool(parsed["Start"])
+        and isinstance(parsed.get("End"), str)
+        and bool(parsed["End"])
+        and parsed["Submit"]
+        <= parsed["Eligible"]
+        <= parsed["Start"]
+        < parsed["End"]
+    )
+
+
+def _validated_report_repair_authorization(
+    submission_root: Path,
+    submission_sha256: str,
+    receipt: Mapping[str, Any],
+    *,
+    attempt: int,
+    expected_raw_sha256: str,
+) -> dict[str, Any]:
+    """Authenticate the one append-only publication-only Launch8 repair."""
+
+    require(type(attempt) is int and attempt == 1, "report repair attempt differs")
+    require(sha256_string(expected_raw_sha256), "report repair authorization SHA256 differs")
+    path = contained_regular(
+        _repair_authorization_path(submission_root, attempt),
+        submission_root,
+        "report repair authorization",
+    )
+    info = path.lstat()
+    require(
+        stat.S_IMODE(info.st_mode) == 0o444
+        and info.st_uid == os.getuid()
+        and info.st_nlink == 1
+        and file_sha256(path) == expected_raw_sha256,
+        "report repair authorization identity/hash differs",
+    )
+    value = read_json(path)
+    historical_ids = {
+        receipt.get("wave0_array_job_id"),
+        receipt.get("wave1_array_job_id"),
+        receipt.get("report_job_id"),
+        "33285485",
+        "33285486",
+        "33295657",
+        "33295659",
+        "33295661",
+    }
+    require(
+        set(value) == REPORT_REPAIR_AUTHORIZATION_KEYS
+        and type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and value.get("status") == "authorized_terminal_report_repair"
+        and value.get("campaign_id") == CAMPAIGN_ID
+        and value.get("submission_sha256") == submission_sha256
+        and type(value.get("attempt")) is int
+        and value.get("attempt") == attempt
+        and value.get("original_report_job_id") == receipt.get("report_job_id")
+        and isinstance(value.get("repair_report_job_id"), str)
+        and value["repair_report_job_id"].isdigit()
+        and value["repair_report_job_id"][0] in "123456789"
+        and value["repair_report_job_id"] not in historical_ids
+        and value.get("repair_job_name")
+        == f"exp23-launch8-{submission_sha256[:16]}-report-repair-0001"
+        and value.get("scheduler_comment")
+        == f"treewm-exp23-report-repair:{submission_sha256}:0001"
+        and exact_json_equal(value.get("worker_handoff"), REPAIR_WORKER_HANDOFF)
+        and exact_json_equal(value.get("expected_reassembly"), EXPECTED_REPAIR_REASSEMBLY)
+        and value.get("publication_allowed") is True
+        and value.get("deterministic_reassembly_allowed") is True
+        and value.get("scientific_input_change_allowed") is False
+        and value.get("gate_change_allowed") is False
+        and value.get("scheduler_submission_allowed") is False
+        and isinstance(value.get("authorized_at_utc"), str)
+        and bool(value["authorized_at_utc"]),
+        "report repair authorization fields differ",
+    )
+    contract = read_json(submission_root / "SUBMISSION_CONTRACT.json")
+    require(
+        value.get("snapshot_root") == contract.get("snapshot_root")
+        and value.get("snapshot_inventory_sha256")
+        == contract.get("snapshot_inventory_sha256")
+        and value.get("original_package_protocol_sha256")
+        == contract.get("package_protocol_sha256"),
+        "report repair original snapshot binding differs",
+    )
+
+    failure_name = value.get("original_failure_evidence")
+    require(
+        failure_name == f"journal/REPORT_REPAIR_{attempt:04d}_ORIGINAL_FAILURE.json",
+        "report repair failure-evidence name differs",
+    )
+    failure_path = contained_regular(
+        submission_root / str(failure_name),
+        submission_root,
+        "report repair original failure evidence",
+    )
+    failure_info = failure_path.lstat()
+    require(
+        stat.S_IMODE(failure_info.st_mode) == 0o444
+        and failure_info.st_uid == os.getuid()
+        and failure_info.st_nlink == 1
+        and file_sha256(failure_path) == value.get("original_failure_evidence_sha256"),
+        "report repair original failure evidence differs",
+    )
+    failure = read_json(failure_path)
+    receipt_map = _receipt_file_map(submission_root)
+    require(
+        set(failure) == REPORT_REPAIR_FAILURE_KEYS
+        and failure.get("schema_version") == 1
+        and failure.get("status") == "original_report_terminal_failure_authenticated"
+        and failure.get("submission_sha256") == submission_sha256
+        and failure.get("original_report_job_id") == receipt.get("report_job_id")
+        and failure.get("original_report_job_name")
+        == f"exp23-launch8-{submission_sha256[:16]}-report"
+        and failure.get("scheduler_comment") == f"treewm-exp23:{submission_sha256}"
+        and failure.get("original_report_calling_sha256")
+        == "e0fd250dcd21fc7a0a62b5da0fe2c3d95401a24e6ad92c4e806082867e623047"
+        and failure.get("original_report_submitted_sha256")
+        == "923f49755df3fcab99a547e0347b158ed42daef20cd640e24c605848b0769e57"
+        and failure.get("submission_authorization_sha256")
+        == "371ae8df4add6338b98469eca6a287902cb69325dfda9d5be6ce5b1600e6fd55"
+        and failure.get("submission_receipt_sha256")
+        == "58d1fd0f004efae049afd51e9592a79e963ba3fc8c2d3aae8a4af0bb7791a6a7"
+        and failure.get("snapshot_root") == contract.get("snapshot_root")
+        and failure.get("snapshot_inventory_sha256")
+        == contract.get("snapshot_inventory_sha256")
+        and failure.get("original_source_commit")
+        == "33122e15d0aaf3661893a4c853fd5ac49173c685"
+        and failure.get("original_package_protocol_sha256")
+        == contract.get("package_protocol_sha256")
+        and exact_json_equal(failure.get("worker_receipt_map"), receipt_map)
+        and failure.get("worker_receipt_map_sha256") == stable_hash(receipt_map)
+        and exact_json_equal(failure.get("expected_reassembly"), EXPECTED_REPAIR_REASSEMBLY)
+        and exact_json_equal(value.get("worker_receipt_map"), receipt_map)
+        and value.get("worker_receipt_map_sha256") == stable_hash(receipt_map),
+        "report repair original terminal failure fields differ",
+    )
+    log = failure.get("report_log")
+    require(
+        isinstance(log, Mapping)
+        and set(log)
+        == {"path", "mode", "size", "uid", "nlink", "sha256", "encoding", "data"}
+        and log.get("path") == "logs/report_33311218.out"
+        and log.get("mode") == 0o600
+        and log.get("size") == 384
+        and log.get("uid") == os.getuid()
+        and log.get("nlink") == 1
+        and log.get("sha256")
+        == "2c5a23103e00fc07196886c62e7c9d069ed1b011fb9f44095a4242cc926e43a6"
+        and log.get("encoding") == "base64",
+        "report repair failure-log evidence differs",
+    )
+    log_payload = _repair_stream_bytes(
+        {
+            "encoding": log["encoding"],
+            "size": log["size"],
+            "sha256": log["sha256"],
+            "data": log["data"],
+        },
+        "report repair failure log",
+    )
+    require(
+        b"staged report artifact identity differs" in log_payload
+        and EXPECTED_REPAIR_REASSEMBLY["report_bundle_sha256"].encode("ascii")
+        in log_payload,
+        "report repair failure-log content differs",
+    )
+    terminal = failure.get("terminal_scheduler_observation")
+    require(
+        isinstance(terminal, Mapping)
+        and terminal.get("schema_version") == 1
+        and exact_json_equal(
+            terminal.get("scheduler_control_plane"),
+            contract.get("scheduler_control_plane_contract"),
+        )
+        and isinstance(terminal.get("canonical"), Mapping)
+        and terminal.get("canonical_sha256") == stable_hash(terminal["canonical"])
+        and isinstance(terminal.get("parsed_row"), Mapping),
+        "report repair terminal scheduler observation differs",
+    )
+    parsed = terminal["parsed_row"]
+    sacct_fields = [
+        "JobIDRaw", "JobName", "State", "ExitCode", "ElapsedRaw", "AllocNodes",
+        "NodeList", "Submit", "Eligible", "Start", "End", "Comment",
+    ]
+    require(
+        set(parsed) == set(sacct_fields)
+        and parsed.get("JobIDRaw") == "33311218"
+        and parsed.get("JobName") == f"exp23-launch8-{submission_sha256[:16]}-report"
+        and parsed.get("State") == "FAILED"
+        and parsed.get("ExitCode") == "2:0"
+        and parsed.get("ElapsedRaw") == "355"
+        and parsed.get("AllocNodes") == "1"
+        and parsed.get("NodeList") == "cpu-00090"
+        and parsed.get("Start") == "2026-08-29T08:28:49"
+        and parsed.get("End") == "2026-08-29T08:34:44"
+        and _original_report_timeline_is_ordered(parsed)
+        and parsed.get("Comment") == f"treewm-exp23:{submission_sha256}"
+        and terminal["canonical"].get("fields") == sacct_fields
+        and terminal["canonical"].get("rows")
+        == [[parsed[field] for field in sacct_fields]],
+        "report repair terminal scheduler row differs",
+    )
+    raw_sacct = _validated_repair_command_evidence(
+        terminal.get("raw"), expected_argv=None, label="report repair terminal sacct"
+    )
+    require(
+        raw_sacct["argv"]
+        == [
+            "/usr/local/bin/sacct", "-X", "-n", "-j", "33311218", "-o",
+            ",".join(sacct_fields), "-P",
+        ]
+        and raw_sacct["returncode"] == 0
+        and _repair_stream_bytes(raw_sacct["stderr"], "report repair terminal sacct stderr") == b"",
+        "report repair terminal sacct command differs",
+    )
+    sacct_stdout = _repair_stream_bytes(
+        raw_sacct["stdout"], "report repair terminal sacct stdout"
+    )
+    require(
+        sacct_stdout
+        == ("|".join(parsed[field] for field in sacct_fields) + "\n").encode(
+            "utf-8"
+        ),
+        "report repair terminal sacct raw/canonical row differs",
+    )
+    pre = _validated_repair_census(
+        failure.get("pre_submit_active_census"),
+        submission_sha256=submission_sha256,
+        label="report repair pre-submit",
+    )
+    require(pre["settled_rows"] == [], "report repair pre-submit jobs were active")
+    require(
+        exact_json_equal(
+            failure.get("publication_state"),
+            {
+                "report_absent": True,
+                "staging_entries": [],
+                "cleanup_prefixes": [],
+                "journal_directory": str(submission_root / "journal"),
+            },
+        ),
+        "report repair original publication state differs",
+    )
+
+    source_root = nonsymlink_directory(
+        Path(str(value.get("repair_source_root"))), "report repair source root"
+    )
+    require(
+        source_root == submission_root / "report-repair" / "attempt-0001" / "source"
+        and stat.S_IMODE(source_root.lstat().st_mode) == 0o555,
+        "report repair source root differs",
+    )
+    source_files = value.get("repair_source_files")
+    require(
+        isinstance(source_files, Mapping)
+        and set(source_files)
+        == {"report.py", "report_repair.py", "report_repair.slurm", "protocol.sha256"}
+        and value.get("repair_source_files_sha256") == stable_hash(source_files)
+        and git_commit_string(value.get("repair_source_commit"))
+        and sha256_string(value.get("repair_package_protocol_sha256")),
+        "report repair source inventory/identity differs",
+    )
+    for name, expected in source_files.items():
+        require(
+            isinstance(expected, Mapping)
+            and set(expected) == {"mode", "size", "sha256"}
+            and expected.get("mode") == 0o444
+            and type(expected.get("size")) is int
+            and expected["size"] > 0
+            and sha256_string(expected.get("sha256")),
+            f"report repair source inventory row differs: {name}",
+        )
+        source_path = contained_regular(
+            source_root / name, source_root, f"report repair source {name}"
+        )
+        source_info = source_path.lstat()
+        require(
+            stat.S_IMODE(source_info.st_mode) == 0o444
+            and source_info.st_size == expected["size"]
+            and source_info.st_uid == os.getuid()
+            and source_info.st_nlink == 1
+            and file_sha256(source_path) == expected["sha256"],
+            f"report repair source bytes differ: {name}",
+        )
+    require(
+        Path(__file__).absolute() == source_root / "report.py",
+        "active report repair publisher is outside its sealed source",
+    )
+    protocol_payload, _protocol_sha, _protocol_info = _authenticated_regular_bytes(
+        source_root / "protocol.sha256", "report repair protocol", capture=True
+    )
+    assert protocol_payload is not None
+    require(
+        protocol_payload == f"{value['repair_package_protocol_sha256']}\n".encode("ascii"),
+        "report repair source protocol differs",
+    )
+
+    calling_path = contained_regular(
+        submission_root / "journal/CALLING_REPORT_REPAIR_0001_SUBMIT.json",
+        submission_root,
+        "report repair submit calling",
+    )
+    submitted_path = contained_regular(
+        submission_root / "journal/REPORT_REPAIR_0001_SUBMITTED.json",
+        submission_root,
+        "report repair submitted evidence",
+    )
+    require(
+        file_sha256(calling_path) == value.get("submit_calling_sha256")
+        and value.get("submitted_evidence")
+        == "journal/REPORT_REPAIR_0001_SUBMITTED.json"
+        and file_sha256(submitted_path) == value.get("submitted_evidence_sha256"),
+        "report repair submit evidence hashes differ",
+    )
+    calling = read_json(calling_path)
+    submitted = read_json(submitted_path)
+    expected_submit_command = [
+        "/usr/local/bin/sbatch",
+        "--parsable",
+        "--hold",
+        "--no-requeue",
+        "--export=NONE",
+        f"--job-name={value['repair_job_name']}",
+        f"--comment={value['scheduler_comment']}",
+        f"--output={submission_root / 'logs/report-repair-0001-%j.out'}",
+        str(source_root / "report_repair.slurm"),
+        str(value["snapshot_root"]),
+        str(submission_root),
+        submission_sha256,
+        "1",
+        str(source_root),
+        str(source_root / "report.py"),
+        str(source_files["report.py"]["sha256"]),
+        str(source_files["report.py"]["size"]),
+    ]
+    require(
+        set(calling) == REPORT_REPAIR_SUBMIT_CALLING_KEYS
+        and type(calling.get("schema_version")) is int
+        and calling.get("schema_version") == 1
+        and calling.get("status") == "calling_held_report_repair_submission"
+        and calling.get("campaign_id") == CAMPAIGN_ID
+        and calling.get("submission_sha256") == submission_sha256
+        and type(calling.get("attempt")) is int
+        and calling.get("attempt") == attempt
+        and calling.get("original_failure_evidence")
+        == "journal/REPORT_REPAIR_0001_ORIGINAL_FAILURE.json"
+        and calling.get("original_failure_evidence_sha256")
+        == value["original_failure_evidence_sha256"]
+        and calling.get("repair_source_root") == str(source_root)
+        and calling.get("repair_source_commit") == value["repair_source_commit"]
+        and calling.get("repair_package_protocol_sha256")
+        == value["repair_package_protocol_sha256"]
+        and exact_json_equal(
+            calling.get("repair_source_files"), value["repair_source_files"]
+        )
+        and calling.get("repair_source_files_sha256")
+        == value["repair_source_files_sha256"]
+        and calling.get("command") == expected_submit_command
+        and isinstance(calling.get("scheduler_environment"), Mapping)
+        and isinstance(calling.get("transaction_lock"), Mapping)
+        and isinstance(calling.get("report_cancel_lock"), Mapping)
+        and isinstance(calling.get("called_at_utc"), str)
+        and bool(calling["called_at_utc"])
+        and submitted.get("status") == "held_report_repair_submitted"
+        and submitted.get("submit_calling_sha256") == value["submit_calling_sha256"]
+        and submitted.get("repair_report_job_id") == value["repair_report_job_id"],
+        "report repair submit evidence semantics differ",
+    )
+    pre_submit_census = _validated_repair_census(
+        calling.get("scheduler_pre_submit_census"),
+        submission_sha256=submission_sha256,
+        label="report repair fresh pre-submit",
+    )
+    pre_submit_environment = pre_submit_census["rounds"][0]["raw"]["environment"]
+    require(
+        calling.get("scheduler_pre_submit_census_sha256")
+        == stable_hash(pre_submit_census)
+        and pre_submit_census["settled_rows"] == []
+        and pre_submit_census["captured_at_utc"] <= calling["called_at_utc"]
+        and all(
+            exact_json_equal(
+                round_value["raw"]["environment"], pre_submit_environment
+            )
+            for round_value in pre_submit_census["rounds"]
+        )
+        and exact_json_equal(
+            calling["scheduler_environment"], pre_submit_environment
+        ),
+        "report repair fresh pre-submit scheduler authority differs",
+    )
+    authority_census = _validated_repair_census(
+        value.get("scheduler_authority_census"),
+        submission_sha256=submission_sha256,
+        label="report repair authorization",
+    )
+    require(
+        value.get("scheduler_authority_census_sha256") == stable_hash(authority_census)
+        and len(authority_census["settled_rows"]) == 1,
+        "report repair authorization census binding differs",
+    )
+    held = authority_census["settled_rows"][0]
+    require(
+        held.get("job_id") == value["repair_report_job_id"]
+        and held.get("job_name") == value["repair_job_name"]
+        and held.get("comment") == value["scheduler_comment"]
+        and held.get("state") == "PENDING"
+        and held.get("reason") in {"JobHeldUser", "JobHeldAdmin"},
+        "report repair authorization held-job evidence differs",
+    )
+    authority_environment = authority_census["rounds"][0]["raw"]["environment"]
+    require(
+        all(
+            exact_json_equal(
+                round_value["raw"]["environment"], authority_environment
+            )
+            for round_value in authority_census["rounds"]
+        )
+        and exact_json_equal(authority_environment, pre_submit_environment),
+        "report repair authorization scheduler environment changed",
+    )
+
+    release_path = contained_regular(
+        _repair_release_path(submission_root, attempt),
+        submission_root,
+        "report repair release result",
+    )
+    release_info = release_path.lstat()
+    release_sha256 = file_sha256(release_path)
+    release = read_json(release_path)
+    require(
+        stat.S_IMODE(release_info.st_mode) == 0o444
+        and release_info.st_uid == os.getuid()
+        and release_info.st_nlink == 1
+        and set(release) == REPORT_REPAIR_RELEASE_KEYS
+        and type(release.get("schema_version")) is int
+        and release.get("schema_version") == 1
+        and release.get("status") == "report_repair_released"
+        and release.get("campaign_id") == CAMPAIGN_ID
+        and release.get("submission_sha256") == submission_sha256
+        and type(release.get("attempt")) is int
+        and release.get("attempt") == attempt
+        and release.get("repair_report_job_id") == value["repair_report_job_id"]
+        and release.get("authorization_sha256") == expected_raw_sha256
+        and isinstance(release.get("release_attempts"), list)
+        and bool(release["release_attempts"])
+        and release.get("release_attempts_sha256") == stable_hash(release["release_attempts"])
+        and isinstance(release.get("post_release_census"), Mapping)
+        and release.get("post_release_census_sha256")
+        == stable_hash(release["post_release_census"])
+        and isinstance(release.get("worker_liveness_observation"), Mapping)
+        and release.get("worker_liveness_observation_sha256")
+        == stable_hash(release["worker_liveness_observation"])
+        and isinstance(release.get("released_at_utc"), str)
+        and bool(release["released_at_utc"]),
+        "report repair release result differs",
+    )
+    release_modes: list[str] = []
+    for index, entry in enumerate(release["release_attempts"]):
+        require(
+            isinstance(entry, Mapping)
+            and set(entry)
+            == {"release_attempt", "calling", "calling_sha256", "result", "result_sha256"}
+            and type(entry.get("release_attempt")) is int
+            and entry.get("release_attempt") == index
+            and entry.get("calling")
+            == f"CALLING_REPORT_REPAIR_0001_RELEASE_{index:04d}.json"
+            and entry.get("result")
+            == f"REPORT_REPAIR_0001_RELEASE_RESULT_{index:04d}.json"
+            and sha256_string(entry.get("calling_sha256"))
+            and sha256_string(entry.get("result_sha256")),
+            "report repair release attempt chain differs",
+        )
+        release_calling_path = contained_regular(
+            submission_root / "journal" / entry["calling"],
+            submission_root,
+            f"report repair release calling {index}",
+        )
+        release_result_path = contained_regular(
+            submission_root / "journal" / entry["result"],
+            submission_root,
+            f"report repair release result {index}",
+        )
+        require(
+            stat.S_IMODE(release_calling_path.lstat().st_mode) == 0o444
+            and release_calling_path.lstat().st_uid == os.getuid()
+            and release_calling_path.lstat().st_nlink == 1
+            and stat.S_IMODE(release_result_path.lstat().st_mode) == 0o444
+            and release_result_path.lstat().st_uid == os.getuid()
+            and release_result_path.lstat().st_nlink == 1
+            and file_sha256(release_calling_path) == entry["calling_sha256"]
+            and file_sha256(release_result_path) == entry["result_sha256"],
+            "report repair release attempt hashes differ",
+        )
+        release_calling = read_json(release_calling_path)
+        release_result = read_json(release_result_path)
+        require(
+            set(release_calling) == REPORT_REPAIR_RELEASE_CALLING_KEYS
+            and type(release_calling.get("schema_version")) is int
+            and release_calling.get("schema_version") == 1
+            and release_calling.get("status") == "calling_report_repair_release"
+            and release_calling.get("campaign_id") == CAMPAIGN_ID
+            and release_calling.get("submission_sha256") == submission_sha256
+            and type(release_calling.get("attempt")) is int
+            and release_calling.get("attempt") == attempt
+            and type(release_calling.get("release_attempt")) is int
+            and release_calling.get("release_attempt") == index
+            and release_calling.get("repair_report_job_id")
+            == value["repair_report_job_id"]
+            and release_calling.get("authorization_sha256") == expected_raw_sha256
+            and release_calling.get("command")
+            == ["/usr/local/bin/scontrol", "release", value["repair_report_job_id"]]
+            and exact_json_equal(
+                release_calling.get("scheduler_environment"),
+                authority_environment,
+            )
+            and isinstance(release_calling.get("transaction_lock"), Mapping)
+            and isinstance(release_calling.get("report_cancel_lock"), Mapping)
+            and isinstance(release_calling.get("called_at_utc"), str)
+            and bool(release_calling["called_at_utc"])
+            and set(release_result) == REPORT_REPAIR_RELEASE_RESULT_KEYS
+            and type(release_result.get("schema_version")) is int
+            and release_result.get("schema_version") == 1
+            and release_result.get("status")
+            == "report_repair_release_attempt_observed"
+            and release_result.get("campaign_id") == CAMPAIGN_ID
+            and release_result.get("submission_sha256") == submission_sha256
+            and type(release_result.get("attempt")) is int
+            and release_result.get("attempt") == attempt
+            and type(release_result.get("release_attempt")) is int
+            and release_result.get("release_attempt") == index
+            and release_result.get("repair_report_job_id")
+            == value["repair_report_job_id"]
+            and release_result.get("release_calling_sha256")
+            == entry["calling_sha256"]
+            and release_result.get("authorization_sha256") == expected_raw_sha256,
+            "report repair release attempt semantics differ",
+        )
+        mode = release_result.get("mode")
+        release_modes.append(str(mode))
+        evidence = release_result.get("scheduler_evidence")
+        require(
+            mode
+            in {
+                "direct_release_response",
+                "lost_response_reconciled_still_held",
+                "lost_response_reconciled_release_effect",
+            }
+            and isinstance(evidence, Mapping)
+            and isinstance(release_result.get("observed_at_utc"), str)
+            and bool(release_result["observed_at_utc"]),
+            "report repair release result mode differs",
+        )
+        if mode == "direct_release_response":
+            direct = _validated_repair_command_evidence(
+                evidence,
+                expected_argv=[
+                    "/usr/local/bin/scontrol",
+                    "release",
+                    value["repair_report_job_id"],
+                ],
+                label=f"report repair direct release result {index}",
+            )
+            require(
+                exact_json_equal(direct["environment"], authority_environment)
+                and direct["returncode"] == 0
+                and _repair_stream_bytes(
+                    direct["stderr"], f"report repair direct release stderr {index}"
+                )
+                == b"",
+                "report repair direct release result differs",
+            )
+        else:
+            require(
+                set(evidence) == {"census", "census_sha256"}
+                and evidence.get("census_sha256") == stable_hash(evidence.get("census")),
+                "report repair reconciled release evidence differs",
+            )
+            reconciled = _validated_repair_census(
+                evidence.get("census"),
+                submission_sha256=submission_sha256,
+                label=f"report repair reconciled release {index}",
+            )
+            require(
+                all(
+                    exact_json_equal(
+                        round_value["raw"]["environment"], authority_environment
+                    )
+                    for round_value in reconciled["rounds"]
+                ),
+                "report repair reconciled release environment differs",
+            )
+            reconciled_rows = [
+                row
+                for row in reconciled["settled_rows"]
+                if row["job_name"] == value["repair_job_name"]
+                and row["comment"] == value["scheduler_comment"]
+            ]
+            released_or_absent = not reconciled_rows or not (
+                len(reconciled_rows) == 1
+                and reconciled_rows[0]["job_id"] == value["repair_report_job_id"]
+                and reconciled_rows[0]["state"] == "PENDING"
+                and reconciled_rows[0]["reason"]
+                in {"JobHeldUser", "JobHeldAdmin"}
+            )
+            require(
+                len(reconciled["settled_rows"]) == len(reconciled_rows)
+                and len(reconciled_rows) <= 1
+                and (
+                    not reconciled_rows
+                    or reconciled_rows[0]["job_id"]
+                    == value["repair_report_job_id"]
+                )
+                and (
+                    mode == "lost_response_reconciled_release_effect"
+                )
+                == released_or_absent,
+                "report repair reconciled release effect differs",
+            )
+    expected_release_callings = {
+        str(entry["calling"]) for entry in release["release_attempts"]
+    }
+    expected_release_results = {
+        str(entry["result"]) for entry in release["release_attempts"]
+    }
+    journal_names = {entry.name for entry in os.scandir(submission_root / "journal")}
+    actual_release_callings = {
+        name
+        for name in journal_names
+        if name.startswith("CALLING_REPORT_REPAIR_0001_RELEASE_")
+    }
+    actual_release_results = {
+        name
+        for name in journal_names
+        if name.startswith("REPORT_REPAIR_0001_RELEASE_RESULT_")
+    }
+    require(
+        len(release["release_attempts"]) <= 3
+        and actual_release_callings == expected_release_callings
+        and actual_release_results == expected_release_results
+        and release_modes.count("lost_response_reconciled_release_effect") <= 1
+        and (
+            "lost_response_reconciled_release_effect" not in release_modes
+            or release_modes[-1] == "lost_response_reconciled_release_effect"
+        ),
+        "report repair release namespace/prefix differs",
+    )
+    post_release = _validated_repair_census(
+        release["post_release_census"],
+        submission_sha256=submission_sha256,
+        label="report repair post-release",
+    )
+    require(
+        all(
+            exact_json_equal(
+                round_value["raw"]["environment"], authority_environment
+            )
+            for round_value in post_release["rounds"]
+        ),
+        "report repair post-release scheduler environment differs",
+    )
+    repair_rows = [
+        row
+        for row in post_release["settled_rows"]
+        if row["job_name"] == value["repair_job_name"]
+        and row["comment"] == value["scheduler_comment"]
+    ]
+    require(
+        len(post_release["settled_rows"]) == len(repair_rows)
+        and len(repair_rows) <= 1
+        and (
+            not repair_rows
+            or (
+                repair_rows[0]["job_id"] == value["repair_report_job_id"]
+                and not (
+                    repair_rows[0]["state"] == "PENDING"
+                    and repair_rows[0]["reason"] in {"JobHeldUser", "JobHeldAdmin"}
+                )
+            )
+        ),
+        "report repair post-release scheduler state differs",
+    )
+    _validated_repair_worker_liveness(
+        release["worker_liveness_observation"],
+        post_release=post_release,
+        repair_authorization=value,
+        authority_environment=authority_environment,
+        contract=contract,
+        submission_sha256=submission_sha256,
+    )
+    restart_count = os.environ.get("SLURM_RESTART_COUNT")
+    require(
+        os.environ.get("SLURM_JOB_ID") == value["repair_report_job_id"]
+        and restart_count == "0"
+        and "SLURM_ARRAY_JOB_ID" not in os.environ
+        and "SLURM_ARRAY_TASK_ID" not in os.environ,
+        "active report repair scheduler identity/restart differs",
+    )
+    result = dict(value)
+    result["_validated_release_sha256"] = release_sha256
+    return result
+
+
+def _repair_publication_authority(
+    repair: Mapping[str, Any], authorization_sha256: str, attempt: int
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "status": "authorized_terminal_report_repair",
+        "attempt": attempt,
+        "authorization": f"journal/REPORT_REPAIR_{attempt:04d}_AUTHORIZED.json",
+        "authorization_sha256": authorization_sha256,
+        "release": f"journal/REPORT_REPAIR_{attempt:04d}_RELEASED.json",
+        "release_sha256": repair["_validated_release_sha256"],
+        "original_report_job_id": repair["original_report_job_id"],
+        "repair_report_job_id": repair["repair_report_job_id"],
+        "original_failure_evidence": repair["original_failure_evidence"],
+        "original_failure_evidence_sha256": repair[
+            "original_failure_evidence_sha256"
+        ],
+        "worker_receipt_map_sha256": repair["worker_receipt_map_sha256"],
+        "original_snapshot_root": repair["snapshot_root"],
+        "original_snapshot_inventory_sha256": repair[
+            "snapshot_inventory_sha256"
+        ],
+        "original_package_protocol_sha256": repair[
+            "original_package_protocol_sha256"
+        ],
+        "repair_source_root": repair["repair_source_root"],
+        "repair_source_commit": repair["repair_source_commit"],
+        "repair_package_protocol_sha256": repair[
+            "repair_package_protocol_sha256"
+        ],
+        "repair_source_files_sha256": repair["repair_source_files_sha256"],
+        "expected_report_bundle_sha256": EXPECTED_REPAIR_REASSEMBLY[
+            "report_bundle_sha256"
+        ],
+        "expected_report_bundle_file_sha256": EXPECTED_REPAIR_REASSEMBLY[
+            "report_bundle_file_sha256"
+        ],
+        "expected_gate_sha256": EXPECTED_REPAIR_REASSEMBLY["gate_sha256"],
+        "expected_gate_decision_file_sha256": EXPECTED_REPAIR_REASSEMBLY[
+            "gate_decision_file_sha256"
+        ],
+        "deterministic_reassembly_allowed": True,
+        "scientific_input_change_allowed": False,
+        "gate_change_allowed": False,
+    }
 
 
 def _load_module(name: str, path: Path, root: Path) -> ModuleType:
@@ -2156,17 +3658,44 @@ def assemble_report(
     snapshot_root: Path,
     submission_root: Path,
     submission_sha256: str,
+    *,
+    require_publish_job: bool = False,
+    repair_attempt: int | None = None,
+    repair_authorization_sha256: str | None = None,
+    allow_repair_cleanup_for_audit: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     reject_environment()
     snapshot_root = nonsymlink_directory(snapshot_root, "snapshot root")
     submission_root = nonsymlink_directory(submission_root, "submission root")
     require(sha256_string(submission_sha256), "submission SHA256 is malformed")
     require(
-        not _durable_cleanup_prefix_exists(submission_root),
+        type(allow_repair_cleanup_for_audit) is bool
+        and (
+            not allow_repair_cleanup_for_audit
+            or (
+                not require_publish_job
+                and repair_attempt is None
+                and repair_authorization_sha256 is None
+            )
+        ),
+        "repair cleanup audit mode cannot authorize publication",
+    )
+    require(
+        not _durable_original_cleanup_prefix_exists(submission_root),
         "cancelled/ambiguous submission cannot report",
     )
+    if not allow_repair_cleanup_for_audit:
+        require(
+            not _durable_repair_stop_prefix_exists(submission_root),
+            "terminal report repair state cannot publish",
+        )
     contract, receipt = verify_snapshot_inventory(
-        snapshot_root, submission_root, submission_sha256
+        snapshot_root,
+        submission_root,
+        submission_sha256,
+        require_publish_job=require_publish_job,
+        repair_attempt=repair_attempt,
+        repair_authorization_sha256=repair_authorization_sha256,
     )
     bootstrap_manifest = read_json(snapshot_root / PACKAGE_RELATIVE / "manifest.json")
     runtime_interpreter = activate_isolated_runtime(bootstrap_manifest)
@@ -2182,7 +3711,12 @@ def assemble_report(
     # (they could ptrace this process); no ambient snapshot writer has been launched,
     # so this catches accidental/concurrent path drift before executable bytes load.
     second_contract, second_receipt = verify_snapshot_inventory(
-        snapshot_root, submission_root, submission_sha256
+        snapshot_root,
+        submission_root,
+        submission_sha256,
+        require_publish_job=require_publish_job,
+        repair_attempt=repair_attempt,
+        repair_authorization_sha256=repair_authorization_sha256,
     )
     require(
         second_contract == contract and second_receipt == receipt,
@@ -2373,6 +3907,53 @@ def assemble_report(
         "report_bundle_sha256": stable_hash(bundle),
         "gate_sha256": decision["gate_sha256"],
     }
+    if repair_attempt is not None:
+        assert repair_authorization_sha256 is not None
+        bundle_payload = (
+            json.dumps(dict(bundle), sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        decision_payload = (
+            json.dumps(dict(decision), sort_keys=True, indent=2, allow_nan=False)
+            + "\n"
+        ).encode("utf-8")
+        provenance_v1_payload = (
+            json.dumps(dict(provenance), sort_keys=True, indent=2, allow_nan=False)
+            + "\n"
+        ).encode("utf-8")
+        require(
+            stable_hash(bundle) == EXPECTED_REPAIR_REASSEMBLY["report_bundle_sha256"]
+            and decision.get("status") == EXPECTED_REPAIR_REASSEMBLY["status"]
+            and decision.get("gate_sha256")
+            == EXPECTED_REPAIR_REASSEMBLY["gate_sha256"]
+            and len(bundle_payload)
+            == EXPECTED_REPAIR_REASSEMBLY["report_bundle_file_size"]
+            and hashlib.sha256(bundle_payload).hexdigest()
+            == EXPECTED_REPAIR_REASSEMBLY["report_bundle_file_sha256"]
+            and len(decision_payload)
+            == EXPECTED_REPAIR_REASSEMBLY["gate_decision_file_size"]
+            and hashlib.sha256(decision_payload).hexdigest()
+            == EXPECTED_REPAIR_REASSEMBLY["gate_decision_file_sha256"]
+            and stable_hash(provenance)
+            == EXPECTED_REPAIR_REASSEMBLY["original_provenance_v1_sha256"]
+            and len(provenance_v1_payload)
+            == EXPECTED_REPAIR_REASSEMBLY["original_provenance_v1_file_size"]
+            and hashlib.sha256(provenance_v1_payload).hexdigest()
+            == EXPECTED_REPAIR_REASSEMBLY[
+                "original_provenance_v1_file_sha256"
+            ],
+            "report repair deterministic reassembly differs from the failed reporter",
+        )
+        repair = _validated_report_repair_authorization(
+            submission_root,
+            submission_sha256,
+            receipt,
+            attempt=repair_attempt,
+            expected_raw_sha256=repair_authorization_sha256,
+        )
+        provenance["schema_version"] = 2
+        provenance["publication_authority"] = _repair_publication_authority(
+            repair, repair_authorization_sha256, repair_attempt
+        )
     return bundle, decision, provenance
 
 
@@ -2388,7 +3969,15 @@ def seal_json(path: Path, value: Mapping[str, Any]) -> str:
     payload = (json.dumps(dict(value), sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        descriptor = os.open(
+            path,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
     except FileExistsError:
         contained_regular(path, path.parent, f"immutable report artifact {path.name}")
         existing, _existing_digest, _existing_info = _authenticated_regular_bytes(
@@ -2403,6 +3992,12 @@ def seal_json(path: Path, value: Mapping[str, Any]) -> str:
             require(written > 0, f"short report artifact write: {path}")
             view = view[written:]
         os.fsync(descriptor)
+        # Creation modes are filtered by the inherited process umask.  Seal via
+        # the retained descriptor so a strict controller umask (notably 0077)
+        # cannot turn the intended 0444 evidence into 0400, and never relax the
+        # subsequent identity/size/owner/link predicates.
+        os.fchmod(descriptor, 0o444)
+        os.fsync(descriptor)
         opened = os.fstat(descriptor)
         require(
             stat.S_ISREG(opened.st_mode)
@@ -2412,6 +4007,28 @@ def seal_json(path: Path, value: Mapping[str, Any]) -> str:
             and opened.st_size == len(payload),
             f"staged report artifact identity differs: {path}",
         )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        readback = bytearray()
+        while len(readback) < len(payload):
+            chunk = os.read(
+                descriptor, min(1024 * 1024, len(payload) - len(readback))
+            )
+            require(bool(chunk), f"short staged report artifact readback: {path}")
+            readback.extend(chunk)
+        require(
+            os.read(descriptor, 1) == b""
+            and bytes(readback) == payload
+            and hashlib.sha256(readback).hexdigest() == digest,
+            f"staged report artifact readback differs: {path}",
+        )
+        named = path.lstat()
+        reopened = os.fstat(descriptor)
+        require(
+            _file_identity(named) == _file_identity(reopened)
+            and stat.S_IMODE(named.st_mode) == 0o444
+            and named.st_size == len(payload),
+            f"staged report artifact path identity differs: {path}",
+        )
     except BaseException:
         os.close(descriptor)
         path.unlink(missing_ok=True)
@@ -2420,6 +4037,36 @@ def seal_json(path: Path, value: Mapping[str, Any]) -> str:
         os.close(descriptor)
     _fsync_directory(path.parent)
     return digest
+
+
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    """Atomically publish one directory without replacing any target entry."""
+
+    require(source.parent == target.parent, "report publication rename parents differ")
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    require(renameat2 is not None, "renameat2 is unavailable for no-replace publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,
+        os.fsencode(target),
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), str(target))
+    raise OSError(error, os.strerror(error), f"{source} -> {target}")
 
 
 def _publish_report_locked(
@@ -2505,8 +4152,30 @@ def _publish_report_locked(
         require(seal_json(staging / bundle_name, bundle) == bundle_payload_sha, "staged bundle hash differs")
         require(seal_json(staging / decision_name, decision) == decision_payload_sha, "staged decision hash differs")
         require(seal_json(staging / provenance_name, provenance) == provenance_payload_sha, "staged provenance hash differs")
-        seal_json(staging / "REPORT_COMMIT.json", commit)
+        commit_payload_sha = seal_json(staging / "REPORT_COMMIT.json", commit)
         _fsync_directory(staging)
+        staged_rows = _secure_tree_rows(
+            staging, "completed report staging tree", hash_files=True
+        )
+        staged_root_rows = [row for row in staged_rows if row["kind"] == "root"]
+        staged_files = {
+            str(row["path"]): row
+            for row in staged_rows
+            if row["kind"] == "file"
+        }
+        require(
+            len(staged_root_rows) == 1
+            and int(staged_root_rows[0]["mode"]) == 0o700
+            and len(staged_files) == len(staged_rows) - 1
+            and set(staged_files) == expected_names
+            and all(int(row["mode"]) == 0o444 for row in staged_files.values())
+            and staged_files[bundle_name]["sha256"] == bundle_payload_sha
+            and staged_files[decision_name]["sha256"] == decision_payload_sha
+            and staged_files[provenance_name]["sha256"] == provenance_payload_sha
+            and staged_files["REPORT_COMMIT.json"]["sha256"]
+            == commit_payload_sha,
+            "completed report staging inventory differs",
+        )
         staging_fd = _open_directory_components(staging, "report staging root")
         try:
             staging_info = os.fstat(staging_fd)
@@ -2516,6 +4185,7 @@ def _publish_report_locked(
                 "report staging root identity differs",
             )
             os.fchmod(staging_fd, 0o555)
+            os.fsync(staging_fd)
             require(
                 stat.S_IMODE(os.fstat(staging_fd).st_mode) == 0o555,
                 "report staging root seal differs",
@@ -2528,7 +4198,7 @@ def _publish_report_locked(
             "cancellation/cleanup prefix appeared before report commit",
         )
         require(not _lexical_exists(report_root), "report publication target appeared concurrently")
-        os.rename(staging, report_root)
+        _rename_directory_noreplace(staging, report_root)
         _fsync_directory(submission_root)
     except BaseException:
         if _lexical_exists(staging):
@@ -2599,12 +4269,32 @@ def _validated_report_publication_prerequisite(
     )
 
 
+def _validated_report_publication_receipt(
+    submission_root: Path, submission_sha256: str
+) -> dict[str, Any]:
+    receipt_path = contained_regular(
+        submission_root / "SUBMISSION_RECEIPT.json",
+        submission_root,
+        "report publication receipt",
+    )
+    receipt = read_json(receipt_path)
+    require(
+        set(receipt) == RECEIPT_KEYS
+        and receipt.get("submission_sha256") == submission_sha256,
+        "report publication receipt differs",
+    )
+    return receipt
+
+
 def publish_report(
     submission_root: Path,
     submission_sha256: str,
     bundle: Mapping[str, Any],
     decision: Mapping[str, Any],
     provenance: Mapping[str, Any],
+    *,
+    repair_attempt: int | None = None,
+    repair_authorization_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Publish only on the report side of the report/cancellation linearization."""
 
@@ -2613,6 +4303,39 @@ def publish_report(
         _validated_report_publication_prerequisite(
             submission_root, submission_sha256, provenance
         )
+        receipt = _validated_report_publication_receipt(
+            submission_root, submission_sha256
+        )
+        if repair_attempt is None and repair_authorization_sha256 is None:
+            require(
+                os.environ.get("SLURM_JOB_ID") == receipt.get("report_job_id"),
+                "report publication requires the exact committed report Slurm job",
+            )
+        else:
+            require(
+                type(repair_attempt) is int
+                and repair_attempt == 1
+                and sha256_string(repair_authorization_sha256),
+                "report repair publication arguments differ",
+            )
+            authority = _validated_report_repair_authorization(
+                submission_root,
+                submission_sha256,
+                receipt,
+                attempt=repair_attempt,
+                expected_raw_sha256=str(repair_authorization_sha256),
+            )
+            expected_publication_authority = _repair_publication_authority(
+                authority, str(repair_authorization_sha256), repair_attempt
+            )
+            require(
+                provenance.get("schema_version") == 2
+                and exact_json_equal(
+                    provenance.get("publication_authority"),
+                    expected_publication_authority,
+                ),
+                "report repair provenance authority differs",
+            )
         require(
             not _durable_cleanup_prefix_exists(submission_root),
             "cancelled/ambiguous submission cannot publish a report",
@@ -2631,25 +4354,62 @@ def _parser() -> argparse.ArgumentParser:
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--test-only", action="store_true", help="read-only assembly (default)")
     actions.add_argument("--publish", action="store_true", help="atomically publish the gate decision")
+    actions.add_argument(
+        "--publish-repair",
+        action="store_true",
+        help="publish under one exact append-only terminal-report repair authority",
+    )
     parser.add_argument("--snapshot-root", type=Path, required=True)
     parser.add_argument("--submission-root", type=Path, required=True)
     parser.add_argument("--submission-sha256", required=True)
+    parser.add_argument("--repair-attempt", type=int)
+    parser.add_argument("--repair-authorization-sha256")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        bundle, decision, provenance = assemble_report(
-            args.snapshot_root, args.submission_root, args.submission_sha256
+        require(
+            (args.publish_repair and args.repair_attempt == 1 and sha256_string(args.repair_authorization_sha256))
+            or (
+                not args.publish_repair
+                and args.repair_attempt is None
+                and args.repair_authorization_sha256 is None
+            ),
+            "repair arguments require --publish-repair attempt 1 and an authorization SHA256",
         )
-        if args.publish:
+        if args.publish_repair:
+            reject_environment()
+            _wait_for_repair_release_evidence(
+                args.submission_root,
+                args.submission_sha256,
+                attempt=args.repair_attempt,
+                authorization_sha256=args.repair_authorization_sha256,
+            )
+        bundle, decision, provenance = assemble_report(
+            args.snapshot_root,
+            args.submission_root,
+            args.submission_sha256,
+            require_publish_job=args.publish,
+            repair_attempt=(args.repair_attempt if args.publish_repair else None),
+            repair_authorization_sha256=(
+                args.repair_authorization_sha256 if args.publish_repair else None
+            ),
+        )
+        if args.publish or args.publish_repair:
             result = publish_report(
                 args.submission_root,
                 args.submission_sha256,
                 bundle,
                 decision,
                 provenance,
+                repair_attempt=(args.repair_attempt if args.publish_repair else None),
+                repair_authorization_sha256=(
+                    args.repair_authorization_sha256
+                    if args.publish_repair
+                    else None
+                ),
             )
         else:
             result = {

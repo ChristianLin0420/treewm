@@ -149,7 +149,10 @@ canary historical-identity, canonical-path, lock/rollback, and cleanup-only reco
 guards in `two_wave_canary.py`, plus mandatory accepted-canary prerequisite and
 report-versus-cancel gating with cleanup-only legacy recovery in `submit.py` and
 `report.py`, with the same sealed prerequisite validated by `worker.py` and
-`train_entry.py` before scientific execution. Fresh canary DAG submission commands,
+`train_entry.py` before scientific execution, plus the one-generation append-only
+terminal-report controller and repair-only `report.py` publication mode described
+below after the original Launch8 reporter failed during immutable publication. Fresh
+canary DAG submission commands,
 scalar dependencies, the wave0 release payload, canary compute worker and Slurm
 scripts, and fresh scientific DAG submission commands and dependency forms remain
 unchanged.
@@ -361,6 +364,77 @@ the exact snapshot/submission identities:
   --submission-root /absolute/path/to/state/submission \
   --submission-sha256 <64-hex-submission-id>
 ```
+
+### One-generation terminal-report publication repair
+
+Launch8 completed all 20 scientific cells, but its original CPU reporter job
+`33311218` terminated `FAILED/2:0` after deterministic assembly and before publication.
+The immutable log is 384 bytes with SHA-256
+`2c5a23103e00fc07196886c62e7c9d069ed1b011fb9f44095a4242cc926e43a6`.
+The failure was an engineering permission defect: the original publisher requested
+`0444` while process umask `077` produced `0400`, and its post-write identity check
+failed. It is not a scientific failure and does not change the frozen scientific
+decision, which remains `rejected`.
+
+`report_repair.py` is a separately sealed, append-only controller for exactly repair
+attempt 1. Its default and `--test-only` actions are read-only. Before any replacement
+`sbatch`, it holds the production transaction lock and shared `REPORT_CANCEL` lock;
+authenticates the original contract, authorization, receipt, 20 worker receipts,
+snapshot, source commit/protocol, failed reporter journals and log; captures a durable
+raw and canonical exact `sacct` failure row; requires three settled empty active-job
+censuses and no report, staging, cancellation, or recovery prefix; and seals the repair
+publisher source. On every path without a submit `CALLING` record—including recovery
+after the failure artifact was sealed—it takes a second fresh owner-wide three-round
+census immediately at the submission boundary, requires the entire relevant settled
+row set empty, binds the raw rounds, parsed projection, capture time, environment, and
+hash into `CALLING`, and revalidates both locks, paths, source, failure evidence, and
+append-only namespace before `sbatch`. It then submits one held non-requeued CPU publisher, accepts only one
+fresh exact owner/name/comment identity in held state, seals authorization, and releases
+that exact ID only after another three-round census. Every scheduler call has an
+append-only CALLING record first. Lost responses, recycled numeric IDs, ambiguity, and
+residual jobs enter cleanup-only reconciliation and can never authorize publication;
+any extra broad Exp23 scheduler row makes the release identity ambiguous even when one
+exact repair row is also present.
+A terminal repair failure cannot be retried without a newly frozen failure artifact and
+protocol; there is no second generation in this package.
+
+The held scalar publisher has a four-hour, non-requeued Slurm allocation. Its sealed
+authorization binds a 10,800-second monotonic wait for authenticated `RELEASED`
+evidence and a remaining 3,600-second minimum assembly budget. The sbatch argv binds
+the sealed source root, exact `report.py` path, size, and SHA-256. Because Slurm runs a
+spooled copy of the batch script, the worker never derives the publisher location from
+`BASH_SOURCE`; a minimal isolated Python bootstrap opens the sealed source directory
+and publisher with `O_NOFOLLOW`, hashes and reads one stable descriptor, and executes
+only those verified bytes. Terminal worker accounting, whether observed before or
+after `RELEASED`, seals a no-publication terminal under `REPORT_CANCEL` and permanently
+outranks release or retry.
+
+The repair publisher loads all scientific assembly and gate modules only from the
+original sealed snapshot. It deterministically reassembles the exact rejected bundle
+`b9102090021c103fa2362663d1a51310d239d50223108dba0106758b199d9b83`
+and gate decision
+`d41b37f6806c77f15557ecd0329596da8385c02db5b06cecfb29247bb5f4682a`.
+Scientific input and gate changes are forbidden. Publication uses provenance schema 2
+with a `publication_authority` overlay, preserves the existing exact 14-key
+`REPORT_COMMIT.json`, seals every JSON file to `0444` through its retained descriptor,
+performs same-descriptor readback, uses no-replace directory publication, and writes the
+commit last under the shared lock.
+Because the rejected scientific bundle, gate decision, and exact 14-key commit schema
+are unchanged, Exp24's existing report adapter requires no schema or scientific-input
+change; only provenance schema 2 adds the transitive engineering publication authority.
+
+Read-only inspection and source verification are:
+
+```bash
+"$PY" -I -S -B "$PKG/report_repair.py" --describe
+"$PY" -I -S -B "$PKG/report_repair.py" --test-only
+```
+
+The only mutating entrypoints are `--submit-real-report-repair` for the initially empty
+repair prefix and `--recover-or-cancel-report-repair` for that same prefix. Both require
+the exact confirmation phrase `SUBMIT_EXP23_LAUNCH8_REPORT_REPAIR_0001`, run with umask
+`077`, and are operator-authorized actions; neither is invoked by package verification,
+scientific submission, report assembly, or any default command.
 
 To gate an already assembled immutable report directly:
 

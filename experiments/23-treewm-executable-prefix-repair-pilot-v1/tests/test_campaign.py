@@ -890,6 +890,68 @@ def test_manifest_schema_version_is_an_exact_integer() -> None:
         campaign.validate_manifest(manifest, lock, REPO)
 
 
+def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
+    manifest, lock = contracts()
+    repair = manifest["launch_contract"]["terminal_report_repair"]
+    assert repair == campaign.TERMINAL_REPORT_REPAIR_POLICY
+    assert repair["attempt"] == repair["generation_count"] == 1
+    assert repair["original_terminal_report"]["job_id"] == "33311218"
+    assert repair["original_terminal_report"]["state"] == "FAILED"
+    assert repair["original_terminal_report"]["exit_code"] == "2:0"
+    assert repair["deterministic_reassembly"]["status"] == "rejected"
+    assert repair["publication_contract"]["report_commit_exact_key_count"] == 14
+    assert repair["publication_contract"]["scientific_input_change_allowed"] is False
+    assert repair["publication_contract"]["gate_change_allowed"] is False
+    assert repair["publication_contract"]["scientific_bundle_schema_changed"] is False
+    assert repair["publication_contract"]["report_commit_schema_changed"] is False
+    assert repair["publication_contract"]["exp24_adapter_change_required"] is False
+    assert repair["scheduler_protocol"]["submit_held"] is True
+    assert (
+        repair["scheduler_protocol"][
+            "fresh_owner_wide_empty_census_before_submit_calling"
+        ]
+        is True
+    )
+    assert repair["scheduler_protocol"]["slurm_walltime_seconds"] == 14_400
+    assert repair["scheduler_protocol"]["release_evidence_wait_seconds"] == 10_800
+    assert repair["scheduler_protocol"]["minimum_assembly_budget_seconds"] == 3_600
+    assert repair["scheduler_protocol"]["release_wait_clock"] == "time.monotonic"
+    assert repair["scheduler_protocol"]["terminal_worker_failure_blocks_publication"] is True
+    assert repair["scheduler_protocol"]["sealed_source_root_bound_in_sbatch_argv"] is True
+    assert repair["scheduler_protocol"]["publisher_nofollow_same_fd_hash_before_exec"] is True
+    assert repair["actual_repair_submit_performed"] is False
+    for name, expected in repair["repair_source_sha256"].items():
+        assert hashlib.sha256((PACKAGE / name).read_bytes()).hexdigest() == expected
+    campaign.validate_manifest(manifest, lock, REPO)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("attempt",), 2),
+        (("generation_count",), 2),
+        (("actual_repair_submit_performed",), True),
+        (("publication_contract", "report_commit_exact_key_count"), 15),
+        (("publication_contract", "scientific_input_change_allowed"), True),
+        (("publication_contract", "gate_change_allowed"), True),
+        (("scheduler_protocol", "submit_held"), False),
+        (("scheduler_protocol", "settled_census_rounds"), 2),
+        (("scheduler_protocol", "release_evidence_wait_seconds"), 60),
+        (("scheduler_protocol", "terminal_worker_failure_blocks_publication"), False),
+        (("scheduler_protocol", "publisher_nofollow_same_fd_hash_before_exec"), False),
+    ],
+)
+def test_terminal_report_repair_policy_drift_fails_closed(path, value) -> None:
+    manifest, lock = contracts()
+    tampered = copy.deepcopy(manifest)
+    leaf = tampered["launch_contract"]["terminal_report_repair"]
+    for key in path[:-1]:
+        leaf = leaf[key]
+    leaf[path[-1]] = value
+    with pytest.raises(campaign.ContractError, match="terminal report repair contract"):
+        campaign.validate_manifest(tampered, lock, REPO)
+
+
 def test_each_matched_pair_differs_only_in_three_audited_weights():
     manifest, lock = contracts()
     cells = campaign.expand_matrix(manifest)
@@ -1053,6 +1115,8 @@ def test_protocol_inventory_is_closed_and_deterministic():
         "cancel.py",
         "report.py",
         "report.slurm",
+        "report_repair.py",
+        "report_repair.slurm",
         "dag_evidence.py",
         "two_wave_canary.py",
         "canary_worker.py",
@@ -1066,6 +1130,7 @@ def test_protocol_inventory_is_closed_and_deterministic():
         "tests/test_gate.py",
         "tests/test_lifecycle.py",
         "tests/test_orchestration.py",
+        "tests/test_report_repair.py",
         "tests/test_two_wave_canary.py",
     )
     assert len(campaign.PROTOCOL_FILES) == len(set(campaign.PROTOCOL_FILES))

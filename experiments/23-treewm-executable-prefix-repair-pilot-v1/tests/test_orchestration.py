@@ -6671,6 +6671,12 @@ def test_report_publication_is_atomic_and_idempotent(report, tmp_path, monkeypat
         "_validated_report_publication_prerequisite",
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_receipt",
+        lambda *_args, **_kwargs: {"report_job_id": "12345"},
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
     bundle = {"schema_version": 1, "cells": []}
     decision = {"status": "rejected", "gate_sha256": "a" * 64}
     provenance = {"schema_version": 1}
@@ -6687,6 +6693,12 @@ def test_report_failure_before_rename_publishes_nothing(report, tmp_path, monkey
         "_validated_report_publication_prerequisite",
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_receipt",
+        lambda *_args, **_kwargs: {"report_job_id": "12345"},
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
     real = report.seal_json
     calls = 0
 
@@ -6711,7 +6723,7 @@ def test_report_failure_before_rename_publishes_nothing(report, tmp_path, monkey
 
 
 def test_report_publication_requires_exact_successful_canary_prerequisite(
-    report, submit, tmp_path
+    report, submit, tmp_path, monkeypatch
 ):
     manifest = json.loads((PACKAGE / "manifest.json").read_text(encoding="utf-8"))
     protocol = (PACKAGE / "protocol.sha256").read_text(encoding="ascii").strip()
@@ -6758,6 +6770,25 @@ def test_report_publication_requires_exact_successful_canary_prerequisite(
         submission_sha256 = report.seal_json(
             submission / "SUBMISSION_CONTRACT.json", contract
         )
+        report.seal_json(
+            submission / "SUBMISSION_RECEIPT.json",
+            {
+                "schema_version": 1,
+                "status": "submission_committed",
+                "campaign_id": report.CAMPAIGN_ID,
+                "submission_sha256": submission_sha256,
+                "submission_authorization_sha256": "c" * 64,
+                "wave0_array_job_id": "1",
+                "wave1_array_job_id": "2",
+                "report_job_id": "12345",
+                "array": "0-19%20",
+                "wave1_dependency": "afterok:1",
+                "report_dependency": "afterok:2",
+                "kill_on_invalid_dependency": True,
+                "within_wave_requeue": False,
+                "wave0_submitted_held": True,
+            },
+        )
         return submission, submission_sha256
 
     submission, submission_sha256 = sealed_submission(
@@ -6777,6 +6808,7 @@ def test_report_publication_requires_exact_successful_canary_prerequisite(
         **decision_body,
         "gate_sha256": report.stable_hash(decision_body),
     }
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
     commit = report.publish_report(
         submission,
         submission_sha256,
@@ -6846,6 +6878,12 @@ def test_report_and_cancel_terminal_states_are_mutually_exclusive(
         "_validated_report_publication_prerequisite",
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_receipt",
+        lambda *_args, **_kwargs: {"report_job_id": "12345"},
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
     submission = tmp_path / "submission"
     submission.mkdir()
     body = {"status": status, "reason": "fixture"}
@@ -6881,6 +6919,12 @@ def test_cancel_rejects_symlink_or_forged_report_terminal(
         "_validated_report_publication_prerequisite",
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        report,
+        "_validated_report_publication_receipt",
+        lambda *_args, **_kwargs: {"report_job_id": "12345"},
+    )
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
     receipt = {"campaign_id": cancel.CAMPAIGN_ID, "submission_sha256": "a" * 64}
     symlinked = tmp_path / "symlinked"
     symlinked.mkdir()
