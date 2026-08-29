@@ -906,6 +906,17 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
         "state/submission"
     )
     assert repair["original_terminal_report"]["job_id"] == "33311218"
+    assert repair["original_terminal_report"]["git_provenance"] == {
+        "branch": "main",
+        "head": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "object_format": "sha1",
+        "origin_main": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "remote_origin": "git@github.com:ChristianLin0420/treewm.git",
+        "worktree_status": "clean",
+        "worktree_status_sha256": (
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ),
+    }
     assert repair["original_terminal_report"]["state"] == "FAILED"
     assert repair["original_terminal_report"]["exit_code"] == "2:0"
     assert repair["deterministic_reassembly"]["status"] == "rejected"
@@ -946,6 +957,7 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
         (("attempt",), 2),
         (("generation_count",), 2),
         (("actual_repair_submit_performed",), True),
+        (("original_terminal_report", "git_provenance", "head"), "2" * 40),
         (("publication_contract", "report_commit_exact_key_count"), 15),
         (("publication_contract", "scientific_input_change_allowed"), True),
         (("publication_contract", "gate_change_allowed"), True),

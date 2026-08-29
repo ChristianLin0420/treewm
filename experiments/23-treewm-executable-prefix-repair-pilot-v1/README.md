@@ -380,7 +380,9 @@ decision, which remains `rejected`.
 attempt 1. Its default and `--test-only` actions are read-only. Before any replacement
 `sbatch`, it holds the production transaction lock and shared `REPORT_CANCEL` lock;
 authenticates the original contract, authorization, receipt, 20 worker receipts,
-snapshot, source commit/protocol, failed reporter journals and log; captures a durable
+snapshot, the contract's exact seven-key clean-pushed git provenance (`head` and
+`origin_main`, never a `commit` alias), source protocol, failed reporter journals and
+log; captures a durable
 raw and canonical exact `sacct` failure row; requires three settled empty active-job
 censuses and no report, staging, cancellation, or recovery prefix; and seals the repair
 publisher source together with an atomic `SOURCE_AUTHORITY.json` that binds the clean

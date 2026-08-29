@@ -1167,7 +1167,17 @@ def _submission(root: Path) -> tuple[Path, str]:
         "snapshot_full_output_fingerprint_after": snapshot_full,
         "snapshot_scientific_output_fingerprint_before": snapshot_scientific,
         "snapshot_scientific_output_fingerprint_after": snapshot_scientific,
-        "git_provenance": {},
+        "git_provenance": {
+            "branch": "main",
+            "head": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+            "object_format": "sha1",
+            "origin_main": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+            "remote_origin": "git@github.com:ChristianLin0420/treewm.git",
+            "worktree_status": "clean",
+            "worktree_status_sha256": (
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ),
+        },
         "launches": launches,
         "array": "0-19%20",
         "fresh_start": True,

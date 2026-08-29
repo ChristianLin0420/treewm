@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import importlib.util
 import json
@@ -10,11 +11,35 @@ import stat
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
+ACTUAL_SUBMISSION_CONTRACT_IDENTITY = {
+    "raw_sha256": (
+        "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418"
+    ),
+    "git_provenance": {
+        "branch": "main",
+        "head": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "object_format": "sha1",
+        "origin_main": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "remote_origin": "git@github.com:ChristianLin0420/treewm.git",
+        "worktree_status": "clean",
+        "worktree_status_sha256": (
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ),
+    },
+    "git_provenance_canonical_sha256": (
+        "cea33bbdfbcd4849ea6acaff94d342a6403daba102e815aad35d16779b24e135"
+    ),
+}
+
+
+def _actual_git_provenance():
+    return copy.deepcopy(ACTUAL_SUBMISSION_CONTRACT_IDENTITY["git_provenance"])
 
 
 def _load(name: str, filename: str):
@@ -559,6 +584,127 @@ def test_controller_census_requires_exactly_three_rounds(repair):
         repair._validated_scheduler_census(census)
 
 
+def test_actual_submission_contract_git_provenance_projection_is_exact(repair):
+    fixture = copy.deepcopy(ACTUAL_SUBMISSION_CONTRACT_IDENTITY)
+    assert fixture["raw_sha256"] == repair.EXPECTED_SUBMISSION_SHA256
+    assert repair.stable_hash(fixture["git_provenance"]) == fixture[
+        "git_provenance_canonical_sha256"
+    ]
+    assert fixture["git_provenance"] == repair.EXPECTED_ORIGINAL_GIT_PROVENANCE
+    assert repair._validated_original_git_provenance(
+        fixture["git_provenance"]
+    ) == fixture["git_provenance"]
+
+
+def test_original_submission_validator_invokes_exact_git_provenance_guard(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    contract = {
+        "campaign_id": repair.CAMPAIGN_ID,
+        "submission_root": str(submission),
+        "snapshot_inventory_sha256": repair.EXPECTED_SNAPSHOT_INVENTORY_SHA256,
+        "package_protocol_sha256": repair.EXPECTED_ORIGINAL_PROTOCOL,
+        "git_provenance": _actual_git_provenance(),
+    }
+    contract_info = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o444,
+        st_uid=os.getuid(),
+        st_nlink=1,
+    )
+    monkeypatch.setattr(
+        repair, "CANONICAL_PRODUCTION_SUBMISSION_ROOT", submission
+    )
+    monkeypatch.setattr(
+        repair,
+        "read_json",
+        lambda _path, _label: (
+            contract,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            contract_info,
+        ),
+    )
+    observed = []
+
+    class GuardObserved(RuntimeError):
+        pass
+
+    def observe(value):
+        observed.append(copy.deepcopy(value))
+        raise GuardObserved("exact provenance guard reached")
+
+    monkeypatch.setattr(repair, "_validated_original_git_provenance", observe)
+    with pytest.raises(GuardObserved, match="guard reached"):
+        repair._validate_original_submission(
+            submission,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            report_program=tmp_path / "report.py",
+        )
+    assert observed == [ACTUAL_SUBMISSION_CONTRACT_IDENTITY["git_provenance"]]
+
+
+@pytest.mark.parametrize(
+    "mutation", ["commit_substitution", "missing", "extra", "head_origin_mismatch"]
+)
+def test_original_submission_git_provenance_rejects_shape_and_alias_forgery(
+    repair, mutation
+):
+    value = copy.deepcopy(ACTUAL_SUBMISSION_CONTRACT_IDENTITY["git_provenance"])
+    if mutation == "commit_substitution":
+        value["commit"] = value.pop("head")
+    elif mutation == "missing":
+        value.pop("branch")
+    elif mutation == "extra":
+        value["commit"] = repair.EXPECTED_ORIGINAL_SOURCE_COMMIT
+    else:
+        value["origin_main"] = "2" * 40
+    with pytest.raises(repair.RepairError, match="git provenance"):
+        repair._validated_original_git_provenance(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "branch",
+        "head",
+        "object_format",
+        "origin_main",
+        "remote_origin",
+        "worktree_status",
+        "worktree_status_sha256",
+    ],
+)
+def test_original_submission_git_provenance_rejects_wrong_field_types(
+    repair, field
+):
+    value = copy.deepcopy(ACTUAL_SUBMISSION_CONTRACT_IDENTITY["git_provenance"])
+    value[field] = True
+    with pytest.raises(repair.RepairError, match="git provenance"):
+        repair._validated_original_git_provenance(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("branch", "release"),
+        ("head", "2" * 40),
+        ("object_format", "sha256"),
+        ("origin_main", "2" * 40),
+        ("remote_origin", "https://github.com/ChristianLin0420/treewm.git"),
+        ("worktree_status", "dirty"),
+        ("worktree_status_sha256", "2" * 64),
+    ],
+)
+def test_original_submission_git_provenance_rejects_value_drift(
+    repair, field, replacement
+):
+    value = copy.deepcopy(ACTUAL_SUBMISSION_CONTRACT_IDENTITY["git_provenance"])
+    value[field] = replacement
+    with pytest.raises(repair.RepairError, match="git provenance"):
+        repair._validated_original_git_provenance(value)
+
+
 def test_source_snapshot_first_file_crash_is_removed(repair, tmp_path, monkeypatch):
     submission = tmp_path / "submission"
     submission.mkdir()
@@ -850,6 +996,7 @@ def _configure_minimal_controller(repair, tmp_path, monkeypatch):
         "snapshot_root": str(submission / "source-snapshot/repo"),
         "snapshot_inventory_sha256": "3" * 64,
         "package_protocol_sha256": repair.EXPECTED_ORIGINAL_PROTOCOL,
+        "git_provenance": _actual_git_provenance(),
         "scheduler_control_plane_contract": {"slurm_conf": "/tmp/slurm.conf"},
     }
     repair.seal_json(submission / "SUBMISSION_CONTRACT.json", contract)
@@ -1110,6 +1257,7 @@ def test_full_held_submit_authorize_release_order_is_gap_free(
         "snapshot_root": str(submission / "source-snapshot/repo"),
         "snapshot_inventory_sha256": "3" * 64,
         "package_protocol_sha256": repair.EXPECTED_ORIGINAL_PROTOCOL,
+        "git_provenance": _actual_git_provenance(),
         "scheduler_control_plane_contract": {"slurm_conf": "/tmp/slurm.conf"},
     }
     repair.seal_json(submission / "SUBMISSION_CONTRACT.json", contract)
@@ -2685,6 +2833,7 @@ def test_original_report_failure_terminal_mismatch_rejected_coherently(
         "snapshot_root": str(submission / "source-snapshot/repo"),
         "snapshot_inventory_sha256": repair.EXPECTED_SNAPSHOT_INVENTORY_SHA256,
         "package_protocol_sha256": repair.EXPECTED_ORIGINAL_PROTOCOL,
+        "git_provenance": _actual_git_provenance(),
         "scheduler_control_plane_contract": {"slurm_conf": "/tmp/slurm.conf"},
     }
     calling_sha = repair.seal_json(
@@ -3896,6 +4045,7 @@ def test_authorization_validator_requires_sole_settled_scheduler_authority(
         "snapshot_root": str(submission / "source-snapshot/repo"),
         "snapshot_inventory_sha256": "3" * 64,
         "package_protocol_sha256": repair.EXPECTED_ORIGINAL_PROTOCOL,
+        "git_provenance": _actual_git_provenance(),
     }
     receipt = {"report_job_id": repair.EXPECTED_ORIGINAL_REPORT_JOB_ID}
     receipt_map = {"schema_version": 1, "files": {}}

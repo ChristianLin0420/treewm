@@ -1449,6 +1449,15 @@
       "submission_sha256": "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418",
       "original_terminal_report": {
         "source_commit": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+        "git_provenance": {
+          "branch": "main",
+          "head": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+          "object_format": "sha1",
+          "origin_main": "33122e15d0aaf3661893a4c853fd5ac49173c685",
+          "remote_origin": "git@github.com:ChristianLin0420/treewm.git",
+          "worktree_status": "clean",
+          "worktree_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
         "package_protocol_sha256": "2c0231b61197fe67790432c78a896272a55c3497a777d490598b53a6be67342f",
         "snapshot_inventory_sha256": "9bff89010f792d1aed8b3b691567655daab8f83135d6421798b5efea29a2f2c5",
         "submission_authorization_sha256": "371ae8df4add6338b98469eca6a287902cb69325dfda9d5be6ce5b1600e6fd55",
@@ -1490,7 +1499,7 @@
       },
       "repair_source_sha256": {
         "report.py": "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07",
-        "report_repair.py": "756d69eb8a9f32d8e9a9e9eb5e8fdc7706a954953a52900a7c120321c77fcd26",
+        "report_repair.py": "52d582406781f5e8036e1a36dc8b979d71b7a67e0e14f297b0a39273eedc6518",
         "report_repair.slurm": "15ce6712f16c0655b4ad3d544987aec25574531cfc02b470c1ed9395bd363962"
       },
       "publication_contract": {

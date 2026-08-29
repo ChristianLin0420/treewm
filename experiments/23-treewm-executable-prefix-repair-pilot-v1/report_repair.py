@@ -48,6 +48,17 @@ EXPECTED_SUBMISSION_SHA256 = (
     "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418"
 )
 EXPECTED_ORIGINAL_SOURCE_COMMIT = "33122e15d0aaf3661893a4c853fd5ac49173c685"
+EXPECTED_ORIGINAL_GIT_PROVENANCE = {
+    "branch": "main",
+    "head": EXPECTED_ORIGINAL_SOURCE_COMMIT,
+    "object_format": "sha1",
+    "origin_main": EXPECTED_ORIGINAL_SOURCE_COMMIT,
+    "remote_origin": "git@github.com:ChristianLin0420/treewm.git",
+    "worktree_status": "clean",
+    "worktree_status_sha256": (
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ),
+}
 EXPECTED_ORIGINAL_PROTOCOL = (
     "2c0231b61197fe67790432c78a896272a55c3497a777d490598b53a6be67342f"
 )
@@ -1086,6 +1097,18 @@ def _pretty_json_size(value: Mapping[str, Any]) -> int:
     )
 
 
+def _validated_original_git_provenance(value: object) -> dict[str, str]:
+    expected = EXPECTED_ORIGINAL_GIT_PROVENANCE
+    require(
+        isinstance(value, Mapping)
+        and set(value) == set(expected)
+        and all(type(value[key]) is str for key in expected)
+        and exact_json_equal(value, expected),
+        "original submission git provenance differs",
+    )
+    return {key: value[key] for key in expected}
+
+
 def _validate_original_submission(
     submission_root: Path,
     submission_sha256: str,
@@ -1115,12 +1138,7 @@ def _validate_original_submission(
         and contract.get("package_protocol_sha256") == EXPECTED_ORIGINAL_PROTOCOL,
         "original submission contract differs",
     )
-    git_provenance = contract.get("git_provenance")
-    require(
-        isinstance(git_provenance, Mapping)
-        and git_provenance.get("commit") == EXPECTED_ORIGINAL_SOURCE_COMMIT,
-        "original submission source commit differs",
-    )
+    _validated_original_git_provenance(contract.get("git_provenance"))
     snapshot_root = Path(str(contract.get("snapshot_root", "")))
     require(
         snapshot_root == submission_root / "source-snapshot" / "repo",
