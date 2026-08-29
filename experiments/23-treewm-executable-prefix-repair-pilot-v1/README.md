@@ -383,7 +383,11 @@ authenticates the original contract, authorization, receipt, 20 worker receipts,
 snapshot, source commit/protocol, failed reporter journals and log; captures a durable
 raw and canonical exact `sacct` failure row; requires three settled empty active-job
 censuses and no report, staging, cancellation, or recovery prefix; and seals the repair
-publisher source. On every path without a submit `CALLING` record—including recovery
+publisher source together with an atomic `SOURCE_AUTHORITY.json` that binds the clean
+checkout commit, protocol, and exact source-file map. Crash cleanup invalidates that
+authority before removing any source file, so both pre-rename and partial-removal
+prefixes are restartable without accepting forged staging. On every path without a
+submit `CALLING` record—including recovery
 after the failure artifact was sealed—it takes a second fresh owner-wide three-round
 census immediately at the submission boundary, requires the entire relevant settled
 row set empty, binds the raw rounds, parsed projection, capture time, environment, and
@@ -435,6 +439,30 @@ repair prefix and `--recover-or-cancel-report-repair` for that same prefix. Both
 the exact confirmation phrase `SUBMIT_EXP23_LAUNCH8_REPORT_REPAIR_0001`, run with umask
 `077`, and are operator-authorized actions; neither is invoked by package verification,
 scientific submission, report assembly, or any default command.
+
+The active controller must be loaded from its own canonical, clean `origin/main`
+checkout. That checkout can be outside the production project tree: the controller
+does not derive state from its checkout. The exact production submission root is the
+immutable absolute path below, and clone-relative output paths, aliases, symlinks, and
+other roots are rejected before lock or state access. Do not hide, stash, or bypass
+unrelated worktree changes to make a checkout appear clean; use a separate clean clone.
+
+```bash
+CLEAN_REPAIR_REPO=/absolute/path/to/clean-origin-main-treewm
+PRODUCTION_SUBMISSION_ROOT=/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/state/submission
+REPAIR="$CLEAN_REPAIR_REPO/experiments/23-treewm-executable-prefix-repair-pilot-v1/report_repair.py"
+
+"$PY" -I -S -B "$REPAIR" \
+  --repo-root "$CLEAN_REPAIR_REPO" \
+  --submission-root "$PRODUCTION_SUBMISSION_ROOT" \
+  --test-only
+
+"$PY" -I -S -B "$REPAIR" \
+  --repo-root "$CLEAN_REPAIR_REPO" \
+  --submission-root "$PRODUCTION_SUBMISSION_ROOT" \
+  --submit-real-report-repair \
+  --confirmation SUBMIT_EXP23_LAUNCH8_REPORT_REPAIR_0001
+```
 
 To gate an already assembled immutable report directly:
 

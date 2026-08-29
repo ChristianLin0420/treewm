@@ -194,6 +194,7 @@ REPORT_REPAIR_AUTHORIZATION_KEYS = frozenset(
         "authorized_at_utc",
     }
 )
+REPORT_REPAIR_SOURCE_AUTHORITY_NAME = "SOURCE_AUTHORITY.json"
 REPORT_REPAIR_SUBMIT_CALLING_KEYS = frozenset(
     {
         "schema_version",
@@ -2511,6 +2512,38 @@ def _validated_report_repair_authorization(
             and file_sha256(source_path) == expected["sha256"],
             f"report repair source bytes differ: {name}",
         )
+    require(
+        {entry.name for entry in os.scandir(source_root)}
+        == {*source_files, REPORT_REPAIR_SOURCE_AUTHORITY_NAME},
+        "report repair sealed source coverage differs",
+    )
+    source_authority_path = contained_regular(
+        source_root / REPORT_REPAIR_SOURCE_AUTHORITY_NAME,
+        source_root,
+        "report repair sealed source authority",
+    )
+    source_authority_info = source_authority_path.lstat()
+    source_authority = read_json(source_authority_path)
+    require(
+        stat.S_IMODE(source_authority_info.st_mode) == 0o444
+        and source_authority_info.st_uid == os.getuid()
+        and source_authority_info.st_nlink == 1
+        and exact_json_equal(
+            source_authority,
+            {
+                "schema_version": 1,
+                "repair_source_commit": value["repair_source_commit"],
+                "repair_package_protocol_sha256": value[
+                    "repair_package_protocol_sha256"
+                ],
+                "repair_source_files": value["repair_source_files"],
+                "repair_source_files_sha256": value[
+                    "repair_source_files_sha256"
+                ],
+            },
+        ),
+        "report repair sealed source authority differs",
+    )
     require(
         Path(__file__).absolute() == source_root / "report.py",
         "active report repair publisher is outside its sealed source",

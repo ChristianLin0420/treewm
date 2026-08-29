@@ -1417,7 +1417,7 @@
           "canary_report.slurm": "6d4561c7b8462fde2cd7b8666fa9f2b8d377aa30bfc44195bef6924548df1c0b",
           "canary_worker.py": "4bcbaab866538c527f7a894d015d8b8bfbc505b2eb8e3596e56d419cfa4b3a2d",
           "dag_evidence.py": "b653ba6b2c25c017144cacb7b4b17ec5f5e153ad504eab47fba101d2c71dd1bb",
-          "report.py": "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add",
+          "report.py": "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07",
           "report.slurm": "9930e95a9427d1fa55125387effcd1cdd65367b075b586855cd2d1ba34c1a6c9",
           "submit.py": "51671551e331537dc31e87e11423bd6c66e1ce981b1dbb5b85ee48c028160dfa",
           "train_entry.py": "ac525211824eca20993f696a3e249d3c700b24eefdea48f365c8a997d64a9f33",
@@ -1443,6 +1443,8 @@
       "controller": "report_repair.py",
       "batch": "report_repair.slurm",
       "publisher": "report.py --publish-repair",
+      "source_checkout_requirement": "active_controller_clean_origin_main",
+      "production_submission_root_independent_of_source_checkout": true,
       "submission_root": "/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/state/submission",
       "submission_sha256": "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418",
       "original_terminal_report": {
@@ -1487,8 +1489,8 @@
         "original_report_commit_payload_sha256": "a52fd230482818d2d9bc52e2b0433d95b31fccd945c0a6ec95b8e9aa1834611c"
       },
       "repair_source_sha256": {
-        "report.py": "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add",
-        "report_repair.py": "dc7995049a8be5738c924ddf9818e9a5b33a5bcaa83e326486c63568fc65084d",
+        "report.py": "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07",
+        "report_repair.py": "756d69eb8a9f32d8e9a9e9eb5e8fdc7706a954953a52900a7c120321c77fcd26",
         "report_repair.slurm": "15ce6712f16c0655b4ad3d544987aec25574531cfc02b470c1ed9395bd363962"
       },
       "publication_contract": {
@@ -1511,6 +1513,8 @@
       "scheduler_protocol": {
         "submit_held": true,
         "settled_census_rounds": 3,
+        "atomic_sealed_source_authority": true,
+        "source_staging_authority_first_cleanup": true,
         "fresh_owner_wide_empty_census_before_submit_calling": true,
         "transaction_then_report_cancel_lock": true,
         "authorization_before_release": true,

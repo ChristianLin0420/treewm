@@ -38,8 +38,11 @@ REPOSITORY_ROOT = PACKAGE_DIR.parents[1]
 CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 ATTEMPT = 1
 CONFIRMATION = "SUBMIT_EXP23_LAUNCH8_REPORT_REPAIR_0001"
-EXPECTED_SUBMISSION_ROOT = REPOSITORY_ROOT / (
-    "outputs/treewm-executable-prefix-repair-pilot-v1-launch8/state/submission"
+CANONICAL_PRODUCTION_SUBMISSION_ROOT = Path(
+    "/lustre/fs11/portfolios/edgeai/projects/"
+    "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+    "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+    "state/submission"
 )
 EXPECTED_SUBMISSION_SHA256 = (
     "bbeaa71f8f37f22cbe74c16c68b733742e8a4366838812832180257d145f5418"
@@ -103,6 +106,7 @@ SOURCE_NAMES = (
     "report_repair.slurm",
     "protocol.sha256",
 )
+SOURCE_AUTHORITY_NAME = "SOURCE_AUTHORITY.json"
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 JOB_ID_RE = re.compile(r"[1-9][0-9]*\Z")
@@ -516,6 +520,42 @@ def _directory(path: Path, label: str) -> Path:
         raise RepairError(f"{label} is unavailable: {exc}") from exc
     require(stat.S_ISDIR(info.st_mode), f"{label} is not a nonsymlink directory")
     return path.absolute()
+
+
+def _canonical_existing_directory(path: Path, label: str) -> Path:
+    """Require one lexical, physical, nonsymlink spelling of a directory."""
+
+    raw = os.fspath(path)
+    require(
+        path.is_absolute()
+        and not raw.startswith("//")
+        and all(part not in {"", ".", ".."} for part in raw.split("/")[1:]),
+        f"{label} is not a canonical absolute path",
+    )
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise RepairError(f"{label} is unavailable: {exc}") from exc
+    require(
+        resolved == path and path.is_dir(),
+        f"{label} is symlinked or noncanonical",
+    )
+    return path
+
+
+def _canonical_cli_path(raw: str, label: str) -> Path:
+    """Reject noncanonical CLI spellings before ``Path`` normalizes them."""
+
+    require(type(raw) is str, f"{label} is not a path string")
+    parts = raw.split("/")
+    require(
+        raw.startswith("/")
+        and not raw.startswith("//")
+        and len(parts) > 1
+        and all(part not in {"", ".", ".."} for part in parts[1:]),
+        f"{label} is not a canonical absolute path",
+    )
+    return Path(raw)
 
 
 def _regular_bytes(path: Path, label: str, *, max_size: int = 1 << 30) -> tuple[bytes, str, os.stat_result]:
@@ -1054,7 +1094,10 @@ def _validate_original_submission(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Authenticate original snapshot/receipt/all cells and exact deterministic assembly."""
 
-    require(submission_root == EXPECTED_SUBMISSION_ROOT, "report repair submission root differs")
+    require(
+        submission_root == CANONICAL_PRODUCTION_SUBMISSION_ROOT,
+        "report repair submission root differs",
+    )
     require(submission_sha256 == EXPECTED_SUBMISSION_SHA256, "report repair submission SHA differs")
     _directory(submission_root, "original submission root")
     contract, contract_digest, contract_info = read_json(
@@ -1955,7 +1998,7 @@ def _git_output(argv: Sequence[str], repo_root: Path) -> str:
 
 
 def _verified_live_repair_source(repo_root: Path) -> dict[str, Any]:
-    root = _directory(repo_root, "repair source repository")
+    root = _canonical_existing_directory(repo_root, "repair source repository")
     require(root == REPOSITORY_ROOT, "repair source repository root differs")
     campaign = _load_module("campaign", PACKAGE_DIR / "campaign.py")
     campaign.load_contract(root)
@@ -2042,6 +2085,24 @@ def _validate_sealed_repair_source(
 ) -> None:
     root = _directory(source_root, "sealed repair source root")
     require(
+        set(source)
+        == {
+            "schema_version",
+            "repair_source_commit",
+            "repair_package_protocol_sha256",
+            "repair_source_files",
+            "repair_source_files_sha256",
+        }
+        and type(source.get("schema_version")) is int
+        and source.get("schema_version") == 1
+        and isinstance(source.get("repair_source_commit"), str)
+        and GIT_RE.fullmatch(source["repair_source_commit"]) is not None
+        and isinstance(source.get("repair_package_protocol_sha256"), str)
+        and SHA256_RE.fullmatch(source["repair_package_protocol_sha256"])
+        is not None,
+        "sealed repair source identity differs",
+    )
+    require(
         stat.S_IMODE(root.lstat().st_mode) == 0o555,
         "sealed repair source root mode differs",
     )
@@ -2053,7 +2114,20 @@ def _validate_sealed_repair_source(
         "sealed repair source inventory differs",
     )
     actual_names = {entry.name for entry in os.scandir(root)}
-    require(actual_names == set(SOURCE_NAMES), "sealed repair source coverage differs")
+    require(
+        actual_names == {*SOURCE_NAMES, SOURCE_AUTHORITY_NAME},
+        "sealed repair source coverage differs",
+    )
+    authority, _authority_sha256, authority_info = read_json(
+        root / SOURCE_AUTHORITY_NAME, "sealed repair source authority"
+    )
+    require(
+        stat.S_IMODE(authority_info.st_mode) == 0o444
+        and authority_info.st_uid == os.getuid()
+        and authority_info.st_nlink == 1
+        and exact_json_equal(authority, source),
+        "sealed repair source authority differs",
+    )
     for name in SOURCE_NAMES:
         expected = expected_files[name]
         payload, digest, info = _regular_bytes(root / name, f"sealed repair source {name}")
@@ -2081,6 +2155,128 @@ def _validate_sealed_repair_source(
     )
 
 
+def _load_sealed_repair_source(source_root: Path) -> dict[str, Any]:
+    source, _source_sha256, source_info = read_json(
+        source_root / SOURCE_AUTHORITY_NAME,
+        "sealed repair source authority",
+    )
+    require(
+        stat.S_IMODE(source_info.st_mode) == 0o444
+        and source_info.st_uid == os.getuid()
+        and source_info.st_nlink == 1,
+        "sealed repair source authority identity differs",
+    )
+    _validate_sealed_repair_source(source_root, source)
+    return source
+
+
+def _remove_repair_source_staging(
+    staging: Path, source: Mapping[str, Any], attempt_root: Path
+) -> None:
+    info = staging.lstat()
+    mode = stat.S_IMODE(info.st_mode)
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and info.st_nlink == 2
+        and mode in {0o700, 0o555},
+        "repair source staging identity differs",
+    )
+    entries = list(os.scandir(staging))
+    entry_names = {entry.name for entry in entries}
+    allowed_names = {*SOURCE_NAMES, SOURCE_AUTHORITY_NAME}
+    require(
+        len(entries) == len(entry_names) and entry_names <= allowed_names,
+        "repair source staging coverage differs",
+    )
+    if mode == 0o555:
+        _validate_sealed_repair_source(staging, source)
+    else:
+        for entry in entries:
+            listed = entry.stat(follow_symlinks=False)
+            entry_mode = stat.S_IMODE(listed.st_mode)
+            require(
+                stat.S_ISREG(listed.st_mode)
+                and listed.st_uid == os.getuid()
+                and listed.st_nlink == 1
+                and entry_mode in {0o600, 0o444},
+                "repair source staging contains an unsafe entry",
+            )
+            if entry_mode == 0o600:
+                continue
+            payload, digest, _opened = _regular_bytes(
+                Path(entry.path), f"repair source staging {entry.name}"
+            )
+            if entry.name == SOURCE_AUTHORITY_NAME:
+                require(
+                    entry_names == allowed_names,
+                    "repair source staging authority coverage differs",
+                )
+                authority = _decode_json(Path(entry.path), payload)
+                require(
+                    exact_json_equal(authority, source),
+                    "repair source staging authority differs",
+                )
+            else:
+                expected = source["repair_source_files"][entry.name]
+                require(
+                    expected["mode"] == 0o444
+                    and expected["size"] == len(payload)
+                    and expected["sha256"] == digest,
+                    f"repair source staging differs: {entry.name}",
+                )
+    os.chmod(staging, 0o700, follow_symlinks=False)
+    authority_entries = [
+        entry for entry in entries if entry.name == SOURCE_AUTHORITY_NAME
+    ]
+    other_entries = sorted(
+        (entry for entry in entries if entry.name != SOURCE_AUTHORITY_NAME),
+        key=lambda entry: entry.name,
+    )
+    invalidation_order = [*authority_entries, *other_entries]
+    for entry in invalidation_order:
+        listed = entry.stat(follow_symlinks=False)
+        require(
+            stat.S_ISREG(listed.st_mode)
+            and listed.st_uid == os.getuid()
+            and listed.st_nlink == 1
+            and stat.S_IMODE(listed.st_mode) in {0o600, 0o444},
+            "repair source staging contains an unsafe entry",
+        )
+        descriptor = os.open(
+            entry.path,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            require(
+                _file_identity(opened) == _file_identity(listed),
+                "repair source staging entry identity raced",
+            )
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    _fsync_directory(staging)
+    removal_order = [*other_entries, *authority_entries]
+    for entry in removal_order:
+        listed = os.stat(entry.path, follow_symlinks=False)
+        require(
+            stat.S_ISREG(listed.st_mode)
+            and listed.st_uid == os.getuid()
+            and listed.st_nlink == 1
+            and stat.S_IMODE(listed.st_mode) == 0o600,
+            "repair source staging invalidation differs",
+        )
+        os.unlink(entry.path)
+    _fsync_directory(staging)
+    staging.rmdir()
+    _fsync_directory(attempt_root)
+
+
 def _seal_repair_source_snapshot(
     submission_root: Path, source: Mapping[str, Any]
 ) -> Path:
@@ -2099,29 +2295,15 @@ def _seal_repair_source_snapshot(
             )
     source_root = _repair_source_root(submission_root)
     if os.path.lexists(source_root):
-        _validate_sealed_repair_source(source_root, source)
+        sealed_source = _load_sealed_repair_source(source_root)
+        require(
+            exact_json_equal(sealed_source, source),
+            "sealed repair source differs from requested source identity",
+        )
         return source_root
     leftovers = sorted(attempt_root.glob(".source.tmp.*"))
     for leftover in leftovers:
-        info = leftover.lstat()
-        require(
-            stat.S_ISDIR(info.st_mode)
-            and info.st_uid == os.getuid()
-            and stat.S_IMODE(info.st_mode) == 0o700,
-            "repair source staging identity differs",
-        )
-        for entry in os.scandir(leftover):
-            listed = entry.stat(follow_symlinks=False)
-            require(
-                stat.S_ISREG(listed.st_mode)
-                and listed.st_uid == os.getuid()
-                and listed.st_nlink == 1,
-                "repair source staging contains an unsafe entry",
-            )
-            os.chmod(entry.path, 0o600, follow_symlinks=False)
-            os.unlink(entry.path)
-        leftover.rmdir()
-        _fsync_directory(attempt_root)
+        _remove_repair_source_staging(leftover, source, attempt_root)
     staging = attempt_root / f".source.tmp.{os.getpid()}.{time.time_ns()}"
     staging.mkdir(mode=0o700)
     _fsync_directory(attempt_root)
@@ -2137,6 +2319,11 @@ def _seal_repair_source_snapshot(
                 f"live repair source changed before snapshot: {name}",
             )
             _write_sealed_file(staging / name, payload)
+        authority_payload = (
+            json.dumps(dict(source), sort_keys=True, indent=2, allow_nan=False)
+            + "\n"
+        ).encode("utf-8")
+        _write_sealed_file(staging / SOURCE_AUTHORITY_NAME, authority_payload)
         _fsync_directory(staging)
         descriptor = os.open(
             staging,
@@ -2154,12 +2341,7 @@ def _seal_repair_source_snapshot(
         _fsync_directory(attempt_root)
     except BaseException:
         if os.path.lexists(staging):
-            os.chmod(staging, 0o700, follow_symlinks=False)
-            for entry in os.scandir(staging):
-                os.chmod(entry.path, 0o600, follow_symlinks=False)
-                os.unlink(entry.path)
-            staging.rmdir()
-            _fsync_directory(attempt_root)
+            _remove_repair_source_staging(staging, source, attempt_root)
         raise
     _validate_sealed_repair_source(source_root, source)
     return source_root
@@ -5045,10 +5227,17 @@ def execute_report_repair(
 ) -> dict[str, Any]:
     """Advance or reconcile the one repair generation under both locks."""
 
-    root = repo_root.absolute()
-    submission = submission_root.absolute()
+    root = _canonical_existing_directory(
+        repo_root, "report repair repository root"
+    )
+    submission = _canonical_existing_directory(
+        submission_root, "report repair submission root"
+    )
     require(root == REPOSITORY_ROOT, "report repair repository root differs")
-    require(submission == EXPECTED_SUBMISSION_ROOT, "report repair submission root differs")
+    require(
+        submission == CANONICAL_PRODUCTION_SUBMISSION_ROOT,
+        "report repair submission root differs",
+    )
     require(submission_sha256 == EXPECTED_SUBMISSION_SHA256, "report repair submission SHA differs")
     with _RepairLocks(submission) as locks:
         repair_namespace_names = _require_known_single_generation_namespace(
@@ -5122,6 +5311,9 @@ def execute_report_repair(
             _validate_sealed_repair_source(
                 _repair_source_root(submission), recovery_source
             )
+            report_program = _repair_source_root(submission) / "report.py"
+        elif os.path.lexists(_repair_source_root(submission)):
+            _load_sealed_repair_source(_repair_source_root(submission))
             report_program = _repair_source_root(submission) / "report.py"
         else:
             report_program = PACKAGE_DIR / "report.py"
@@ -5255,8 +5447,12 @@ def execute_report_repair(
                 not failure_was_sealed or source_was_sealed,
                 "report repair failure evidence lacks its sealed source predecessor",
             )
-            source = _verified_live_repair_source(root)
-            source_root = _seal_repair_source_snapshot(submission, source)
+            if source_was_sealed:
+                source_root = _repair_source_root(submission)
+                source = _load_sealed_repair_source(source_root)
+            else:
+                source = _verified_live_repair_source(root)
+                source_root = _seal_repair_source_snapshot(submission, source)
             if failure_was_sealed:
                 failure, failure_sha, failure_info = read_json(
                     failure_path, "report repair original failure evidence"
@@ -5767,7 +5963,7 @@ def describe() -> dict[str, Any]:
         "status": "one_generation_report_repair_source_available",
         "campaign_id": CAMPAIGN_ID,
         "attempt": ATTEMPT,
-        "submission_root": str(EXPECTED_SUBMISSION_ROOT),
+        "submission_root": str(CANONICAL_PRODUCTION_SUBMISSION_ROOT),
         "submission_sha256": EXPECTED_SUBMISSION_SHA256,
         "original_report_job_id": EXPECTED_ORIGINAL_REPORT_JOB_ID,
         "expected_report_bundle_sha256": EXPECTED_BUNDLE_SHA256,
@@ -5784,8 +5980,11 @@ def _parser() -> argparse.ArgumentParser:
     actions.add_argument("--test-only", action="store_true")
     actions.add_argument("--submit-real-report-repair", action="store_true")
     actions.add_argument("--recover-or-cancel-report-repair", action="store_true")
-    parser.add_argument("--repo-root", type=Path, default=REPOSITORY_ROOT)
-    parser.add_argument("--submission-root", type=Path, default=EXPECTED_SUBMISSION_ROOT)
+    parser.add_argument("--repo-root", default=str(REPOSITORY_ROOT))
+    parser.add_argument(
+        "--submission-root",
+        default=str(CANONICAL_PRODUCTION_SUBMISSION_ROOT),
+    )
     parser.add_argument("--submission-sha256", default=EXPECTED_SUBMISSION_SHA256)
     parser.add_argument("--confirmation")
     return parser
@@ -5794,18 +5993,24 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        repo_root = _canonical_cli_path(
+            args.repo_root, "report repair CLI repository root"
+        )
+        submission_root = _canonical_cli_path(
+            args.submission_root, "report repair CLI submission root"
+        )
         mutating = args.submit_real_report_repair or args.recover_or_cancel_report_repair
         if mutating:
             require(args.confirmation == CONFIRMATION, "report repair confirmation differs")
             os.umask(0o077)
             result = execute_report_repair(
-                args.repo_root,
-                args.submission_root,
+                repo_root,
+                submission_root,
                 args.submission_sha256,
                 allow_initial_submission=args.submit_real_report_repair,
             )
         elif args.test_only:
-            source = _verified_live_repair_source(args.repo_root.absolute())
+            source = _verified_live_repair_source(repo_root)
             result = {
                 **describe(),
                 "status": "read_only_report_repair_source_verified",

@@ -616,6 +616,21 @@ def test_source_snapshot_noreplace_race_preserves_competing_target(
     assert not list(repair._repair_root(submission).glob(".source.tmp.*"))
 
 
+def test_source_snapshot_atomically_carries_checkout_authority(repair, tmp_path):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    source_root = repair._seal_repair_source_snapshot(submission, source)
+    assert repair._load_sealed_repair_source(source_root) == source
+    assert {path.name for path in source_root.iterdir()} == {
+        *repair.SOURCE_NAMES,
+        repair.SOURCE_AUTHORITY_NAME,
+    }
+    authority = source_root / repair.SOURCE_AUTHORITY_NAME
+    assert stat.S_IMODE(authority.lstat().st_mode) == 0o444
+    assert json.loads(authority.read_text()) == source
+
+
 class _ContextLocks(_FakeLocks):
     def __init__(self, _submission_root=None):
         pass
@@ -647,6 +662,184 @@ def _repair_source(repair):
     }
 
 
+def _pre_rename_source_staging(repair, submission, source):
+    repair_parent = submission / "report-repair"
+    attempt_root = repair._repair_root(submission)
+    repair_parent.mkdir(mode=0o700)
+    attempt_root.mkdir(mode=0o700)
+    staging = attempt_root / ".source.tmp.killpoint"
+    staging.mkdir(mode=0o700)
+    for name in repair.SOURCE_NAMES:
+        repair._write_sealed_file(staging / name, (PACKAGE / name).read_bytes())
+    authority_payload = (
+        json.dumps(source, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    repair._write_sealed_file(
+        staging / repair.SOURCE_AUTHORITY_NAME, authority_payload
+    )
+    staging.chmod(0o555)
+    return staging
+
+
+def _empty_source_staging(repair, submission):
+    repair_parent = submission / "report-repair"
+    attempt_root = repair._repair_root(submission)
+    repair_parent.mkdir(mode=0o700)
+    attempt_root.mkdir(mode=0o700)
+    staging = attempt_root / ".source.tmp.killpoint"
+    staging.mkdir(mode=0o700)
+    return staging
+
+
+def test_source_snapshot_recovers_complete_0555_pre_rename_staging(
+    repair, tmp_path
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+
+    source_root = repair._seal_repair_source_snapshot(submission, source)
+
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(source_root) == source
+    assert stat.S_IMODE(source_root.lstat().st_mode) == 0o555
+
+
+@pytest.mark.parametrize("forgery", ["extra", "missing", "wrong", "authority"])
+def test_source_snapshot_rejects_forged_0555_pre_rename_staging(
+    repair, tmp_path, forgery
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    staging.chmod(0o700)
+    if forgery == "extra":
+        repair._write_sealed_file(staging / "unexpected", b"forged\n")
+    elif forgery == "missing":
+        (staging / repair.SOURCE_NAMES[0]).unlink()
+    elif forgery == "wrong":
+        target = staging / repair.SOURCE_NAMES[0]
+        target.unlink()
+        repair._write_sealed_file(target, b"forged\n")
+    else:
+        target = staging / repair.SOURCE_AUTHORITY_NAME
+        target.unlink()
+        repair._write_sealed_file(target, b'{"schema_version":1}\n')
+    staging.chmod(0o555)
+
+    with pytest.raises(repair.RepairError, match="repair source staging|sealed repair"):
+        repair._seal_repair_source_snapshot(submission, source)
+
+    assert os.path.lexists(staging)
+    assert stat.S_IMODE(staging.lstat().st_mode) == 0o555
+    assert not os.path.lexists(repair._repair_source_root(submission))
+
+
+@pytest.mark.parametrize("partial_name", ["source", "authority"])
+def test_source_snapshot_removes_0600_partial_pre_seal_staging(
+    repair, tmp_path, partial_name
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _empty_source_staging(repair, submission)
+    if partial_name == "source":
+        target = staging / repair.SOURCE_NAMES[0]
+    else:
+        for name in repair.SOURCE_NAMES:
+            repair._write_sealed_file(staging / name, (PACKAGE / name).read_bytes())
+        target = staging / repair.SOURCE_AUTHORITY_NAME
+    target.write_bytes(b"partial")
+    target.chmod(0o600)
+
+    source_root = repair._seal_repair_source_snapshot(submission, source)
+
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(source_root) == source
+
+
+@pytest.mark.parametrize(
+    "killpoint", ["authority_invalidated", "during_chmod_pass", "after_first_unlink"]
+)
+def test_source_snapshot_cleanup_two_phase_killpoints_are_restartable(
+    repair, tmp_path, killpoint
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    staging.chmod(0o700)
+    authority = staging / repair.SOURCE_AUTHORITY_NAME
+    authority.chmod(0o600)
+    if killpoint in {"during_chmod_pass", "after_first_unlink"}:
+        (staging / repair.SOURCE_NAMES[0]).chmod(0o600)
+    if killpoint == "after_first_unlink":
+        for name in repair.SOURCE_NAMES[1:]:
+            (staging / name).chmod(0o600)
+        (staging / repair.SOURCE_NAMES[0]).unlink()
+
+    source_root = repair._seal_repair_source_snapshot(submission, source)
+
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(source_root) == source
+    assert repair._seal_repair_source_snapshot(submission, source) == source_root
+
+
+def test_source_snapshot_rejects_missing_0700_coverage_with_completed_authority(
+    repair, tmp_path
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    staging.chmod(0o700)
+    (staging / repair.SOURCE_NAMES[0]).unlink()
+
+    with pytest.raises(repair.RepairError, match="authority coverage"):
+        repair._seal_repair_source_snapshot(submission, source)
+
+    assert stat.S_IMODE(
+        (staging / repair.SOURCE_AUTHORITY_NAME).lstat().st_mode
+    ) == 0o444
+    assert not os.path.lexists(repair._repair_source_root(submission))
+
+
+@pytest.mark.parametrize(
+    "forgery", ["unknown", "hardlink", "symlink", "special", "mode"]
+)
+def test_source_snapshot_rejects_unsafe_0700_partial_staging(
+    repair, tmp_path, forgery
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _empty_source_staging(repair, submission)
+    target = staging / repair.SOURCE_NAMES[0]
+    if forgery == "unknown":
+        target = staging / "unexpected"
+        repair._write_sealed_file(target, b"forged\n")
+    elif forgery == "hardlink":
+        external = tmp_path / "external"
+        external.write_bytes(b"forged\n")
+        os.link(external, target)
+    elif forgery == "symlink":
+        target.symlink_to(tmp_path / "external")
+    elif forgery == "special":
+        os.mkfifo(target, 0o600)
+    else:
+        target.write_bytes(b"forged\n")
+        target.chmod(0o640)
+
+    with pytest.raises(repair.RepairError, match="repair source staging"):
+        repair._seal_repair_source_snapshot(submission, source)
+
+    assert os.path.lexists(staging)
+    assert stat.S_IMODE(staging.lstat().st_mode) == 0o700
+    assert not os.path.lexists(repair._repair_source_root(submission))
+
+
 def _configure_minimal_controller(repair, tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     submission = tmp_path / "submission"
@@ -665,7 +858,9 @@ def _configure_minimal_controller(repair, tmp_path, monkeypatch):
     source = _repair_source(repair)
     failure = {"schema_version": 1, "status": "fixture_failure"}
     monkeypatch.setattr(repair, "REPOSITORY_ROOT", repo)
-    monkeypatch.setattr(repair, "EXPECTED_SUBMISSION_ROOT", submission)
+    monkeypatch.setattr(
+        repair, "CANONICAL_PRODUCTION_SUBMISSION_ROOT", submission
+    )
     monkeypatch.setattr(repair, "_RepairLocks", _ContextLocks)
     monkeypatch.setattr(
         repair,
@@ -682,6 +877,9 @@ def _configure_minimal_controller(repair, tmp_path, monkeypatch):
         repair,
         "_seal_repair_source_snapshot",
         lambda root, _source: repair._repair_source_root(root),
+    )
+    monkeypatch.setattr(
+        repair, "_load_sealed_repair_source", lambda _root: source
     )
     monkeypatch.setattr(repair, "_validate_sealed_repair_source", lambda *_args: None)
     monkeypatch.setattr(
@@ -713,6 +911,193 @@ def _with_empty_pre_submit_census(repair, delegate):
     return wrapped
 
 
+def test_alternate_checkout_keeps_literal_production_submission_root(tmp_path):
+    checkout = tmp_path / "clean-alternate-checkout"
+    package = checkout / PACKAGE.relative_to(PACKAGE.parents[1])
+    package.mkdir(parents=True)
+    controller = package / "report_repair.py"
+    controller.write_bytes((PACKAGE / "report_repair.py").read_bytes())
+    spec = importlib.util.spec_from_file_location(
+        "exp23_repair_alternate_checkout", controller
+    )
+    assert spec is not None and spec.loader is not None
+    alternate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = alternate
+    spec.loader.exec_module(alternate)
+    expected = Path(
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+        "state/submission"
+    )
+    assert alternate.REPOSITORY_ROOT == checkout
+    assert alternate.CANONICAL_PRODUCTION_SUBMISSION_ROOT == expected
+    manifest = json.loads((PACKAGE / "manifest.json").read_text())
+    assert (
+        manifest["launch_contract"]["terminal_report_repair"][
+            "submission_root"
+        ]
+        == str(alternate.CANONICAL_PRODUCTION_SUBMISSION_ROOT)
+    )
+    assert alternate.CANONICAL_PRODUCTION_SUBMISSION_ROOT != checkout / (
+        "outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+        "state/submission"
+    )
+
+
+@pytest.mark.parametrize(
+    ("repo_suffix", "submission_suffix"),
+    [
+        ("/", ""),
+        ("", "/"),
+        ("//", ""),
+        ("/./", ""),
+        ("/temporary/../", ""),
+        ("", "//"),
+        ("", "/./"),
+        ("", "/temporary/../"),
+    ],
+)
+def test_cli_rejects_nonliteral_root_spellings_before_path_normalization(
+    repair, capsys, repo_suffix, submission_suffix
+):
+    repo = str(repair.REPOSITORY_ROOT) + repo_suffix
+    submission = str(repair.CANONICAL_PRODUCTION_SUBMISSION_ROOT) + submission_suffix
+    assert (
+        repair.main(
+            [
+                "--describe",
+                "--repo-root",
+                repo,
+                "--submission-root",
+                submission,
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not a canonical absolute path" in captured.err
+
+
+def test_execute_accepts_only_canonical_production_root_independent_of_checkout(
+    repair, tmp_path, monkeypatch
+):
+    checkout = tmp_path / "clean-checkout"
+    production = tmp_path / "production" / "state" / "submission"
+    clone_derived = checkout / (
+        "outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+        "state/submission"
+    )
+    other = tmp_path / "other" / "state" / "submission"
+    for path in (checkout, production, clone_derived, other):
+        path.mkdir(parents=True, exist_ok=True)
+    production_alias = tmp_path / "submission-alias"
+    production_alias.symlink_to(production, target_is_directory=True)
+    checkout_alias = tmp_path / "checkout-alias"
+    checkout_alias.symlink_to(checkout, target_is_directory=True)
+
+    monkeypatch.setattr(repair, "REPOSITORY_ROOT", checkout)
+    monkeypatch.setattr(
+        repair, "CANONICAL_PRODUCTION_SUBMISSION_ROOT", production
+    )
+    reached = []
+
+    class BoundaryReached(RuntimeError):
+        pass
+
+    class StopAtLocks:
+        def __init__(self, submission_root):
+            reached.append(submission_root)
+
+        def __enter__(self):
+            raise BoundaryReached("canonical production lock boundary")
+
+        def __exit__(self, _kind, _value, _traceback):
+            return None
+
+    monkeypatch.setattr(repair, "_RepairLocks", StopAtLocks)
+    with pytest.raises(BoundaryReached, match="canonical production"):
+        repair.execute_report_repair(
+            checkout,
+            production,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            allow_initial_submission=False,
+        )
+    assert reached == [production]
+
+    invalid_pairs = [
+        (checkout, clone_derived),
+        (checkout, other),
+        (checkout, production_alias),
+        (checkout_alias, production),
+        (checkout, Path("//") / production.relative_to("/")),
+    ]
+    for source_root, submission_root in invalid_pairs:
+        with pytest.raises(
+            repair.RepairError,
+            match="root differs|canonical absolute path|symlinked or noncanonical",
+        ):
+            repair.execute_report_repair(
+                source_root,
+                submission_root,
+                repair.EXPECTED_SUBMISSION_SHA256,
+                allow_initial_submission=False,
+            )
+    assert reached == [production]
+
+
+@pytest.mark.parametrize("dirty", [" M report_repair.py\n", "?? untracked\n"])
+def test_live_repair_source_requires_clean_tracked_origin_main(
+    repair, tmp_path, monkeypatch, dirty
+):
+    checkout = tmp_path / "clean-checkout"
+    package = checkout / repair.PACKAGE_RELATIVE
+    package.mkdir(parents=True)
+    protocol = "a" * 64
+    for name in repair.SOURCE_NAMES:
+        payload = f"fixture {name}\n".encode("ascii")
+        if name == "protocol.sha256":
+            payload = f"{protocol}\n".encode("ascii")
+        (package / name).write_bytes(payload)
+
+    class CampaignFixture:
+        @staticmethod
+        def load_contract(root):
+            assert root == checkout
+
+        @staticmethod
+        def verify_protocol_lock(root):
+            assert root == package
+            return protocol
+
+    state = {"status": ""}
+    commit = "1" * 40
+
+    def git_output(argv, root):
+        assert root == checkout
+        if argv[-1] == "HEAD":
+            return f"{commit}\n"
+        if argv[-1] == "origin/main":
+            return f"{commit}\n"
+        assert "status" in argv
+        return state["status"]
+
+    monkeypatch.setattr(repair, "PACKAGE_DIR", package)
+    monkeypatch.setattr(repair, "REPOSITORY_ROOT", checkout)
+    monkeypatch.setattr(repair, "_load_module", lambda *_args: CampaignFixture)
+    monkeypatch.setattr(repair, "_git_output", git_output)
+    source = repair._verified_live_repair_source(checkout)
+    assert source["repair_source_commit"] == commit
+    assert set(source["repair_source_files"]) == set(repair.SOURCE_NAMES)
+
+    state["status"] = dirty
+    with pytest.raises(
+        repair.RepairError, match="not a clean origin/main commit"
+    ):
+        repair._verified_live_repair_source(checkout)
+
+
 def test_full_held_submit_authorize_release_order_is_gap_free(
     repair, tmp_path, monkeypatch
 ):
@@ -734,7 +1119,9 @@ def test_full_held_submit_authorize_release_order_is_gap_free(
     failure = {"schema_version": 1, "status": "fixture_failure"}
 
     monkeypatch.setattr(repair, "REPOSITORY_ROOT", repo)
-    monkeypatch.setattr(repair, "EXPECTED_SUBMISSION_ROOT", submission)
+    monkeypatch.setattr(
+        repair, "CANONICAL_PRODUCTION_SUBMISSION_ROOT", submission
+    )
     monkeypatch.setattr(repair, "_RepairLocks", _ContextLocks)
     monkeypatch.setattr(
         repair,
@@ -917,6 +1304,96 @@ def test_failure_seal_before_submit_calling_resumes_with_exactly_one_sbatch(
     assert calling["scheduler_pre_submit_census_sha256"] == repair.stable_hash(
         calling["scheduler_pre_submit_census"]
     )
+
+
+def test_source_seal_before_failure_recovers_from_its_own_checkout_authority(
+    repair, tmp_path, monkeypatch
+):
+    real_seal_source = repair._seal_repair_source_snapshot
+    real_load_source = repair._load_sealed_repair_source
+    real_validate_source = repair._validate_sealed_repair_source
+    repo, submission, contract, source = _configure_minimal_controller(
+        repair, tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(repair, "_seal_repair_source_snapshot", real_seal_source)
+    monkeypatch.setattr(repair, "_load_sealed_repair_source", real_load_source)
+    monkeypatch.setattr(
+        repair, "_validate_sealed_repair_source", real_validate_source
+    )
+    report_programs = []
+
+    def validate_original(*_args, report_program, **_kwargs):
+        report_programs.append(report_program)
+        return (
+            contract,
+            {"report_job_id": repair.EXPECTED_ORIGINAL_REPORT_JOB_ID},
+            {"schema_version": 1, "files": {}},
+            repair._expected_reassembly(),
+        )
+
+    monkeypatch.setattr(repair, "_validate_original_submission", validate_original)
+
+    def crash_before_failure(*_args, **_kwargs):
+        raise RuntimeError("source-to-failure killpoint")
+
+    monkeypatch.setattr(repair, "_build_failure_evidence", crash_before_failure)
+    with pytest.raises(RuntimeError, match="source-to-failure killpoint"):
+        repair.execute_report_repair(
+            repo,
+            submission,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            allow_initial_submission=True,
+            runner=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("scheduler call preceded failure evidence")
+            ),
+            sleep=lambda _seconds: None,
+        )
+    source_root = repair._repair_source_root(submission)
+    assert repair._load_sealed_repair_source(source_root) == source
+    assert not (submission / "journal/REPORT_REPAIR_0001_ORIGINAL_FAILURE.json").exists()
+
+    monkeypatch.setattr(
+        repair,
+        "_verified_live_repair_source",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("recovery rebound sealed source to live checkout")
+        ),
+    )
+    monkeypatch.setattr(
+        repair,
+        "_build_failure_evidence",
+        lambda *_args, **_kwargs: {
+            "schema_version": 1,
+            "status": "fixture_failure",
+        },
+    )
+    squeue_round = 0
+
+    def recover(argv, _cwd, _environment):
+        nonlocal squeue_round
+        if argv[0] == "/usr/local/bin/squeue":
+            squeue_round += 1
+            return _squeue_result(repair, [])
+        assert argv[0] == "/usr/local/bin/sbatch"
+        raise RuntimeError("stop after source-authorized calling")
+
+    with pytest.raises(RuntimeError, match="source-authorized calling"):
+        repair.execute_report_repair(
+            repo,
+            submission,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            allow_initial_submission=False,
+            runner=recover,
+            sleep=lambda _seconds: None,
+        )
+    calling = json.loads(
+        (
+            submission / "journal/CALLING_REPORT_REPAIR_0001_SUBMIT.json"
+        ).read_text()
+    )
+    assert calling["repair_source_commit"] == source["repair_source_commit"]
+    assert calling["repair_source_files"] == source["repair_source_files"]
+    assert report_programs[-1] == source_root / "report.py"
 
 
 @pytest.mark.parametrize("case", ["broad_only", "exact_held", "round_drift"])

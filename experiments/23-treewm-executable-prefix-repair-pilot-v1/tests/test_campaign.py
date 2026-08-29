@@ -895,6 +895,16 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
     repair = manifest["launch_contract"]["terminal_report_repair"]
     assert repair == campaign.TERMINAL_REPORT_REPAIR_POLICY
     assert repair["attempt"] == repair["generation_count"] == 1
+    assert repair["source_checkout_requirement"] == (
+        "active_controller_clean_origin_main"
+    )
+    assert repair["production_submission_root_independent_of_source_checkout"] is True
+    assert repair["submission_root"] == (
+        "/lustre/fs11/portfolios/edgeai/projects/"
+        "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
+        "treewm/outputs/treewm-executable-prefix-repair-pilot-v1-launch8/"
+        "state/submission"
+    )
     assert repair["original_terminal_report"]["job_id"] == "33311218"
     assert repair["original_terminal_report"]["state"] == "FAILED"
     assert repair["original_terminal_report"]["exit_code"] == "2:0"
@@ -906,6 +916,11 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
     assert repair["publication_contract"]["report_commit_schema_changed"] is False
     assert repair["publication_contract"]["exp24_adapter_change_required"] is False
     assert repair["scheduler_protocol"]["submit_held"] is True
+    assert repair["scheduler_protocol"]["atomic_sealed_source_authority"] is True
+    assert (
+        repair["scheduler_protocol"]["source_staging_authority_first_cleanup"]
+        is True
+    )
     assert (
         repair["scheduler_protocol"][
             "fresh_owner_wide_empty_census_before_submit_calling"
@@ -935,6 +950,8 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
         (("publication_contract", "scientific_input_change_allowed"), True),
         (("publication_contract", "gate_change_allowed"), True),
         (("scheduler_protocol", "submit_held"), False),
+        (("scheduler_protocol", "atomic_sealed_source_authority"), False),
+        (("scheduler_protocol", "source_staging_authority_first_cleanup"), False),
         (("scheduler_protocol", "settled_census_rounds"), 2),
         (("scheduler_protocol", "release_evidence_wait_seconds"), 60),
         (("scheduler_protocol", "terminal_worker_failure_blocks_publication"), False),

@@ -190,7 +190,7 @@ ACCEPTED_CANARY_ATTEMPTS = [{
 ACCEPTED_CANARY_CURRENT_SOURCE_SHA256 = {
     "submit.py": "51671551e331537dc31e87e11423bd6c66e1ce981b1dbb5b85ee48c028160dfa",
     "worker.py": "321cef217725178eda2a3c8750edd77f187631f1637614fe51fd511776ac6cd9",
-    "report.py": "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add",
+    "report.py": "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07",
     "dag_evidence.py": "b653ba6b2c25c017144cacb7b4b17ec5f5e153ad504eab47fba101d2c71dd1bb",
     "train_entry.py": "ac525211824eca20993f696a3e249d3c700b24eefdea48f365c8a997d64a9f33",
     "train.slurm": "fa66ce7d7dccf626ad434b6f87dfe284a904464701549a99a0dd6e94a695c44a",
@@ -234,6 +234,8 @@ TERMINAL_REPORT_REPAIR_POLICY = {
     "controller": "report_repair.py",
     "batch": "report_repair.slurm",
     "publisher": "report.py --publish-repair",
+    "source_checkout_requirement": "active_controller_clean_origin_main",
+    "production_submission_root_independent_of_source_checkout": True,
     "submission_root": (
         "/lustre/fs11/portfolios/edgeai/projects/"
         "edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/projects/"
@@ -319,10 +321,10 @@ TERMINAL_REPORT_REPAIR_POLICY = {
     },
     "repair_source_sha256": {
         "report.py": (
-            "315f1f0122e151b71f74601983d1ef0efb1d5dabf60cec57f028395c773b5add"
+            "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07"
         ),
         "report_repair.py": (
-            "dc7995049a8be5738c924ddf9818e9a5b33a5bcaa83e326486c63568fc65084d"
+            "756d69eb8a9f32d8e9a9e9eb5e8fdc7706a954953a52900a7c120321c77fcd26"
         ),
         "report_repair.slurm": (
             "15ce6712f16c0655b4ad3d544987aec25574531cfc02b470c1ed9395bd363962"
@@ -348,6 +350,8 @@ TERMINAL_REPORT_REPAIR_POLICY = {
     "scheduler_protocol": {
         "submit_held": True,
         "settled_census_rounds": 3,
+        "atomic_sealed_source_authority": True,
+        "source_staging_authority_first_cleanup": True,
         "fresh_owner_wide_empty_census_before_submit_calling": True,
         "transaction_then_report_cancel_lock": True,
         "authorization_before_release": True,
