@@ -1499,7 +1499,7 @@
       },
       "repair_source_sha256": {
         "report.py": "31df11e598f4d0da9ed7958c387d7777de617b532e435ff14d601eb0888f3a07",
-        "report_repair.py": "52d582406781f5e8036e1a36dc8b979d71b7a67e0e14f297b0a39273eedc6518",
+        "report_repair.py": "047d63ad280e36958987b048aac3c616b2355c40d4ace8324f9fce06c2ff06d8",
         "report_repair.slurm": "15ce6712f16c0655b4ad3d544987aec25574531cfc02b470c1ed9395bd363962"
       },
       "publication_contract": {
@@ -1523,6 +1523,23 @@
         "submit_held": true,
         "settled_census_rounds": 3,
         "atomic_sealed_source_authority": true,
+        "sealed_source_installation": {
+          "primary": "renameat2(RENAME_NOREPLACE)",
+          "capability_fallback": "locked_same_parent_dirfd_os.rename",
+          "fallback_errno_names": [
+            "EINVAL",
+            "ENOSYS",
+            "EOPNOTSUPP"
+          ],
+          "required_locks": [
+            "production_transaction_lock",
+            "report_cancel_lock"
+          ],
+          "exact_staging_only_attempt_namespace_required": true,
+          "kernel_noreplace_against_uncooperative_actors": false,
+          "same_device_inode_mode_nlink_and_content_postcondition_required": true,
+          "parent_fsync_required": true
+        },
         "source_staging_authority_first_cleanup": true,
         "fresh_owner_wide_empty_census_before_submit_calling": true,
         "transaction_then_report_cancel_lock": true,

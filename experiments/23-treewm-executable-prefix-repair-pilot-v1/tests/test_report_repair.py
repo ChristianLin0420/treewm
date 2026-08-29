@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -735,7 +737,7 @@ def test_source_snapshot_first_file_crash_is_removed(repair, tmp_path, monkeypat
 
     monkeypatch.setattr(repair, "_write_sealed_file", fail_second)
     with pytest.raises(OSError, match="first-file"):
-        repair._seal_repair_source_snapshot(submission, source)
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
     attempt = repair._repair_root(submission)
     assert not (attempt / "source").exists()
     assert not list(attempt.glob(".source.tmp.*"))
@@ -749,14 +751,14 @@ def test_source_snapshot_noreplace_race_preserves_competing_target(
     source = _repair_source(repair)
     real_noreplace = repair._rename_directory_noreplace
 
-    def race(staging, target):
+    def race(staging, target, source_authority, locks):
         target.mkdir(mode=0o700)
         (target / "competitor").write_text("preserve me", encoding="utf-8")
-        return real_noreplace(staging, target)
+        return real_noreplace(staging, target, source_authority, locks)
 
     monkeypatch.setattr(repair, "_rename_directory_noreplace", race)
     with pytest.raises(FileExistsError):
-        repair._seal_repair_source_snapshot(submission, source)
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
     target = repair._repair_source_root(submission)
     assert (target / "competitor").read_text(encoding="utf-8") == "preserve me"
     assert not list(repair._repair_root(submission).glob(".source.tmp.*"))
@@ -766,7 +768,9 @@ def test_source_snapshot_atomically_carries_checkout_authority(repair, tmp_path)
     submission = tmp_path / "submission"
     submission.mkdir()
     source = _repair_source(repair)
-    source_root = repair._seal_repair_source_snapshot(submission, source)
+    source_root = repair._seal_repair_source_snapshot(
+        submission, source, _FakeLocks()
+    )
     assert repair._load_sealed_repair_source(source_root) == source
     assert {path.name for path in source_root.iterdir()} == {
         *repair.SOURCE_NAMES,
@@ -845,11 +849,514 @@ def test_source_snapshot_recovers_complete_0555_pre_rename_staging(
     source = _repair_source(repair)
     staging = _pre_rename_source_staging(repair, submission, source)
 
-    source_root = repair._seal_repair_source_snapshot(submission, source)
+    source_root = repair._seal_repair_source_snapshot(
+        submission, source, _FakeLocks()
+    )
 
     assert not os.path.lexists(staging)
     assert repair._load_sealed_repair_source(source_root) == source
     assert stat.S_IMODE(source_root.lstat().st_mode) == 0o555
+
+
+@pytest.mark.parametrize(
+    "fallback_errno", [errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP]
+)
+def test_source_snapshot_locked_same_parent_fallback_for_capability_errno(
+    repair, tmp_path, monkeypatch, fallback_errno
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    # This is the exact harmless live prefix left by a failed pre-scheduler
+    # installation attempt: both owned state directories exist and are empty.
+    (submission / "report-repair").mkdir(mode=0o700)
+    (submission / "report-repair/attempt-0001").mkdir(mode=0o700)
+    source = _repair_source(repair)
+    real_rename = os.rename
+    fallback_calls = []
+    methods = []
+    real_install = repair._rename_directory_noreplace
+
+    def unsupported(_parent_descriptor, source_name, target_name):
+        raise OSError(
+            fallback_errno,
+            os.strerror(fallback_errno),
+            f"{source_name} -> {target_name}",
+        )
+
+    def observed_rename(source_name, target_name, **kwargs):
+        fallback_calls.append((source_name, target_name, dict(kwargs)))
+        return real_rename(source_name, target_name, **kwargs)
+
+    def observed_install(*args):
+        method = real_install(*args)
+        methods.append(method)
+        return method
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(repair.os, "rename", observed_rename)
+    monkeypatch.setattr(repair, "_rename_directory_noreplace", observed_install)
+
+    source_root = repair._seal_repair_source_snapshot(
+        submission, source, _FakeLocks()
+    )
+
+    assert methods == [
+        f"locked_same_parent_rename_after_errno_{fallback_errno}"
+    ]
+    assert len(fallback_calls) == 1
+    source_name, target_name, kwargs = fallback_calls[0]
+    assert source_name.startswith(".source.tmp.")
+    assert "/" not in source_name
+    assert target_name == "source"
+    assert kwargs["src_dir_fd"] == kwargs["dst_dir_fd"]
+    assert type(kwargs["src_dir_fd"]) is int
+    assert repair._load_sealed_repair_source(source_root) == source
+    assert not list(repair._repair_root(submission).glob(".source.tmp.*"))
+    assert (
+        repair._seal_repair_source_snapshot(
+            submission, source, _FakeLocks()
+        )
+        == source_root
+    )
+
+
+def test_source_snapshot_primary_noreplace_does_not_enter_fallback(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    real_rename = os.rename
+
+    def primary(parent_descriptor, source_name, target_name):
+        real_rename(
+            source_name,
+            target_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", primary)
+    monkeypatch.setattr(
+        repair.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("primary success must not enter fallback")
+        ),
+    )
+
+    method = repair._rename_directory_noreplace(
+        staging, target, source, _FakeLocks()
+    )
+
+    assert method == "renameat2_noreplace"
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(target) == source
+
+
+@pytest.mark.parametrize(
+    "target_kind", ["directory", "file", "symlink", "dangling", "fifo"]
+)
+def test_source_snapshot_fallback_never_replaces_injected_target(
+    repair, tmp_path, monkeypatch, target_kind
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    external = tmp_path / "external"
+    external.mkdir()
+
+    def inject_then_report_unsupported(_parent_fd, _source_name, _target_name):
+        if target_kind == "directory":
+            target.mkdir(mode=0o700)
+            (target / "competitor").write_text("preserve", encoding="utf-8")
+        elif target_kind == "file":
+            target.write_text("preserve", encoding="utf-8")
+        elif target_kind == "symlink":
+            target.symlink_to(external, target_is_directory=True)
+        elif target_kind == "dangling":
+            target.symlink_to(tmp_path / "absent", target_is_directory=True)
+        else:
+            os.mkfifo(target, 0o600)
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    def forbidden_fallback(*_args, **_kwargs):
+        raise AssertionError("fallback must not replace an injected target")
+
+    monkeypatch.setattr(
+        repair, "_renameat2_noreplace", inject_then_report_unsupported
+    )
+    monkeypatch.setattr(repair.os, "rename", forbidden_fallback)
+
+    with pytest.raises(FileExistsError):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+
+    assert os.path.lexists(target)
+    assert os.path.lexists(staging)
+
+
+@pytest.mark.parametrize(
+    "unsupported_errno", [errno.EEXIST, errno.EPERM, errno.EIO, errno.EXDEV]
+)
+def test_source_snapshot_noncapability_errno_never_uses_fallback(
+    repair, tmp_path, monkeypatch, unsupported_errno
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+
+    def rejected(_parent_fd, _source_name, _target_name):
+        raise OSError(unsupported_errno, os.strerror(unsupported_errno))
+
+    def forbidden_fallback(*_args, **_kwargs):
+        raise AssertionError("unsupported errno must not use fallback")
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", rejected)
+    monkeypatch.setattr(repair.os, "rename", forbidden_fallback)
+
+    with pytest.raises(OSError) as raised:
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert raised.value.errno == unsupported_errno
+    assert os.path.lexists(staging)
+    assert not os.path.lexists(target)
+
+
+def test_source_snapshot_fallback_rejects_injected_attempt_namespace(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    unexpected = staging.parent / "unexpected"
+
+    def inject_then_report_unsupported(_parent_fd, _source_name, _target_name):
+        unexpected.write_text("preserve", encoding="utf-8")
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    monkeypatch.setattr(
+        repair, "_renameat2_noreplace", inject_then_report_unsupported
+    )
+    monkeypatch.setattr(
+        repair.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("injected namespace must block fallback")
+        ),
+    )
+
+    with pytest.raises(repair.RepairError, match="namespace"):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert unexpected.read_text(encoding="utf-8") == "preserve"
+    assert os.path.lexists(staging)
+    assert not os.path.lexists(target)
+
+
+@pytest.mark.parametrize("injection", ["target", "unknown"])
+def test_source_snapshot_fallback_rechecks_namespace_after_validation(
+    repair, tmp_path, monkeypatch, injection
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    unexpected = staging.parent / "unexpected"
+    real_validate = repair._validate_sealed_repair_source
+    validations = 0
+
+    def unsupported(*_args):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    def inject_on_second_validation(root, authority):
+        nonlocal validations
+        real_validate(root, authority)
+        validations += 1
+        if validations == 2:
+            if injection == "target":
+                target.mkdir(mode=0o700)
+            else:
+                unexpected.write_text("preserve", encoding="utf-8")
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(
+        repair, "_validate_sealed_repair_source", inject_on_second_validation
+    )
+    monkeypatch.setattr(
+        repair.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("post-validation injection must block fallback")
+        ),
+    )
+
+    with pytest.raises((FileExistsError, repair.RepairError)):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert os.path.lexists(target if injection == "target" else unexpected)
+    assert os.path.lexists(staging)
+
+
+def test_source_snapshot_postvalidation_identity_drift_is_rejected(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    real_validate = repair._validate_sealed_repair_source
+    validations = 0
+
+    def unsupported(*_args):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    def drift_after_postinstall_validation(root, authority):
+        nonlocal validations
+        real_validate(root, authority)
+        validations += 1
+        if validations == 3:
+            root.chmod(0o700)
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(
+        repair,
+        "_validate_sealed_repair_source",
+        drift_after_postinstall_validation,
+    )
+
+    with pytest.raises(repair.RepairError, match="identity/namespace"):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert not os.path.lexists(staging)
+    assert stat.S_IMODE(target.lstat().st_mode) == 0o700
+
+
+def test_source_snapshot_fallback_rejects_lock_binding_drift(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+
+    class DriftingLocks(_FakeLocks):
+        def __init__(self):
+            self.calls = 0
+
+        def bindings(self):
+            self.calls += 1
+            transaction, report = super().bindings()
+            if self.calls >= 4:
+                transaction = {**transaction, "inode": 999}
+            return transaction, report
+
+    def unsupported(*_args):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(
+        repair.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("lock drift must block fallback")
+        ),
+    )
+
+    with pytest.raises(repair.RepairError, match="authority binding"):
+        repair._rename_directory_noreplace(
+            staging, target, source, DriftingLocks()
+        )
+    assert os.path.lexists(staging)
+    assert not os.path.lexists(target)
+
+
+def test_source_snapshot_fallback_rejects_named_parent_inode_drift(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    attempt_root = staging.parent
+    moved_attempt = tmp_path / "moved-attempt"
+    real_rename = os.rename
+
+    def replace_parent_then_report_unsupported(*_args):
+        real_rename(attempt_root, moved_attempt)
+        attempt_root.mkdir(mode=0o700)
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    monkeypatch.setattr(
+        repair, "_renameat2_noreplace", replace_parent_then_report_unsupported
+    )
+    monkeypatch.setattr(
+        repair.os,
+        "rename",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("parent drift must block fallback")
+        ),
+    )
+
+    with pytest.raises(repair.RepairError, match="authority binding"):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert os.path.lexists(moved_attempt / staging.name)
+    assert not os.path.lexists(target)
+
+
+def test_source_snapshot_postrename_lock_drift_is_rejected(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    real_rename = os.rename
+
+    class DriftingLocks(_FakeLocks):
+        def __init__(self):
+            self.calls = 0
+
+        def bindings(self):
+            self.calls += 1
+            transaction, report = super().bindings()
+            if self.calls >= 4:
+                report = {**report, "inode": 999}
+            return transaction, report
+
+    def primary(parent_descriptor, source_name, target_name):
+        real_rename(
+            source_name,
+            target_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", primary)
+
+    with pytest.raises(repair.RepairError, match="authority binding"):
+        repair._rename_directory_noreplace(
+            staging, target, source, DriftingLocks()
+        )
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(target) == source
+
+
+@pytest.mark.parametrize("fake_mode", ["new_inode", "recreate_staging"])
+def test_source_snapshot_fallback_rejects_nonatomic_or_split_poststate(
+    repair, tmp_path, monkeypatch, fake_mode
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    real_rename = os.rename
+
+    def unsupported(*_args):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    def fake_rename(source_name, target_name, *, src_dir_fd, dst_dir_fd):
+        assert src_dir_fd == dst_dir_fd
+        if fake_mode == "new_inode":
+            shutil.copytree(staging, target, copy_function=shutil.copy2)
+            staging.chmod(0o700)
+            shutil.rmtree(staging)
+        else:
+            real_rename(
+                source_name,
+                target_name,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            staging.mkdir(mode=0o555)
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(repair.os, "rename", fake_rename)
+
+    with pytest.raises(repair.RepairError, match="identity/namespace|remains"):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    if fake_mode == "new_inode":
+        assert not os.path.lexists(staging)
+        assert os.path.lexists(target)
+    else:
+        assert os.path.lexists(staging)
+
+
+def test_source_snapshot_install_parent_fsync_failure_propagates(
+    repair, tmp_path, monkeypatch
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    target = repair._repair_source_root(submission)
+    real_rename = os.rename
+
+    def unsupported(*_args):
+        raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
+
+    monkeypatch.setattr(repair, "_renameat2_noreplace", unsupported)
+    monkeypatch.setattr(repair.os, "rename", real_rename)
+    monkeypatch.setattr(
+        repair.os,
+        "fsync",
+        lambda _descriptor: (_ for _ in ()).throw(OSError("fsync killpoint")),
+    )
+
+    with pytest.raises(OSError, match="fsync killpoint"):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert not os.path.lexists(staging)
+    assert repair._load_sealed_repair_source(target) == source
+
+
+@pytest.mark.parametrize("path_case", ["cross_parent", "wrong_target"])
+def test_source_snapshot_install_rejects_wrong_path_shape(
+    repair, tmp_path, path_case
+):
+    submission = tmp_path / "submission"
+    submission.mkdir()
+    source = _repair_source(repair)
+    staging = _pre_rename_source_staging(repair, submission, source)
+    if path_case == "cross_parent":
+        other = tmp_path / "other"
+        other.mkdir(mode=0o700)
+        target = other / "source"
+        match = "parents"
+    else:
+        target = staging.parent / "not-source"
+        match = "names"
+
+    with pytest.raises(repair.RepairError, match=match):
+        repair._rename_directory_noreplace(
+            staging, target, source, _FakeLocks()
+        )
+    assert os.path.lexists(staging)
+    assert not os.path.lexists(target)
 
 
 @pytest.mark.parametrize("forgery", ["extra", "missing", "wrong", "authority"])
@@ -876,7 +1383,7 @@ def test_source_snapshot_rejects_forged_0555_pre_rename_staging(
     staging.chmod(0o555)
 
     with pytest.raises(repair.RepairError, match="repair source staging|sealed repair"):
-        repair._seal_repair_source_snapshot(submission, source)
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
 
     assert os.path.lexists(staging)
     assert stat.S_IMODE(staging.lstat().st_mode) == 0o555
@@ -900,7 +1407,9 @@ def test_source_snapshot_removes_0600_partial_pre_seal_staging(
     target.write_bytes(b"partial")
     target.chmod(0o600)
 
-    source_root = repair._seal_repair_source_snapshot(submission, source)
+    source_root = repair._seal_repair_source_snapshot(
+        submission, source, _FakeLocks()
+    )
 
     assert not os.path.lexists(staging)
     assert repair._load_sealed_repair_source(source_root) == source
@@ -926,11 +1435,16 @@ def test_source_snapshot_cleanup_two_phase_killpoints_are_restartable(
             (staging / name).chmod(0o600)
         (staging / repair.SOURCE_NAMES[0]).unlink()
 
-    source_root = repair._seal_repair_source_snapshot(submission, source)
+    source_root = repair._seal_repair_source_snapshot(
+        submission, source, _FakeLocks()
+    )
 
     assert not os.path.lexists(staging)
     assert repair._load_sealed_repair_source(source_root) == source
-    assert repair._seal_repair_source_snapshot(submission, source) == source_root
+    assert (
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
+        == source_root
+    )
 
 
 def test_source_snapshot_rejects_missing_0700_coverage_with_completed_authority(
@@ -944,7 +1458,7 @@ def test_source_snapshot_rejects_missing_0700_coverage_with_completed_authority(
     (staging / repair.SOURCE_NAMES[0]).unlink()
 
     with pytest.raises(repair.RepairError, match="authority coverage"):
-        repair._seal_repair_source_snapshot(submission, source)
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
 
     assert stat.S_IMODE(
         (staging / repair.SOURCE_AUTHORITY_NAME).lstat().st_mode
@@ -979,7 +1493,7 @@ def test_source_snapshot_rejects_unsafe_0700_partial_staging(
         target.chmod(0o640)
 
     with pytest.raises(repair.RepairError, match="repair source staging"):
-        repair._seal_repair_source_snapshot(submission, source)
+        repair._seal_repair_source_snapshot(submission, source, _FakeLocks())
 
     assert os.path.lexists(staging)
     assert stat.S_IMODE(staging.lstat().st_mode) == 0o700
@@ -1023,7 +1537,7 @@ def _configure_minimal_controller(repair, tmp_path, monkeypatch):
     monkeypatch.setattr(
         repair,
         "_seal_repair_source_snapshot",
-        lambda root, _source: repair._repair_source_root(root),
+        lambda root, _source, _locks: repair._repair_source_root(root),
     )
     monkeypatch.setattr(
         repair, "_load_sealed_repair_source", lambda _root: source
@@ -1056,6 +1570,55 @@ def _with_empty_pre_submit_census(repair, delegate):
         return delegate(argv, cwd, environment)
 
     return wrapped
+
+
+@pytest.mark.parametrize("prefix", ["empty_attempt", "complete_staging"])
+def test_source_only_prefix_is_not_recovery_authority_without_explicit_submit(
+    repair, tmp_path, monkeypatch, prefix
+):
+    repo, submission, _contract, source = _configure_minimal_controller(
+        repair, tmp_path, monkeypatch
+    )
+    if prefix == "empty_attempt":
+        (submission / "report-repair").mkdir(mode=0o700)
+        (submission / "report-repair/attempt-0001").mkdir(mode=0o700)
+    else:
+        staging = _pre_rename_source_staging(repair, submission, source)
+
+    def forbidden_source_creation(*_args, **_kwargs):
+        raise AssertionError(
+            "uncommitted source prefix must not create recovery authority"
+        )
+
+    def forbidden_scheduler(*_args, **_kwargs):
+        raise AssertionError("source-only recovery must not call scheduler")
+
+    monkeypatch.setattr(
+        repair, "_verified_live_repair_source", forbidden_source_creation
+    )
+    monkeypatch.setattr(
+        repair, "_seal_repair_source_snapshot", forbidden_source_creation
+    )
+
+    with pytest.raises(
+        repair.RepairError,
+        match="recovery cannot create the initial scheduler call",
+    ):
+        repair.execute_report_repair(
+            repo,
+            submission,
+            repair.EXPECTED_SUBMISSION_SHA256,
+            allow_initial_submission=False,
+            runner=forbidden_scheduler,
+            sleep=lambda _seconds: None,
+        )
+
+    assert not (
+        submission / "journal/CALLING_REPORT_REPAIR_0001_SUBMIT.json"
+    ).exists()
+    assert not repair._repair_source_root(submission).exists()
+    if prefix == "complete_staging":
+        assert os.path.lexists(staging)
 
 
 def test_alternate_checkout_keeps_literal_production_submission_root(tmp_path):
@@ -1379,7 +1942,7 @@ def test_failure_seal_before_submit_calling_resumes_with_exactly_one_sbatch(
         repair, tmp_path, monkeypatch
     )
 
-    def seal_source(root, _source_value):
+    def seal_source(root, _source_value, _locks):
         target = repair._repair_source_root(root)
         target.mkdir(parents=True, exist_ok=True)
         return target
@@ -1552,7 +2115,7 @@ def test_failure_only_recovery_requires_fresh_empty_settled_owner_census(
         repair, tmp_path, monkeypatch
     )
 
-    def seal_source(root, _source_value):
+    def seal_source(root, _source_value, _locks):
         target = repair._repair_source_root(root)
         target.mkdir(parents=True, exist_ok=True)
         return target

@@ -118,6 +118,10 @@ SOURCE_NAMES = (
     "protocol.sha256",
 )
 SOURCE_AUTHORITY_NAME = "SOURCE_AUTHORITY.json"
+RENAME_NOREPLACE = 1
+RENAME_NOREPLACE_FALLBACK_ERRNOS = frozenset(
+    {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP}
+)
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 JOB_ID_RE = re.compile(r"[1-9][0-9]*\Z")
@@ -647,13 +651,19 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _rename_directory_noreplace(source: Path, target: Path) -> None:
-    """Atomically install a sealed repair directory without replacing a peer."""
+def _renameat2_noreplace(
+    parent_descriptor: int, source_name: str, target_name: str
+) -> None:
+    """Invoke Linux ``renameat2(RENAME_NOREPLACE)`` within one directory."""
 
-    require(source.parent == target.parent, "repair snapshot rename parents differ")
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
-    require(renameat2 is not None, "renameat2 is unavailable for repair snapshot")
+    if renameat2 is None:
+        raise OSError(
+            errno.ENOSYS,
+            os.strerror(errno.ENOSYS),
+            f"{source_name} -> {target_name}",
+        )
     renameat2.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -663,18 +673,212 @@ def _rename_directory_noreplace(source: Path, target: Path) -> None:
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        -100,
-        os.fsencode(source),
-        -100,
-        os.fsencode(target),
-        1,
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(target_name),
+        RENAME_NOREPLACE,
     )
     if result == 0:
         return
     error = ctypes.get_errno()
     if error == errno.EEXIST:
-        raise FileExistsError(error, os.strerror(error), str(target))
-    raise OSError(error, os.strerror(error), f"{source} -> {target}")
+        raise FileExistsError(error, os.strerror(error), target_name)
+    raise OSError(error, os.strerror(error), f"{source_name} -> {target_name}")
+
+
+def _rename_directory_noreplace(
+    source: Path,
+    target: Path,
+    source_authority: Mapping[str, Any],
+    locks: _RepairLocks,
+) -> str:
+    """Install one sealed source directory without replacing an authorized peer.
+
+    ``renameat2(RENAME_NOREPLACE)`` is the primary operation.  Some Lustre
+    deployments reject that flag for directories.  For only that narrow
+    capability-error set, the already-held transaction and report/cancel locks,
+    one exact staging-only namespace, and one revalidated parent dirfd serialize
+    every authorized writer before a same-dirfd ``rename`` fallback.  The
+    fallback deliberately does not claim kernel no-replace protection against
+    an actor that ignores those locks.
+    """
+
+    require(
+        source.is_absolute()
+        and target.is_absolute()
+        and source.parent == target.parent,
+        "repair snapshot rename parents differ",
+    )
+    require(
+        source.name.startswith(".source.tmp.")
+        and source.name not in {".", ".."}
+        and target.name == "source",
+        "repair snapshot rename names differ",
+    )
+    parent = _canonical_existing_directory(
+        source.parent, "repair snapshot rename parent"
+    )
+    lock_bindings = locks.bindings()
+    parent_descriptor = os.open(
+        parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    source_descriptor: int | None = None
+    try:
+        parent_opened = os.fstat(parent_descriptor)
+        parent_named = parent.lstat()
+        require(
+            stat.S_ISDIR(parent_opened.st_mode)
+            and _file_identity(parent_opened) == _file_identity(parent_named)
+            and parent_opened.st_uid == os.getuid()
+            and stat.S_IMODE(parent_opened.st_mode) == 0o700,
+            "repair snapshot rename parent identity differs",
+        )
+        source_listed = os.stat(
+            source.name, dir_fd=parent_descriptor, follow_symlinks=False
+        )
+        source_descriptor = os.open(
+            source.name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_descriptor,
+        )
+        source_opened = os.fstat(source_descriptor)
+        require(
+            stat.S_ISDIR(source_opened.st_mode)
+            and _file_identity(source_opened) == _file_identity(source_listed)
+            and source_opened.st_uid == os.getuid()
+            and source_opened.st_nlink == 2
+            and stat.S_IMODE(source_opened.st_mode) == 0o555,
+            "repair snapshot staging identity differs before install",
+        )
+        source_identity = _file_identity(source_opened)
+
+        def require_parent_and_lock_bindings() -> None:
+            opened = os.fstat(parent_descriptor)
+            named = parent.lstat()
+            require(
+                stat.S_ISDIR(opened.st_mode)
+                and opened.st_dev == parent_opened.st_dev
+                and opened.st_ino == parent_opened.st_ino
+                and opened.st_uid == parent_opened.st_uid == os.getuid()
+                and stat.S_IMODE(opened.st_mode)
+                == stat.S_IMODE(parent_opened.st_mode)
+                == 0o700
+                and named.st_dev == opened.st_dev
+                and named.st_ino == opened.st_ino
+                and named.st_uid == opened.st_uid
+                and stat.S_IMODE(named.st_mode) == 0o700
+                and locks.bindings() == lock_bindings,
+                "repair snapshot install authority binding changed",
+            )
+
+        def require_target_absent() -> None:
+            try:
+                os.stat(
+                    target.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise RepairError(
+                    f"repair snapshot target absence cannot be proven: {exc}"
+                ) from exc
+            raise FileExistsError(
+                errno.EEXIST, os.strerror(errno.EEXIST), str(target)
+            )
+
+        def require_exact_preinstall_state() -> None:
+            require_parent_and_lock_bindings()
+            listed = os.stat(
+                source.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            opened = os.fstat(source_descriptor)
+            require_target_absent()
+            require(
+                _file_identity(listed) == source_identity
+                and _file_identity(opened) == source_identity
+                and set(os.listdir(parent_descriptor)) == {source.name},
+                "repair snapshot preinstall namespace/identity differs",
+            )
+            _validate_sealed_repair_source(source, source_authority)
+            listed_after = os.stat(
+                source.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            require_target_absent()
+            require(
+                _file_identity(listed_after) == source_identity
+                and _file_identity(os.fstat(source_descriptor)) == source_identity
+                and set(os.listdir(parent_descriptor)) == {source.name},
+                "repair snapshot staging changed during validation",
+            )
+            require_parent_and_lock_bindings()
+
+        def require_exact_postinstall_state() -> None:
+            require_parent_and_lock_bindings()
+            target_listed = os.stat(
+                target.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            require(
+                _file_identity(target_listed) == source_identity
+                and _file_identity(os.fstat(source_descriptor))
+                == source_identity
+                and set(os.listdir(parent_descriptor)) == {target.name},
+                "installed repair snapshot identity/namespace differs",
+            )
+            try:
+                os.stat(
+                    source.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RepairError(
+                    f"repair snapshot staging absence cannot be proven: {exc}"
+                ) from exc
+            else:
+                raise RepairError("repair snapshot staging remains after install")
+
+        require_exact_preinstall_state()
+        method = "renameat2_noreplace"
+        try:
+            _renameat2_noreplace(
+                parent_descriptor, source.name, target.name
+            )
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            if exc.errno not in RENAME_NOREPLACE_FALLBACK_ERRNOS:
+                raise
+            require_exact_preinstall_state()
+            os.rename(
+                source.name,
+                target.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            method = f"locked_same_parent_rename_after_errno_{exc.errno}"
+
+        require_exact_postinstall_state()
+        _validate_sealed_repair_source(target, source_authority)
+        require_exact_postinstall_state()
+        os.fsync(parent_descriptor)
+        require_exact_postinstall_state()
+        return method
+    finally:
+        if source_descriptor is not None:
+            os.close(source_descriptor)
+        os.close(parent_descriptor)
 
 
 def seal_json(path: Path, value: Mapping[str, Any]) -> str:
@@ -2102,6 +2306,7 @@ def _validate_sealed_repair_source(
     source_root: Path, source: Mapping[str, Any]
 ) -> None:
     root = _directory(source_root, "sealed repair source root")
+    root_info = root.lstat()
     require(
         set(source)
         == {
@@ -2121,8 +2326,10 @@ def _validate_sealed_repair_source(
         "sealed repair source identity differs",
     )
     require(
-        stat.S_IMODE(root.lstat().st_mode) == 0o555,
-        "sealed repair source root mode differs",
+        root_info.st_uid == os.getuid()
+        and root_info.st_nlink == 2
+        and stat.S_IMODE(root_info.st_mode) == 0o555,
+        "sealed repair source root identity/mode differs",
     )
     expected_files = source.get("repair_source_files")
     require(
@@ -2296,7 +2503,9 @@ def _remove_repair_source_staging(
 
 
 def _seal_repair_source_snapshot(
-    submission_root: Path, source: Mapping[str, Any]
+    submission_root: Path,
+    source: Mapping[str, Any],
+    locks: _RepairLocks,
 ) -> Path:
     repair_parent = submission_root / "report-repair"
     attempt_root = _repair_root(submission_root)
@@ -2355,8 +2564,7 @@ def _seal_repair_source_snapshot(
         finally:
             os.close(descriptor)
         require(not os.path.lexists(source_root), "repair source target appeared concurrently")
-        _rename_directory_noreplace(staging, source_root)
-        _fsync_directory(attempt_root)
+        _rename_directory_noreplace(staging, source_root, source, locks)
     except BaseException:
         if os.path.lexists(staging):
             _remove_repair_source_staging(staging, source, attempt_root)
@@ -5470,7 +5678,9 @@ def execute_report_repair(
                 source = _load_sealed_repair_source(source_root)
             else:
                 source = _verified_live_repair_source(root)
-                source_root = _seal_repair_source_snapshot(submission, source)
+                source_root = _seal_repair_source_snapshot(
+                    submission, source, locks
+                )
             if failure_was_sealed:
                 failure, failure_sha, failure_info = read_json(
                     failure_path, "report repair original failure evidence"

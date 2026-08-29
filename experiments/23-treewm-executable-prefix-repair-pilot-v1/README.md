@@ -388,7 +388,19 @@ censuses and no report, staging, cancellation, or recovery prefix; and seals the
 publisher source together with an atomic `SOURCE_AUTHORITY.json` that binds the clean
 checkout commit, protocol, and exact source-file map. Crash cleanup invalidates that
 authority before removing any source file, so both pre-rename and partial-removal
-prefixes are restartable without accepting forged staging. On every path without a
+prefixes are restartable without accepting forged staging. Source-directory installation
+first uses same-parent `renameat2(RENAME_NOREPLACE)`. If and only if that operation
+raises `EINVAL`, `ENOSYS`, or `EOPNOTSUPP`, the controller revalidates
+the complete `0555` staging authority, exact staging-only attempt namespace (with no
+peer or target), absent target,
+opened parent inode, and both held locks, then uses one same-dirfd atomic `os.rename`.
+It immediately proves that the installed target is the original staging inode with the
+same mode, link count, and content authority, that staging disappeared, and fsyncs the
+opened parent. This capability fallback is serialized for authorized writers by the
+transaction and `REPORT_CANCEL` locks; it does not claim kernel no-replace protection
+against an actor that ignores those locks. An empty owned `0700` repair/attempt prefix
+or a complete pre-rename staging directory is not recovery authority on its own.
+On every path without a
 submit `CALLING` record—including recovery
 after the failure artifact was sealed—it takes a second fresh owner-wide three-round
 census immediately at the submission boundary, requires the entire relevant settled

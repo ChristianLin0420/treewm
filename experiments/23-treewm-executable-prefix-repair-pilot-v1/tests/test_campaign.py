@@ -928,6 +928,19 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
     assert repair["publication_contract"]["exp24_adapter_change_required"] is False
     assert repair["scheduler_protocol"]["submit_held"] is True
     assert repair["scheduler_protocol"]["atomic_sealed_source_authority"] is True
+    assert repair["scheduler_protocol"]["sealed_source_installation"] == {
+        "primary": "renameat2(RENAME_NOREPLACE)",
+        "capability_fallback": "locked_same_parent_dirfd_os.rename",
+        "fallback_errno_names": ["EINVAL", "ENOSYS", "EOPNOTSUPP"],
+        "required_locks": [
+            "production_transaction_lock",
+            "report_cancel_lock",
+        ],
+        "exact_staging_only_attempt_namespace_required": True,
+        "kernel_noreplace_against_uncooperative_actors": False,
+        "same_device_inode_mode_nlink_and_content_postcondition_required": True,
+        "parent_fsync_required": True,
+    }
     assert (
         repair["scheduler_protocol"]["source_staging_authority_first_cleanup"]
         is True
@@ -963,6 +976,30 @@ def test_terminal_report_repair_policy_and_sources_are_exact() -> None:
         (("publication_contract", "gate_change_allowed"), True),
         (("scheduler_protocol", "submit_held"), False),
         (("scheduler_protocol", "atomic_sealed_source_authority"), False),
+        (
+            (
+                "scheduler_protocol",
+                "sealed_source_installation",
+                "fallback_errno_names",
+            ),
+            ["EINVAL", "ENOSYS"],
+        ),
+        (
+            (
+                "scheduler_protocol",
+                "sealed_source_installation",
+                "kernel_noreplace_against_uncooperative_actors",
+            ),
+            True,
+        ),
+        (
+            (
+                "scheduler_protocol",
+                "sealed_source_installation",
+                "same_device_inode_mode_nlink_and_content_postcondition_required",
+            ),
+            False,
+        ),
         (("scheduler_protocol", "source_staging_authority_first_cleanup"), False),
         (("scheduler_protocol", "settled_census_rounds"), 2),
         (("scheduler_protocol", "release_evidence_wait_seconds"), 60),
