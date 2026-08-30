@@ -71,8 +71,10 @@ Positive authority is a separate future leaf. It requires campaign
 `accepted_engineering_pilot`, a frozen version-specific reporter/gate adapter, and
 an independently authenticated immutable quartet. The checked-in
 `accepted_engineering_pilot.binding.json` is an exact unbound placeholder, and
-`engineering_pilot_binder.py` is deliberately fail-closed until that protocol
-freezes.
+`engineering_pilot_binder.py` is a sealed read-only adapter for the Launch8 source
+frozen at `33122e15d0aaf3661893a4c853fd5ac49173c685`. It cannot publish the
+placeholder or authorize formal submission; real positive binding remains blocked
+until an accepted immutable quartet exists and is independently authenticated.
 
 Independently of future acceptance, input-contract, future-recipe, prefix-target,
 resolved-config, causal-parity, and fixed-weight-safety audits must cover all ten
@@ -122,14 +124,27 @@ the emergency-cancel lock covers the exact release side effect and observation b
 is released before activation-result fsync, so delayed audit publication cannot
 strand cancellation.
 
-`engineering_pilot_binder.py` is only a versioning interface. It rejects every
-positive verification request before opening the candidate path. Its canonical
-requirements preserve the eventual raw-bundle telemetry-to-decision derivation,
-per-cell bundle/decision/provenance joins, exact gate schemas, terminal artifact
-joins, outcome-blind provenance hashes, and recomputed acceptance predicates. The
-semantic adapter cannot be implemented or audited until Launch8 reporter/gate
-source freezes. Its current implementation closure binds both the facade and
-`runtime.py`; no synthetic fixture is treated as positive evidence.
+`engineering_pilot_binder.py` implements the source-frozen semantic adapter. It
+authenticates the exact four-file `0555`/`0444` report tree, duplicate-free canonical
+JSON and cross-hashes, and the closed 147-file Launch8 campaign/reporter/gate/
+protocol/trainer tree with its exact 17 parent directories, modes, owners, link
+counts, bytes, and filesystem identities. Every entry is traversed without following
+links and the complete identity inventory is compared again after isolated gate
+replay, so ignored files/directories and add-remove/replace-restore races fail closed.
+The adapter retains no-follow descriptors for the absolute submission ancestry,
+submission, report, source snapshot, repository, package, manifest, gate, and quartet
+until verification returns. Gate replay uses only `/proc/self/fd` paths with an
+explicit inherited-descriptor allowlist; afterward the retained trees and bytes are
+rescanned and every lexical entry is reopened and identity-joined to the retained
+object. Cancellation latches and their parent directories are then checked again.
+The adapter also authenticates the exact frozen package binding, compares the full
+normalized decision, recomputes the outcome-blind boundary/calibration hashes,
+authenticates per-index
+event and terminal provenance, and joins all four terminal hashes back to each raw
+25-row outcome. Exact 14-key structural, 6-key method, and 5-key candidate gate
+schemas are enforced, as are every absolute, paired, strict-improvement, and
+not-worse predicate. Synthetic accepted fixtures test the verifier but return only
+an unpublished, non-authorizing candidate record; they are never positive evidence.
 
 This is still not an execution-ready runtime. The formal trainer objective is only
 documented in `formal_objective_delta.json`, scientific adapters and durable
@@ -205,9 +220,9 @@ uses only controller reads and `sbatch --test-only` and must prove zero matching
    contents; apply the shared objective/config authorization; seal all-ten
    outcome-blind audits/contracts; finish the held-out seed census and feasibility;
    and implement the scientific adapters.
-2. After Launch8 reporter/gate source freezes, implement and independently audit the
-   exact versioned semantic adapter. Only after an immutable quartet is accepted may
-   it publish the real future-positive binding.
+2. Independently audit the source-frozen Launch8 semantic adapter. Only after a real
+   immutable quartet is accepted may a later authorized revision publish the
+   future-positive binding; this revision deliberately leaves it unbound.
 3. Seal all-ten input/future/prefix/resolved/causal/fixed-weight-safety audits,
    complete per-setting contracts, and build a held-out seed table disjoint from
    formal monitors, Launch7, and authenticated prior consumed evaluation seeds.

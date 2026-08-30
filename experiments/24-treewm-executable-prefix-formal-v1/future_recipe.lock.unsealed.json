@@ -1,0 +1,7 @@
+{
+  "artifact_sha256": null,
+  "audit_id": "treewm_exp24_future_recipe_authority_v1",
+  "reason": "UNSEALED: no sealed input-contract authority exists and a complete stable read of all composite, child, calibration, and records bytes has not yet been executed",
+  "schema_version": 1,
+  "status": "unsealed"
+}

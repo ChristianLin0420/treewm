@@ -1,0 +1,7 @@
+{
+  "artifact_sha256": null,
+  "audit_id": "treewm_exp24_prefix_target_authority_v1",
+  "reason": "UNSEALED: no sealed future-recipe authority exists and the exact all-ten 51,200-anchor derivation has not yet been executed",
+  "schema_version": 1,
+  "status": "unsealed"
+}

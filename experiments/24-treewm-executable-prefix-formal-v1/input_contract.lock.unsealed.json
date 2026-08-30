@@ -1,0 +1,7 @@
+{
+  "artifact_sha256": null,
+  "audit_id": "treewm_exp24_input_contract_authority_v1",
+  "reason": "UNSEALED: a complete stable read of every all-ten source NPZ and cache NPY byte plus content-equivalence verification has not yet been executed",
+  "schema_version": 1,
+  "status": "unsealed"
+}

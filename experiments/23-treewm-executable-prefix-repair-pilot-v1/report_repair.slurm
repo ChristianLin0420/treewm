@@ -13,18 +13,18 @@
 set -Eeuo pipefail
 umask 077
 
-if [[ "$#" -ne 8 ]]; then
-    echo "report_repair.slurm requires snapshot_root submission_root submission_sha256 attempt source_root report_program report_sha256 report_size" >&2
+if [[ "$#" -ne 7 ]]; then
+    echo "report repair archive requires snapshot_root submission_root submission_sha256 attempt source_archive source_archive_sha256 source_archive_size" >&2
     exit 2
 fi
 SNAPSHOT_ROOT="$1"
 SUBMISSION_ROOT="$2"
 SUBMISSION_SHA256="$3"
 ATTEMPT="$4"
-SOURCE_ROOT="$5"
-REPORT_PROGRAM="$6"
-EXPECTED_REPORT_SHA256="$7"
-EXPECTED_REPORT_SIZE="$8"
+SOURCE_ARCHIVE="$5"
+EXPECTED_ARCHIVE_SHA256="$6"
+EXPECTED_ARCHIVE_SIZE="$7"
+SPOOL_ARCHIVE="${BASH_SOURCE[0]}"
 PYTHON_EXECUTABLE="/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/chrislin/envs/treewm-formal-py311/bin/python"
 
 [[ -n "${SLURM_JOB_ID+x}" && "$SLURM_JOB_ID" =~ ^[1-9][0-9]*$ ]] || {
@@ -35,41 +35,32 @@ PYTHON_EXECUTABLE="/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-
     echo "repair publication cannot run as an array task" >&2
     exit 2
 }
-[[ -n "${SLURM_RESTART_COUNT+x}" && "$SLURM_RESTART_COUNT" == "0" ]] || {
+[[ -z "${SLURM_RESTART_COUNT+x}" || "$SLURM_RESTART_COUNT" == "0" ]] || {
     echo "repair publication cannot be requeued" >&2
     exit 2
 }
-[[ "$SUBMISSION_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "repair publication submission hash is malformed" >&2
+[[ "$SUBMISSION_SHA256" =~ ^[0-9a-f]{64}$ && "$ATTEMPT" == "2" ]] || {
+    echo "repair publication identity is malformed" >&2
     exit 2
 }
-[[ "$ATTEMPT" == "1" ]] || {
-    echo "only report repair attempt 1 is authorized" >&2
+[[ "$SOURCE_ARCHIVE" == "$SUBMISSION_ROOT/REPORT_REPAIR_0002_SOURCE_ARCHIVE.bin" ]] || {
+    echo "sealed repair source archive path differs" >&2
     exit 2
 }
-[[ "$SOURCE_ROOT" == "$SUBMISSION_ROOT/report-repair/attempt-0001/source" && "$REPORT_PROGRAM" == "$SOURCE_ROOT/report.py" ]] || {
-    echo "sealed repair publisher path differs" >&2
-    exit 2
-}
-[[ "$EXPECTED_REPORT_SHA256" =~ ^[0-9a-f]{64}$ && "$EXPECTED_REPORT_SIZE" =~ ^[1-9][0-9]*$ ]] || {
-    echo "sealed repair publisher inventory is malformed" >&2
+[[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ && "$EXPECTED_ARCHIVE_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+    echo "sealed repair source archive inventory is malformed" >&2
     exit 2
 }
 [[ -d "$SNAPSHOT_ROOT" && ! -L "$SNAPSHOT_ROOT" && -d "$SUBMISSION_ROOT" && ! -L "$SUBMISSION_ROOT" ]] || {
     echo "repair snapshot/submission root is unavailable or symlinked" >&2
     exit 2
 }
-[[ -f "$REPORT_PROGRAM" && ! -L "$REPORT_PROGRAM" && -x "$PYTHON_EXECUTABLE" ]] || {
-    echo "sealed repair publisher/Python is unavailable" >&2
+[[ -f "$SPOOL_ARCHIVE" && ! -L "$SPOOL_ARCHIVE" && -x "$PYTHON_EXECUTABLE" ]] || {
+    echo "spooled repair source archive/Python is unavailable" >&2
     exit 2
 }
 
-# The controller seals RELEASED only after the held job is authorized and the
-# release call returns.  report.py performs the bounded monotonic wait because
-# the batch process can start in the narrow interval between those events.  Its
-# three-hour evidence budget is bound by the authorization and leaves one hour
-# of this four-hour allocation for deterministic assembly and publication.
-AUTHORIZATION="$SUBMISSION_ROOT/journal/REPORT_REPAIR_0001_AUTHORIZED.json"
+AUTHORIZATION="$SUBMISSION_ROOT/REPORT_REPAIR_0002_AUTHORIZED.json"
 [[ -f "$AUTHORIZATION" && ! -L "$AUTHORIZATION" ]] || {
     echo "repair authorization is unavailable" >&2
     exit 2
@@ -89,64 +80,131 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 cd "$SNAPSHOT_ROOT"
-# The inline bootstrap opens report.py relative to a no-follow directory FD,
-# hashes and reads that same FD, and executes the verified bytes.  This avoids
-# importing through a path that could change after the controller sealed its
-# source inventory and submitted the spool copy of this batch script.
 exec "$PYTHON_EXECUTABLE" -I -S -B -c '
-import hashlib, os, stat, sys
-report_path, expected_sha, expected_size_text = sys.argv[1:4]
+import base64, hashlib, json, os, stat, sys
+
+archive_path, expected_sha, expected_size_text, canonical_archive_path = sys.argv[1:5]
 expected_size = int(expected_size_text)
-source_root = os.path.dirname(report_path)
-root_fd = os.open(
-    source_root,
-    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+if not 0 < expected_size <= 8 * 1024 * 1024:
+    raise SystemExit("sealed repair source archive size is out of bounds")
+marker = b"__TREEWM_EXP23_SOURCE_ARCHIVE_V2_PAYLOAD__\n"
+end = b"\n__TREEWM_EXP23_SOURCE_ARCHIVE_V2_END__\n"
+archive_fd = os.open(
+    archive_path,
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
 )
-try:
-    root_info = os.fstat(root_fd)
-    if not (
-        stat.S_ISDIR(root_info.st_mode)
-        and stat.S_IMODE(root_info.st_mode) == 0o555
-        and root_info.st_uid == os.getuid()
-    ):
-        raise SystemExit("sealed repair source root identity differs")
-    report_fd = os.open(
-        "report.py",
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        dir_fd=root_fd,
-    )
-    try:
-        before = os.fstat(report_fd)
-        payload = bytearray()
-        while len(payload) <= expected_size:
-            chunk = os.read(report_fd, min(1024 * 1024, expected_size + 1 - len(payload)))
-            if not chunk:
-                break
-            payload.extend(chunk)
-        after = os.fstat(report_fd)
-    finally:
-        os.close(report_fd)
-finally:
-    os.close(root_fd)
+before = os.fstat(archive_fd)
+payload = bytearray()
+while len(payload) <= expected_size:
+    chunk = os.read(archive_fd, min(1024 * 1024, expected_size + 1 - len(payload)))
+    if not chunk:
+        break
+    payload.extend(chunk)
+after = os.fstat(archive_fd)
+raw = bytes(payload)
 if not (
     stat.S_ISREG(before.st_mode)
-    and stat.S_IMODE(before.st_mode) == 0o444
-    and before.st_uid == os.getuid()
-    and before.st_nlink == 1
     and before.st_size == expected_size
     and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    and len(payload) == expected_size
-    and hashlib.sha256(payload).hexdigest() == expected_sha
+    and len(raw) == expected_size
+    and hashlib.sha256(raw).hexdigest() == expected_sha
+    and raw.count(marker) == 1
+    and raw.endswith(end)
 ):
-    raise SystemExit("sealed repair publisher identity/hash differs")
-sys.argv = [report_path, *sys.argv[4:]]
-namespace = {"__name__": "__main__", "__file__": report_path, "__package__": None}
-exec(compile(bytes(payload), report_path, "exec"), namespace, namespace)
-' "$REPORT_PROGRAM" "$EXPECTED_REPORT_SHA256" "$EXPECTED_REPORT_SIZE" \
+    raise SystemExit("sealed repair source archive identity/hash differs")
+prefix, encoded_tail = raw.split(marker, 1)
+prefix += marker
+body = encoded_tail[:-len(end)]
+try:
+    value = json.loads(body.decode("ascii"))
+except Exception as exc:
+    raise SystemExit(f"sealed repair source archive JSON differs: {exc}")
+canonical = json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+).encode("ascii")
+if not (
+    canonical == body
+    and isinstance(value, dict)
+    and set(value) == {"archive_kind", "schema_version", "authority", "files"}
+    and value.get("archive_kind") == "treewm_exp23_report_repair_source"
+    and type(value.get("schema_version")) is int
+    and value.get("schema_version") == 2
+    and isinstance(value.get("authority"), dict)
+    and isinstance(value.get("files"), dict)
+    and set(value["files"])
+        == {"protocol.sha256", "report.py", "report_repair.py", "report_repair.slurm"}
+):
+    raise SystemExit("sealed repair source archive envelope differs")
+decoded = {}
+projection = {}
+for name in sorted(value["files"]):
+    row = value["files"][name]
+    if not (
+        isinstance(row, dict)
+        and set(row) == {"data_base64", "mode", "sha256", "size"}
+        and row.get("mode") == 0o444
+        and type(row.get("size")) is int
+        and row["size"] >= 0
+        and isinstance(row.get("sha256"), str)
+        and isinstance(row.get("data_base64"), str)
+    ):
+        raise SystemExit(f"sealed repair source row differs: {name}")
+    try:
+        item = base64.b64decode(row["data_base64"], validate=True)
+    except Exception as exc:
+        raise SystemExit(f"sealed repair source base64 differs: {name}: {exc}")
+    if len(item) != row["size"] or hashlib.sha256(item).hexdigest() != row["sha256"]:
+        raise SystemExit(f"sealed repair source bytes differ: {name}")
+    decoded[name] = item
+    projection[name] = {"mode": 0o444, "sha256": row["sha256"], "size": row["size"]}
+authority = value["authority"]
+authority_projection = json.dumps(
+    projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+).encode("ascii")
+if not (
+    set(authority)
+    == {
+        "repair_package_protocol_sha256",
+        "repair_source_commit",
+        "repair_source_files",
+        "repair_source_files_sha256",
+        "repair_source_installation_method",
+        "schema_version",
+    }
+    and authority.get("schema_version") == 2
+    and authority.get("repair_source_installation_method")
+        == "direct_final_source_archive_o_excl"
+    and authority.get("repair_source_files") == projection
+    and authority.get("repair_source_files_sha256")
+        == hashlib.sha256(authority_projection).hexdigest()
+    and decoded["report_repair.slurm"] == prefix
+    and decoded["protocol.sha256"]
+        == (authority["repair_package_protocol_sha256"] + "\n").encode("ascii")
+):
+    raise SystemExit("sealed repair source authority differs")
+report_bytes = decoded["report.py"]
+synthetic_file = canonical_archive_path + "::report.py"
+sys.argv = [synthetic_file, *sys.argv[5:]]
+namespace = {
+    "__name__": "__main__",
+    "__file__": synthetic_file,
+    "__package__": None,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_FD__": archive_fd,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_PATH__": canonical_archive_path,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_EXECUTION_PATH__": archive_path,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_SHA256__": expected_sha,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_SIZE__": expected_size,
+    "__EXP23_REPAIR_SOURCE_ARCHIVE_VALUE__": value,
+}
+exec(compile(report_bytes, synthetic_file, "exec"), namespace, namespace)
+' "$SPOOL_ARCHIVE" "$EXPECTED_ARCHIVE_SHA256" "$EXPECTED_ARCHIVE_SIZE" "$SOURCE_ARCHIVE" \
     --publish-repair \
     --snapshot-root "$SNAPSHOT_ROOT" \
     --submission-root "$SUBMISSION_ROOT" \
     --submission-sha256 "$SUBMISSION_SHA256" \
     --repair-attempt "$ATTEMPT" \
     --repair-authorization-sha256 "$AUTHORIZATION_SHA256"
+exit 2
+: <<'__TREEWM_EXP23_SOURCE_ARCHIVE_V2_END__'
+__TREEWM_EXP23_SOURCE_ARCHIVE_V2_PAYLOAD__

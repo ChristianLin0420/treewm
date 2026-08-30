@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "unsealed_exact_prior_assignment_collision_census",
+  "campaign_id": "treewm-executable-prefix-formal-v1-zero-prefix-calibration-v1",
+  "seeds": [244, 245],
+  "scope": "all_git_refs_and_history_plus_prelaunch_worktree_explicit_training_model_seed_assignments_excluding_this_preregistration_and_evaluation_seed_tables",
+  "repository_head": null,
+  "git_ref_inventory_sha256": null,
+  "worktree_inventory_sha256": null,
+  "reachable_history_inventory_sha256": null,
+  "prior_assignment_inventory_sha256": null,
+  "prior_assignment_matches": null,
+  "performed_before_first_calibration_run": false,
+  "scope_sha256": "d9c3cb161074a98d9a8d76a21c121361583c38d341bcc4236f471e663fa20a21",
+  "evidence_sha256": null,
+  "census_sha256": null
+}

@@ -11,7 +11,7 @@
     "interpreter_provenance_state": "implemented_binary_pyvenv_and_path_capture_environment_content_closure_unbound",
     "held_root_activation_state": "implemented_receipt_authorize_release_observe_recover",
     "launch7_terminal_negative_binding_state": "sealed_authenticated_terminal_negative_no_reuse",
-    "engineering_pilot_adapter_state": "fail_closed_interface_launch8_semantic_adapter_unsealed",
+    "engineering_pilot_adapter_state": "sealed_versioned_adapter",
     "accepted_engineering_pilot_binding_state": "unbound",
     "formal_submission_allowed": false,
     "execution_readiness_ready": false
@@ -430,7 +430,7 @@
     "binding_file": "accepted_engineering_pilot.binding.json",
     "binding_state": "unbound",
     "adapter_file": "engineering_pilot_binder.py",
-    "adapter_state": "unsealed_pending_frozen_launch8_reporter_gate_protocol",
+    "adapter_state": "sealed_versioned_adapter",
     "launch7_positive_authority_forbidden": true,
     "mandatory_submission_contract_dependency": true,
     "formal_submission_allowed": false,
@@ -489,7 +489,7 @@
       "formal_contract_sha256"
     ],
     "per_setting_contract_canonical_body_policy": "formal_contract_sha256_hashes_the_exact_no_extra_field_body_and_cross_binds_each_per_setting_row_to_all_six_authenticated_all_ten_audit_roots",
-    "binding_policy": "No future positive report may be opened until its reporter/gate protocol freezes and the exact versioned adapter is independently audited. The eventual adapter must bind the immutable accepted report commit, decision, raw bundle, provenance, protocol, source, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate."
+    "binding_policy": "The source-frozen versioned adapter may read only an explicitly selected immutable Launch8 quartet and its sealed submission snapshot. Verification returns an unpublished candidate only; the checked-in positive binding and formal submission remain unbound until real accepted outputs are independently authenticated. The adapter binds the report commit, decision, raw bundle, provenance, protocol, full verifier source closure, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate."
   },
   "required_exp23_hardening_port": {
     "source_package": "experiments/23-treewm-executable-prefix-repair-pilot-v1",
@@ -620,9 +620,9 @@
     },
     {
       "id": "m2f_launch8_versioned_adapter",
-      "status": "blocked",
+      "status": "complete",
       "depends_on": ["m0_geometry_and_global_recipe"],
-      "blocked_by": "Launch8 reporter/gate source has not frozen, so an exact versioned semantic adapter cannot yet be sealed; acceptance outcomes are not required to build it after source freeze."
+      "completed_by": "The exact Launch8 source at 33122e15, protocol 2c0231b6, 147-file verifier dependency closure, immutable quartet schemas, raw telemetry-to-decision replay, provenance joins, and every acceptance predicate are sealed in the read-only adapter. Real positive binding remains a separate outcome-dependent milestone."
     },
     {
       "id": "m3_launch8_positive_binding",

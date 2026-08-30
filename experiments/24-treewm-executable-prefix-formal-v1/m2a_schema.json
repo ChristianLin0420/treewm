@@ -59,14 +59,14 @@
     {
       "id": "engineering_pilot_adapter_interface",
       "depends_on": [],
-      "hash_fields": ["adapter_file_sha256", "adapter_runtime_file_sha256", "adapter_description_sha256"],
-      "authority": "package_owned_fail_closed_interface_launch8_semantic_adapter_unsealed"
+      "hash_fields": ["adapter_file_sha256", "adapter_runtime_file_sha256", "adapter_description_sha256", "frozen_source_inventory_sha256"],
+      "authority": "package_owned_sealed_versioned_launch8_33122e15_semantic_adapter_real_binding_unbound"
     },
     {
       "id": "future_engineering_pilot_report_commit",
       "depends_on": [],
       "hash_fields": ["report_commit_file_sha256"],
-      "authority": "future_external_leaf_exact_schema_unavailable_until_launch8_protocol_freezes"
+      "authority": "future_external_leaf_exact_launch8_quartet_schema_frozen_outputs_unavailable"
     },
     {
       "id": "accepted_engineering_pilot_binding",
@@ -204,6 +204,13 @@
       "adapter_state",
       "binding_state",
       "implementation_dependency_files",
+      "frozen_source_commit",
+      "frozen_package_relative",
+      "frozen_protocol_sha256",
+      "frozen_source_inventory_sha256",
+      "frozen_source_file_count",
+      "frozen_entrypoint_sha256",
+      "frozen_package_binding",
       "semantic_adapter_implemented",
       "requirements",
       "persistent_writes_performed",
@@ -216,7 +223,11 @@
       "adapter_description_sha256",
       "adapter_state",
       "expected_campaign_id",
-      "forbidden_positive_campaign_id"
+      "forbidden_positive_campaign_id",
+      "frozen_source_commit",
+      "frozen_protocol_sha256",
+      "frozen_source_inventory_sha256",
+      "frozen_source_file_count"
     ],
     "root_release_authorization": [
       "schema_version",
@@ -266,7 +277,7 @@
     "workers_require_pre_release_authorization_not_post_release_result": true,
     "launch7_terminal_negative_binding_is_mandatory_and_authenticated": true,
     "launch7_can_never_be_positive_authority": true,
-    "future_launch8_positive_adapter_is_unsealed": true,
+    "launch8_positive_adapter_is_sealed_to_33122e15": true,
     "accepted_engineering_pilot_binding_is_unbound": true,
     "interpreter_environment_content_closure_is_unbound": true,
     "same_stage_requeue_mutation_is_disabled": true,

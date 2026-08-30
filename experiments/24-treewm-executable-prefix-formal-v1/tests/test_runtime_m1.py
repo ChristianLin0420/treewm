@@ -2246,11 +2246,11 @@ def test_post_release_result_delay_does_not_block_emergency_cancellation(
     assert (submission_root / "ROOT_ACTIVATION_RESULT.json").is_file()
 
 
-def test_future_engineering_pilot_adapter_is_fail_closed_before_path_access(tmp_path: Path) -> None:
+def test_engineering_pilot_adapter_rejects_invalid_identity_before_path_access(tmp_path: Path) -> None:
     missing = tmp_path / "must-not-be-opened"
     with pytest.raises(
         engineering_pilot_binder.EngineeringPilotBindingError,
-        match="adapter is not sealed",
+        match="report/submission root identity differs",
     ):
         engineering_pilot_binder.verify_engineering_pilot_report_quartet(
             missing,
@@ -2270,16 +2270,23 @@ def test_engineering_pilot_adapter_description_forbids_launch7_positive_authorit
     assert description["forbidden_positive_campaign_id"] == (
         "treewm-executable-prefix-repair-pilot-v1-launch7"
     )
-    assert description["adapter_state"].startswith("unsealed_")
+    assert description["adapter_state"] == "sealed_versioned_adapter"
     assert description["binding_state"] == "unbound"
     assert description["implementation_dependency_files"] == [
         str(runtime.PACKAGE_RELATIVE / "engineering_pilot_binder.py"),
         str(runtime.PACKAGE_RELATIVE / "runtime.py"),
     ]
-    assert description["semantic_adapter_implemented"] is False
+    assert description["frozen_source_commit"] == runtime.FROZEN_LAUNCH8_SOURCE_COMMIT
+    assert description["frozen_protocol_sha256"] == runtime.FROZEN_LAUNCH8_PROTOCOL_SHA256
+    assert description["frozen_source_inventory_sha256"] == (
+        runtime.FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256
+    )
+    assert description["frozen_source_file_count"] == 147
+    assert description["frozen_package_binding"] == runtime.FROZEN_LAUNCH8_PACKAGE_BINDING
+    assert description["semantic_adapter_implemented"] is True
     assert description["persistent_writes_performed"] is False
     assert description["real_report_opened"] is False
-    assert len(description["requirements"]) == 10
+    assert len(description["requirements"]) == 11
 
 
 def test_positive_placeholder_and_authenticated_launch7_negative_are_distinct() -> None:

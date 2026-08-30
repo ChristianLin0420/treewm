@@ -157,13 +157,13 @@ M2A_ARTIFACT_METADATA = {
     "engineering_pilot_adapter_interface": {
         "hash_fields": [
             "adapter_file_sha256", "adapter_runtime_file_sha256",
-            "adapter_description_sha256",
+            "adapter_description_sha256", "frozen_source_inventory_sha256",
         ],
-        "authority": "package_owned_fail_closed_interface_launch8_semantic_adapter_unsealed",
+        "authority": "package_owned_sealed_versioned_launch8_33122e15_semantic_adapter_real_binding_unbound",
     },
     "future_engineering_pilot_report_commit": {
         "hash_fields": ["report_commit_file_sha256"],
-        "authority": "future_external_leaf_exact_schema_unavailable_until_launch8_protocol_freezes",
+        "authority": "future_external_leaf_exact_launch8_quartet_schema_frozen_outputs_unavailable",
     },
     "accepted_engineering_pilot_binding": {
         "hash_fields": ["binding_sha256"],
@@ -636,6 +636,10 @@ def validate_m2a_schema(value: Mapping[str, Any]) -> None:
             "schema_version", "status", "expected_campaign_id",
             "forbidden_positive_campaign_id", "required_status", "adapter_state",
             "binding_state", "implementation_dependency_files",
+            "frozen_source_commit", "frozen_package_relative",
+            "frozen_protocol_sha256", "frozen_source_inventory_sha256",
+            "frozen_source_file_count", "frozen_entrypoint_sha256",
+            "frozen_package_binding",
             "semantic_adapter_implemented", "requirements", "persistent_writes_performed",
             "real_report_opened",
         ],
@@ -643,7 +647,9 @@ def validate_m2a_schema(value: Mapping[str, Any]) -> None:
             "relative_path", "adapter_file_sha256",
             "adapter_runtime_file_sha256", "adapter_description_sha256",
             "adapter_state", "expected_campaign_id",
-            "forbidden_positive_campaign_id",
+            "forbidden_positive_campaign_id", "frozen_source_commit",
+            "frozen_protocol_sha256", "frozen_source_inventory_sha256",
+            "frozen_source_file_count",
         ],
         "root_release_authorization": [
             "schema_version", "status", "campaign_id", "submission_root",
@@ -675,7 +681,7 @@ def validate_m2a_schema(value: Mapping[str, Any]) -> None:
             "workers_require_pre_release_authorization_not_post_release_result": True,
             "launch7_terminal_negative_binding_is_mandatory_and_authenticated": True,
             "launch7_can_never_be_positive_authority": True,
-            "future_launch8_positive_adapter_is_unsealed": True,
+            "launch8_positive_adapter_is_sealed_to_33122e15": True,
             "accepted_engineering_pilot_binding_is_unbound": True,
             "interpreter_environment_content_closure_is_unbound": True,
             "same_stage_requeue_mutation_is_disabled": True,
@@ -718,7 +724,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             "interpreter_provenance_state": "implemented_binary_pyvenv_and_path_capture_environment_content_closure_unbound",
             "held_root_activation_state": "implemented_receipt_authorize_release_observe_recover",
             "launch7_terminal_negative_binding_state": "sealed_authenticated_terminal_negative_no_reuse",
-            "engineering_pilot_adapter_state": "fail_closed_interface_launch8_semantic_adapter_unsealed",
+            "engineering_pilot_adapter_state": "sealed_versioned_adapter",
             "accepted_engineering_pilot_binding_state": "unbound",
             "formal_submission_allowed": False,
             "execution_readiness_ready": False,
@@ -1216,7 +1222,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     require(dependency.get("adapter_file") == "engineering_pilot_binder.py", "future accepted-pilot adapter filename differs")
     require(
         dependency.get("adapter_state")
-        == "unsealed_pending_frozen_launch8_reporter_gate_protocol",
+        == "sealed_versioned_adapter",
         "future accepted-pilot adapter state differs",
     )
     require(dependency.get("launch7_positive_authority_forbidden") is True, "Launch7 became positive authority")
@@ -1283,7 +1289,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     )
     require(
         dependency.get("binding_policy")
-        == "No future positive report may be opened until its reporter/gate protocol freezes and the exact versioned adapter is independently audited. The eventual adapter must bind the immutable accepted report commit, decision, raw bundle, provenance, protocol, source, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate.",
+        == "The source-frozen versioned adapter may read only an explicitly selected immutable Launch8 quartet and its sealed submission snapshot. Verification returns an unpublished candidate only; the checked-in positive binding and formal submission remain unbound until real accepted outputs are independently authenticated. The adapter binds the report commit, decision, raw bundle, provenance, protocol, full verifier source closure, trainer, per-cell raw-scalar derivation, terminal artifacts, and every recomputed acceptance predicate.",
         "future accepted-pilot evidence/read boundary differs",
     )
 
@@ -1447,8 +1453,13 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "design/Launch7-negative milestones are not complete",
     )
     require(
-        all(row.get("status") == "blocked" for row in milestones[2:]),
-        "a downstream milestone is prematurely open",
+        milestones[7].get("status") == "complete"
+        and all(
+            row.get("status") == "blocked"
+            for index, row in enumerate(milestones[2:], start=2)
+            if index != 7
+        ),
+        "adapter/downstream milestone states differ",
     )
     for outcome_blind_id in (
         "m2a_runtime_and_interpreter",
@@ -1594,7 +1605,7 @@ def prerequisite_binding_status(
         "status": "launch7_negative_authenticated_launch8_positive_unbound",
         "reason": (
             "formal execution blocked: Launch7 terminal-negative/no-reuse evidence is "
-            "authenticated, but the Launch8 semantic adapter is unsealed and no accepted "
+            "authenticated and the Launch8 semantic adapter is sealed, but no accepted "
             "future pilot binding exists"
         ),
         "launch7_negative_binding_file_sha256": negative_digest,
@@ -1629,7 +1640,7 @@ def preflight_report(manifest: Mapping[str, Any]) -> dict[str, Any]:
     evaluations = expand_final_evaluations(manifest)
     dag = scheduler_dag(manifest)
     blockers = [
-        "Launch8 reporter/gate protocol and versioned positive semantic adapter are unsealed",
+        "Launch8 versioned semantic adapter is sealed but the independently authenticated real positive binding is absent",
         "future accepted_engineering_pilot binding is absent",
         "interpreter environment-content closure is unbound",
         "same-stage requeue mutation is hard-disabled pending scientific identity and an idempotent scheduler transaction",

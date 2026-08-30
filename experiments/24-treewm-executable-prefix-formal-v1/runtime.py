@@ -49,7 +49,69 @@ SCHEDULER_CLIENT_TIMEOUT_SECONDS = 30
 PRE_RECEIPT_TRANSACTION_BUDGET_SECONDS = 600
 EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch8"
 FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID = "treewm-executable-prefix-repair-pilot-v1-launch7"
-ENGINEERING_PILOT_ADAPTER_STATE = "unsealed_pending_frozen_launch8_reporter_gate_protocol"
+ENGINEERING_PILOT_ADAPTER_STATE = "sealed_versioned_adapter"
+FROZEN_LAUNCH8_SOURCE_COMMIT = "33122e15d0aaf3661893a4c853fd5ac49173c685"
+FROZEN_LAUNCH8_PACKAGE_RELATIVE = Path(
+    "experiments/23-treewm-executable-prefix-repair-pilot-v1"
+)
+FROZEN_LAUNCH8_PROTOCOL_SHA256 = (
+    "2c0231b61197fe67790432c78a896272a55c3497a777d490598b53a6be67342f"
+)
+FROZEN_LAUNCH8_VERIFIER_SOURCE_FILE_COUNT = 147
+FROZEN_LAUNCH8_TRAINER_SOURCE_FILE_COUNT = 114
+FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256 = (
+    "9bff89010f792d1aed8b3b691567655daab8f83135d6421798b5efea29a2f2c5"
+)
+FROZEN_LAUNCH8_ENTRYPOINT_SHA256 = {
+    "campaign.py": "9df19ac344d5bab82557633c8c679c5664f80ddeed03204ebd203b1a307dec99",
+    "gate.py": "15b7afaa7b0bb83dac067f15284ef56786134ba6aeedf5e9474bc45b32b49189",
+    "report.py": "510b7178f0cfdc7ba62d837dcf64bb20001f3b1828aed286829603742df63057",
+    "manifest.json": "c0365b1bb44f36f128fbe969e66b83a929ba40bf653b311c02b2c79f9caf9c95",
+    "protocol.sha256": "b12cd1db90dc81be419407eb28e75bbf4e76d5507cff743a84390c3f5e174767",
+}
+FROZEN_LAUNCH8_PACKAGE_BINDING = {
+    "package_protocol_sha256": FROZEN_LAUNCH8_PROTOCOL_SHA256,
+    "manifest_sha256": "bc8ec56aa0ac4d786be6d059a334ed506055732b897d1fee34b054d8c67cd9ec",
+    "trainer_code_fingerprint": "a547375cb37e9daa431a56ba72cbd6e993a9fb89a8c00aa03ec400bade448a59",
+    "weight_audit_artifact_sha256": "34f6aa6cc8a8bfe6aeca4fd716d0497d778464e1d6f308fdd25d462b101f5fcc",
+    "prefix_target_artifact_sha256": "256cf920458c75455910906f6aa3d13b2dcae143b27adab337840dd655afbb48",
+    "resolved_config_artifact_sha256": "ff3e11ddac225d6acfb570c532830d103d8a917c78e4d4f072758b995b7216f4",
+    "causal_parity_artifact_sha256": "f74d2cf9c9f07f01c58979825c8bd8cdc358027d26bcd16e98c1985af404a4b1",
+}
+FROZEN_LAUNCH8_PROTOCOL_FILES = (
+    "manifest.json",
+    "campaign.py",
+    "gate.py",
+    "weight_audit.py",
+    "weight_audit.lock.json",
+    "prefix_target_audit.py",
+    "prefix_target.lock.json",
+    "resolved_config_audit.py",
+    "resolved_config.lock.json",
+    "causal_parity_audit.py",
+    "causal_parity.lock.json",
+    "train_entry.py",
+    "worker.py",
+    "train.slurm",
+    "submit.py",
+    "cancel.py",
+    "report.py",
+    "report.slurm",
+    "dag_evidence.py",
+    "two_wave_canary.py",
+    "canary_worker.py",
+    "canary_gpu.slurm",
+    "canary_report.slurm",
+    "canary1_negative_provenance.json",
+    "canary2_acceptance_provenance.json",
+    "launch7_negative_provenance.json",
+    "README.md",
+    "tests/test_campaign.py",
+    "tests/test_gate.py",
+    "tests/test_lifecycle.py",
+    "tests/test_orchestration.py",
+    "tests/test_two_wave_canary.py",
+)
 ENGINEERING_PILOT_ADAPTER_REQUIREMENTS = (
     "exact immutable report quartet schemas, ownership, modes, inventory, and cross-hashes",
     "exact independently anchored campaign, submission, package, and reporter/gate protocol identities",
@@ -60,6 +122,7 @@ ENGINEERING_PILOT_ADAPTER_REQUIREMENTS = (
     "exact outcome-blind boundary-evaluation and paired-calibration provenance hashes",
     "recomputed per-seed, per-setting, macro, paired, strict, and not-worse acceptance predicates",
     "authenticated report/cancel serialization and terminal non-canceled submission state",
+    "retained no-follow fd trust chain and procfd replay over the exact closed 33122e15 source/report trees and full verifier closure",
     "independent audit of positive adapter bytes before any binding publication",
 )
 CONTROL_ENVIRONMENT = {
@@ -230,12 +293,95 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def launch8_verifier_dependency_relatives(repo_root: Path) -> tuple[Path, ...]:
+    """Return the exact frozen Launch8 semantic-verifier dependency closure.
+
+    The protocol inventory is explicit in the frozen Exp23 campaign.  Its campaign
+    validator additionally hashes every trainer Python/config source, so those files
+    are part of the adapter's executable dependency closure rather than merely
+    descriptive provenance.
+    """
+
+    root = repo_root.absolute()
+    trainer = {
+        Path("scripts/__init__.py"),
+        Path("scripts/train.py"),
+        Path("configs/__init__.py"),
+        *(path.relative_to(root) for path in (root / "treewm").rglob("*.py")),
+        *(path.relative_to(root) for path in (root / "configs").rglob("*.yaml")),
+    }
+    require(
+        len(trainer) == FROZEN_LAUNCH8_TRAINER_SOURCE_FILE_COUNT,
+        "frozen Launch8 trainer source path coverage differs",
+    )
+    protocol = {
+        FROZEN_LAUNCH8_PACKAGE_RELATIVE / name
+        for name in FROZEN_LAUNCH8_PROTOCOL_FILES
+    }
+    closure = protocol | trainer | {
+        FROZEN_LAUNCH8_PACKAGE_RELATIVE / "protocol.sha256"
+    }
+    require(
+        len(closure) == FROZEN_LAUNCH8_VERIFIER_SOURCE_FILE_COUNT,
+        "frozen Launch8 verifier dependency path coverage differs",
+    )
+    return tuple(sorted(closure, key=str))
+
+
+def launch8_verifier_source_inventory(
+    repo_root: Path,
+    *,
+    immutable: bool = False,
+) -> dict[str, str]:
+    """Authenticate the exact frozen Launch8 source closure without using Git."""
+
+    root = repo_root.absolute()
+    inventory: dict[str, str] = {}
+    for relative in launch8_verifier_dependency_relatives(root):
+        _payload, digest, info = authenticated_regular_bytes(
+            root / relative,
+            f"frozen Launch8 verifier source {relative}",
+        )
+        if immutable:
+            require(
+                info.st_uid == os.getuid()
+                and info.st_gid == os.getgid()
+                and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) == 0o444,
+                f"frozen Launch8 verifier source is not immutable: {relative}",
+            )
+        inventory[str(relative)] = digest
+    require(
+        stable_hash(inventory)
+        == FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256,
+        "frozen Launch8 verifier source inventory differs from 33122e15",
+    )
+    for name, expected in FROZEN_LAUNCH8_ENTRYPOINT_SHA256.items():
+        require(
+            inventory[str(FROZEN_LAUNCH8_PACKAGE_RELATIVE / name)] == expected,
+            f"frozen Launch8 verifier entry point differs: {name}",
+        )
+    protocol_payload, _protocol_file_sha, _protocol_info = authenticated_regular_bytes(
+        root / FROZEN_LAUNCH8_PACKAGE_RELATIVE / "protocol.sha256",
+        "frozen Launch8 protocol lock",
+    )
+    try:
+        locked_protocol = protocol_payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise RuntimeContractError("frozen Launch8 protocol lock is not ASCII") from exc
+    require(
+        locked_protocol == FROZEN_LAUNCH8_PROTOCOL_SHA256,
+        "frozen Launch8 protocol semantic lock differs",
+    )
+    return inventory
+
+
 def engineering_pilot_adapter_description() -> dict[str, Any]:
-    """Canonical fail-closed interface description shared by runtime and CLI."""
+    """Canonical sealed-adapter/unbound-positive description shared by runtime and CLI."""
 
     return {
         "schema_version": 1,
-        "status": "adapter_interface_scaffold_fail_closed_real_binding_unbound",
+        "status": "sealed_launch8_semantic_adapter_real_binding_unbound",
         "expected_campaign_id": EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID,
         "forbidden_positive_campaign_id": FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID,
         "required_status": "accepted_engineering_pilot",
@@ -245,7 +391,16 @@ def engineering_pilot_adapter_description() -> dict[str, Any]:
             str(PACKAGE_RELATIVE / "engineering_pilot_binder.py"),
             str(PACKAGE_RELATIVE / "runtime.py"),
         ],
-        "semantic_adapter_implemented": False,
+        "frozen_source_commit": FROZEN_LAUNCH8_SOURCE_COMMIT,
+        "frozen_package_relative": str(FROZEN_LAUNCH8_PACKAGE_RELATIVE),
+        "frozen_protocol_sha256": FROZEN_LAUNCH8_PROTOCOL_SHA256,
+        "frozen_source_inventory_sha256": (
+            FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256
+        ),
+        "frozen_source_file_count": FROZEN_LAUNCH8_VERIFIER_SOURCE_FILE_COUNT,
+        "frozen_entrypoint_sha256": dict(FROZEN_LAUNCH8_ENTRYPOINT_SHA256),
+        "frozen_package_binding": dict(FROZEN_LAUNCH8_PACKAGE_BINDING),
+        "semantic_adapter_implemented": True,
         "requirements": list(ENGINEERING_PILOT_ADAPTER_REQUIREMENTS),
         "persistent_writes_performed": False,
         "real_report_opened": False,
@@ -893,26 +1048,22 @@ def m1_snapshot_inventory(repo_root: Path = REPOSITORY_ROOT) -> dict[str, str]:
 
     root = repo_root.resolve(strict=True)
     relative_paths: list[Path] = [PACKAGE_RELATIVE / name for name in PACKAGE_SNAPSHOT_FILES]
-    relative_paths.extend(
-        [
-            Path(
-                "experiments/23-treewm-executable-prefix-repair-pilot-v1/"
-                "launch7_negative_provenance.json"
-            ),
-            Path("scripts/train.py"),
-            Path("configs/__init__.py"),
-            Path("scripts/__init__.py"),
-            Path("configs/experiment/treewm_v2_grounded_executable_prefix_pilot_v1.yaml"),
-            Path("configs/experiment/treewm_v2_grounded_gauge_formal_v1.yaml"),
-        ]
+    frozen_launch8_inventory = launch8_verifier_source_inventory(root)
+    relative_paths.extend(Path(path) for path in frozen_launch8_inventory)
+    relative_paths.append(
+        Path("configs/experiment/treewm_v2_grounded_gauge_formal_v1.yaml")
     )
-    require(len(relative_paths) == len(set(relative_paths)), "M2A snapshot file list contains duplicates")
+    relative_paths = sorted(set(relative_paths), key=str)
     inventory: dict[str, str] = {}
-    for relative in sorted(relative_paths, key=str):
+    for relative in relative_paths:
         safe_relative(relative, "snapshot source path")
         payload, digest, _info = authenticated_regular_bytes(root / relative, f"snapshot source {relative}")
         require(payload is not None, f"snapshot source is unreadable: {relative}")
         inventory[str(relative)] = digest
+    require(
+        all(inventory.get(path) == digest for path, digest in frozen_launch8_inventory.items()),
+        "M2A snapshot does not bind the complete frozen Launch8 verifier closure",
+    )
     return inventory
 
 
@@ -2600,6 +2751,16 @@ def submission_contract(
             "forbidden_positive_campaign_id": adapter_description[
                 "forbidden_positive_campaign_id"
             ],
+            "frozen_source_commit": adapter_description["frozen_source_commit"],
+            "frozen_protocol_sha256": adapter_description[
+                "frozen_protocol_sha256"
+            ],
+            "frozen_source_inventory_sha256": adapter_description[
+                "frozen_source_inventory_sha256"
+            ],
+            "frozen_source_file_count": adapter_description[
+                "frozen_source_file_count"
+            ],
         },
         "accepted_engineering_pilot_binding": {
             "relative_path": positive_relative,
@@ -2777,6 +2938,14 @@ def validate_submission_contract(
         "snapshot future accepted-pilot adapter runtime dependency",
     )
     adapter_description = engineering_pilot_adapter_description()
+    frozen_launch8_inventory = launch8_verifier_source_inventory(
+        snapshot_root,
+        immutable=True,
+    )
+    require(
+        all(inventory.get(path) == digest for path, digest in frozen_launch8_inventory.items()),
+        "snapshot inventory does not bind the frozen Launch8 verifier closure",
+    )
     adapter_binding = contract.get("engineering_pilot_adapter_interface")
     require(
         adapter_info.st_uid == os.getuid()
@@ -2793,7 +2962,9 @@ def validate_submission_contract(
             "relative_path", "adapter_file_sha256",
             "adapter_runtime_file_sha256", "adapter_description_sha256",
             "adapter_state", "expected_campaign_id",
-            "forbidden_positive_campaign_id",
+            "forbidden_positive_campaign_id", "frozen_source_commit",
+            "frozen_protocol_sha256", "frozen_source_inventory_sha256",
+            "frozen_source_file_count",
         }
         and adapter_binding.get("relative_path")
         == str(PACKAGE_RELATIVE / "engineering_pilot_binder.py")
@@ -2808,7 +2979,15 @@ def validate_submission_contract(
         and adapter_binding.get("expected_campaign_id")
         == EXPECTED_ACCEPTED_PILOT_CAMPAIGN_ID
         and adapter_binding.get("forbidden_positive_campaign_id")
-        == FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID,
+        == FORBIDDEN_POSITIVE_PILOT_CAMPAIGN_ID
+        and adapter_binding.get("frozen_source_commit")
+        == FROZEN_LAUNCH8_SOURCE_COMMIT
+        and adapter_binding.get("frozen_protocol_sha256")
+        == FROZEN_LAUNCH8_PROTOCOL_SHA256
+        and adapter_binding.get("frozen_source_inventory_sha256")
+        == FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256
+        and adapter_binding.get("frozen_source_file_count")
+        == FROZEN_LAUNCH8_VERIFIER_SOURCE_FILE_COUNT,
         "submission future accepted-pilot adapter interface differs",
     )
     positive_value, positive_file_sha = authenticated_immutable_json(
@@ -5603,7 +5782,12 @@ def runtime_description(manifest: Mapping[str, Any]) -> dict[str, Any]:
             "launch7_positive_authority_forbidden": True,
             "future_launch8_adapter_state": manifest["launch_dependency"]["adapter_state"],
             "future_launch8_positive_binding_state": manifest["launch_dependency"]["binding_state"],
-            "positive_adapter_implemented": False,
+            "positive_adapter_implemented": True,
+            "frozen_source_commit": FROZEN_LAUNCH8_SOURCE_COMMIT,
+            "frozen_protocol_sha256": FROZEN_LAUNCH8_PROTOCOL_SHA256,
+            "frozen_source_inventory_sha256": (
+                FROZEN_LAUNCH8_VERIFIER_SOURCE_INVENTORY_SHA256
+            ),
         },
         "same_stage_requeue": {
             "structural_intent_record_only": True,
